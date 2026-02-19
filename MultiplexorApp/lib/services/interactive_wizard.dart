@@ -36,24 +36,29 @@ class InteractiveWizard {
           'Consumer Profile',
           'Exit',
         ];
-        final choice = await UserPrompt.menu('Main Menu', options);
+        late final int choice;
+        try {
+          choice = await UserPrompt.menu('Main Menu', options);
+        } on PromptBackNavigation {
+          return;
+        }
         final selected = options[choice];
 
         switch (selected) {
           case 'Server Control':
-            await _serverControlMenu();
+            await _runEscapableStep(_serverControlMenu);
             break;
           case 'Instance Management':
-            await _instancesMenu();
+            await _runEscapableStep(_instancesMenu);
             break;
           case 'Runtime Settings':
-            await _runtimeSettingsMenu();
+            await _runEscapableStep(_runtimeSettingsMenu);
             break;
           case 'Build and Sync':
-            await _buildAndSyncMenu();
+            await _runEscapableStep(_buildAndSyncMenu);
             break;
           case 'Consumer Profile':
-            await _switchConsumer();
+            await _runEscapableStep(_switchConsumer);
             break;
           case 'Exit':
             return;
@@ -78,14 +83,11 @@ class InteractiveWizard {
     UserPrompt.clearScreen();
 
     final activeConsumer = requestedConsumer ?? consumerService.readActive();
-    final activeInstance = await _activeInstance();
+    final activeInstance = await _activeInstanceWithPort();
     final dropins = await _dropinsSource();
     final running = await _runningServersWithPorts();
 
-    UserPrompt.banner(
-      'Minecraft Dev Wizard',
-      subtitle: 'Backend: native-dart',
-    );
+    UserPrompt.banner('Minecraft Dev Wizard', subtitle: 'Backend: native-dart');
 
     UserPrompt.row('Consumer:', activeConsumer.shortName);
     UserPrompt.row('Active instance:', activeInstance ?? 'none');
@@ -93,8 +95,18 @@ class InteractiveWizard {
       activeConsumer == ConsumerProfile.plugin ? 'Plugin jars:' : 'Mod jars:',
       dropins ?? 'unknown',
     );
-    UserPrompt.row('Running:', running.isEmpty ? 'none' : running.join(', '));
+    if (running.isNotEmpty) {
+      UserPrompt.row('Running:', running.join(', '));
+    }
     stdout.writeln('');
+  }
+
+  Future<void> _runEscapableStep(Future<void> Function() step) async {
+    try {
+      await step();
+    } on PromptBackNavigation {
+      // ESC always cancels the current step and returns to the previous page.
+    }
   }
 
   Future<void> _serverControlMenu() async {
@@ -121,28 +133,46 @@ class InteractiveWizard {
       }
       if (running.isNotEmpty) {
         options.add('Open console for running server');
+        if (running.length > 1) {
+          options.add('Open all running consoles (grid)');
+          options.add('Open all running consoles (lateral)');
+        }
         options.add('Stop one running server');
       }
       if (running.length > 1) {
         options.add('Stop all running servers');
       }
-      options.add('Back');
-
-      final choice = await UserPrompt.menu('Server Control', options);
+      if (options.isEmpty) {
+        UserPrompt.warn('No instances available. Create one first.');
+        await UserPrompt.pressEnter();
+        return;
+      }
+      late final int choice;
+      try {
+        choice = await UserPrompt.menu('Server Control', options);
+      } on PromptBackNavigation {
+        return;
+      }
 
       final selected = options[choice];
       switch (selected) {
         case 'Start one stopped instance':
-          await _startInstanceFromStopped();
+          await _runEscapableStep(_startInstanceFromStopped);
           break;
         case 'Start all stopped instances':
-          await _startAllStoppedInstances();
+          await _runEscapableStep(_startAllStoppedInstances);
           break;
         case 'Open console for running server':
-          await _openConsoleForRunningServer();
+          await _runEscapableStep(_openConsoleForRunningServer);
+          break;
+        case 'Open all running consoles (grid)':
+          await _runEscapableStep(() => _openAllRunningConsoles('grid'));
+          break;
+        case 'Open all running consoles (lateral)':
+          await _runEscapableStep(() => _openAllRunningConsoles('lateral'));
           break;
         case 'Stop one running server':
-          await _stopOneRunningServer();
+          await _runEscapableStep(_stopOneRunningServer);
           break;
         case 'Stop all running servers':
           for (final server in running) {
@@ -150,8 +180,6 @@ class InteractiveWizard {
           }
           await UserPrompt.pressEnter();
           break;
-        case 'Back':
-          return;
       }
     }
   }
@@ -263,35 +291,36 @@ class InteractiveWizard {
           options.add('Delete All Instances');
         }
       }
-      options.add('Back');
-
-      final choice = await UserPrompt.menu('Instances', options);
+      late final int choice;
+      try {
+        choice = await UserPrompt.menu('Instances', options);
+      } on PromptBackNavigation {
+        return;
+      }
       final selected = options[choice];
 
       switch (selected) {
         case 'Switch Existing Instance':
-          await _switchExistingInstance();
+          await _runEscapableStep(_switchExistingInstance);
           break;
         case 'Create From Type (cached build)':
-          await _createFromType();
+          await _runEscapableStep(_createFromType);
           break;
         case 'Set Instance Port':
-          await _setInstancePort();
+          await _runEscapableStep(_setInstancePort);
           break;
         case 'Apply Styled MOTD':
-          await _applyStyledMotdForOne();
+          await _runEscapableStep(_applyStyledMotdForOne);
           break;
         case 'Apply Styled MOTD to All':
-          await _applyStyledMotdForAll();
+          await _runEscapableStep(_applyStyledMotdForAll);
           break;
         case 'Delete One Instance':
-          await _deleteOneInstance();
+          await _runEscapableStep(_deleteOneInstance);
           break;
         case 'Delete All Instances':
-          await _deleteAllInstances();
+          await _runEscapableStep(_deleteAllInstances);
           break;
-        case 'Back':
-          return;
       }
     }
   }
@@ -623,6 +652,25 @@ class InteractiveWizard {
     await UserPrompt.pressEnter();
   }
 
+  Future<void> _openAllRunningConsoles(String layout) async {
+    final servers = await _runningServers();
+    if (servers.length < 2) {
+      UserPrompt.warn(
+        'Need at least two running servers for side-by-side view.',
+      );
+      await UserPrompt.pressEnter();
+      return;
+    }
+
+    final label = layout == 'lateral' ? 'lateral' : 'grid';
+    UserPrompt.info('Opening all running consoles in $label view...');
+    UserPrompt.info(
+      'Navigate panes with Left/Right. Scroll with mouse wheel (or Ctrl+B then [).',
+    );
+    final cmd = layout == 'lateral' ? 'consoles-lateral' : 'consoles';
+    await passthrough.run(<String>['runtime', cmd]);
+  }
+
   Future<void> _stopOneRunningServer() async {
     final servers = await _runningServers();
     if (servers.isEmpty) {
@@ -672,7 +720,8 @@ class InteractiveWizard {
   }
 
   Future<void> _openConsoleInChildProcess(String instance) async {
-    final consumer = (requestedConsumer ?? consumerService.readActive()).shortName;
+    final consumer =
+        (requestedConsumer ?? consumerService.readActive()).shortName;
     final startScript = p.join(appContext.rootDir, 'start.sh');
     final env = Map<String, String>.from(Platform.environment);
     final term = (env['TERM'] ?? '').trim().toLowerCase();
@@ -710,13 +759,18 @@ class InteractiveWizard {
       UserPrompt.info(
         'Build cache + artifact sync actions for the active consumer.',
       );
-      final choice = await UserPrompt.menu('Build & Sync', <String>[
+      final options = <String>[
         'Sync Repos (all) - pull latest upstream repos',
         'Show Build Cache - list cached built jars',
         'Sync $dropinLabel to All Valid Targets - copy dropins into every instance',
         'Show $dropinLabel Source - show dropins folder path',
-        'Back',
-      ]);
+      ];
+      late final int choice;
+      try {
+        choice = await UserPrompt.menu('Build & Sync', options);
+      } on PromptBackNavigation {
+        return;
+      }
 
       switch (choice) {
         case 0:
@@ -735,8 +789,6 @@ class InteractiveWizard {
           await passthrough.run(<String>[dropinCommand, 'show-source']);
           await UserPrompt.pressEnter();
           break;
-        case 4:
-          return;
       }
     }
   }
@@ -762,16 +814,21 @@ class InteractiveWizard {
       UserPrompt.row('JVM args:', argsPreview);
       stdout.writeln('');
 
-      final choice =
-          await UserPrompt.menu('Runtime/JVM Settings', const <String>[
-            'Set Heap Size',
-            'Set JVM Flag Profile',
-            'Reset to Recommended (4G + Aikar)',
-            'Back',
-          ]);
+      const options = <String>[
+        'Set Heap Size',
+        'Set JVM Flag Profile',
+        'Reset to Recommended (4G + Aikar)',
+      ];
+      late final int choice;
+      try {
+        choice = await UserPrompt.menu('Runtime/JVM Settings', options);
+      } on PromptBackNavigation {
+        return;
+      }
+      final selected = options[choice];
 
-      switch (choice) {
-        case 0:
+      switch (selected) {
+        case 'Set Heap Size':
           final currentHeap = (settings.heap ?? '4G').toUpperCase();
           var heapIndex = heapOptions.indexWhere(
             (candidate) => candidate.toUpperCase() == currentHeap,
@@ -792,7 +849,7 @@ class InteractiveWizard {
           ]);
           await UserPrompt.pressEnter();
           break;
-        case 1:
+        case 'Set JVM Flag Profile':
           final labels = presetLabels.keys.toList(growable: false);
           final currentProfile = (settings.profile ?? 'aikar').toLowerCase();
           var presetIndex = labels.indexWhere(
@@ -815,12 +872,10 @@ class InteractiveWizard {
           ]);
           await UserPrompt.pressEnter();
           break;
-        case 2:
+        case 'Reset to Recommended (4G + Aikar)':
           await passthrough.run(<String>['runtime', 'settings', 'reset']);
           await UserPrompt.pressEnter();
           break;
-        case 3:
-          return;
       }
     }
   }
@@ -858,6 +913,18 @@ class InteractiveWizard {
       'current',
     ]);
     return _cleanLine(line);
+  }
+
+  Future<String?> _activeInstanceWithPort() async {
+    final active = await _activeInstance();
+    if (active == null) {
+      return null;
+    }
+    final port = await _configuredInstancePort(active);
+    if (port == null) {
+      return active;
+    }
+    return '$active ($port)';
   }
 
   Future<String?> _dropinsSource() async {
@@ -901,8 +968,25 @@ class InteractiveWizard {
   }
 
   Future<String?> _instancePort(String instance) async {
+    final configured = await _configuredInstancePort(instance);
+    if (configured != null) {
+      return configured;
+    }
     final status = await _instanceRuntimeStatus(instance);
     return status.port;
+  }
+
+  Future<String?> _configuredInstancePort(String instance) async {
+    final raw = await passthrough.captureStdoutLine(<String>[
+      'instance',
+      'port',
+      instance,
+    ]);
+    final port = _cleanLine(raw);
+    if (port == null) {
+      return null;
+    }
+    return int.tryParse(port) == null ? null : port;
   }
 
   Future<_RuntimeStatus> _instanceRuntimeStatus(String instance) async {

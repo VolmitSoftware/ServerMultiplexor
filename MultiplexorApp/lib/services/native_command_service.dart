@@ -143,7 +143,9 @@ class NativeCommandService {
       case 'create':
         final name = _requireValue(rest, 'Usage: instance create <name>');
         _instanceCreateBlank(profile, name);
-        io.write('[OK] Instance created: $name');
+        io.write(
+          '[OK] Instance created: $name (port ${_instanceGetServerPort(profile, name)})',
+        );
         return 0;
       case 'clone':
         if (rest.length < 2) {
@@ -153,7 +155,9 @@ class NativeCommandService {
           );
         }
         _instanceClone(profile, rest[0], rest[1]);
-        io.write('[OK] Cloned instance: ${rest[0]} -> ${rest[1]}');
+        io.write(
+          '[OK] Cloned instance: ${rest[0]} -> ${rest[1]} (port ${_instanceGetServerPort(profile, rest[1])})',
+        );
         return 0;
       case 'delete':
         final name = _requireValue(rest, 'Usage: instance delete <name>');
@@ -269,7 +273,9 @@ class NativeCommandService {
 
     if (jar != null && jar.isNotEmpty) {
       _serverCreateFromJar(profile, name, type: type, jarPath: jar);
-      io.write('[OK] Server instance created: $name ($type)');
+      io.write(
+        '[OK] Server instance created: $name ($type, port ${_instanceGetServerPort(profile, name)})',
+      );
       return 0;
     }
 
@@ -287,7 +293,9 @@ class NativeCommandService {
     }
 
     _serverCreateFromJar(profile, name, type: type, jarPath: jarPath);
-    io.write('[OK] Server instance created: $name ($type mc=$mc)');
+    io.write(
+      '[OK] Server instance created: $name ($type mc=$mc, port ${_instanceGetServerPort(profile, name)})',
+    );
     return 0;
   }
 
@@ -302,6 +310,14 @@ class NativeCommandService {
         return 0;
       case 'console':
         await _runtimeConsole(profile, instance, io);
+        return 0;
+      case 'consoles':
+      case 'console-all':
+        await _runtimeConsoles(profile, io, layout: 'grid');
+        return 0;
+      case 'consoles-lateral':
+      case 'console-lateral':
+        await _runtimeConsoles(profile, io, layout: 'lateral');
         return 0;
       case 'stop':
         await _runtimeStop(profile, instance, io);
@@ -318,7 +334,7 @@ class NativeCommandService {
         return _dispatchRuntimeSettings(profile, args.sublist(1), io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|start|stop|status|list|settings> [instance|args]',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args]',
           2,
         );
     }
@@ -424,13 +440,19 @@ class NativeCommandService {
 
         if (all) {
           for (final instance in _instanceNames(profile)) {
-            final synced = _pluginsSyncInstance(
+            final report = _pluginsSyncInstance(
               profile,
               instance,
               clean: clean,
               sourceModsOverride: mods,
+              strict: true,
             );
-            io.write('[OK] Synced $synced jar(s) -> $instance');
+            io.write(
+              '[OK] Copied ${report.copiedJars.length} jar(s) -> $instance',
+            );
+            if (report.copiedJars.isNotEmpty) {
+              io.write('[INFO] Copied jars: ${report.copiedJars.join(', ')}');
+            }
           }
           return 0;
         }
@@ -439,13 +461,17 @@ class NativeCommandService {
         if (target == null || target.isEmpty) {
           throw _NativeCommandException('No active instance set', 2);
         }
-        final synced = _pluginsSyncInstance(
+        final report = _pluginsSyncInstance(
           profile,
           target,
           clean: clean,
           sourceModsOverride: mods,
+          strict: true,
         );
-        io.write('[OK] Synced $synced jar(s) -> $target');
+        io.write('[OK] Copied ${report.copiedJars.length} jar(s) -> $target');
+        if (report.copiedJars.isNotEmpty) {
+          io.write('[INFO] Copied jars: ${report.copiedJars.join(', ')}');
+        }
         return 0;
       case 'iris-packs-path':
         if (!_isPluginConsumer(profile)) {
@@ -813,36 +839,144 @@ class NativeCommandService {
 
       for (final instance in instances) {
         try {
-          final synced = _pluginsSyncInstance(
+          final report = _pluginsSyncInstance(
             profile,
             instance,
             clean: false,
             sourceModsOverride: mods,
+            strict: false,
           );
-          io.write('[SYNC] $instance <= $synced jar(s)');
-        } catch (e) {
+          if (report.copiedJars.isNotEmpty) {
+            io.write(
+              '[SYNC] $instance copied ${report.copiedJars.length} jar(s): ${report.copiedJars.join(', ')}',
+            );
+            await _announceDropinSync(
+              profile,
+              instance,
+              report.copiedJars.length,
+            );
+          }
+          if (report.failedJars.isNotEmpty) {
+            for (final failed in report.failedJars) {
+              io.error('[WARN] Watch sync failed for $instance: $failed');
+            }
+          }
+        } catch (e, st) {
           io.error('[WARN] Watch sync failed for $instance: $e');
+          if (context.verbose) {
+            io.error('$st');
+          }
+        }
+      }
+    }
+
+    Future<void> syncChangedJar(String sourceJarPath) async {
+      final instances = _instanceNames(profile);
+      if (instances.isEmpty) {
+        return;
+      }
+
+      for (final instance in instances) {
+        try {
+          final report = _pluginsSyncOneJarToInstance(
+            profile,
+            instance,
+            sourceJarPath,
+            strict: false,
+          );
+          if (report.copiedJars.isNotEmpty) {
+            io.write('[SYNC] $instance copied ${report.copiedJars.join(', ')}');
+            await _announceDropinSync(
+              profile,
+              instance,
+              report.copiedJars.length,
+            );
+          }
+          if (report.failedJars.isNotEmpty) {
+            for (final failed in report.failedJars) {
+              io.error('[WARN] Watch sync failed for $instance: $failed');
+            }
+          }
+        } catch (e, st) {
+          io.error('[WARN] Watch sync failed for $instance: $e');
+          if (context.verbose) {
+            io.error('$st');
+          }
         }
       }
     }
 
     await syncAll();
 
-    var syncing = false;
-    var pending = false;
-    Timer? debounce;
+    final lastSyncedFingerprintByPath = <String, String>{};
+    for (final entity in sourceDir.listSync(recursive: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final path = p.normalize(entity.path);
+      if (!path.toLowerCase().endsWith('.jar')) {
+        continue;
+      }
+      final stat = entity.statSync();
+      lastSyncedFingerprintByPath[path] =
+          '${stat.size}:${stat.modified.microsecondsSinceEpoch}';
+    }
 
-    Future<void> requestSync() async {
+    var syncing = false;
+    final pendingJarPaths = <String>{};
+    final changedJarPaths = <String>{};
+    Timer? debounce;
+    String? jarFingerprint(String path) {
+      final file = File(path);
+      if (!file.existsSync()) {
+        return null;
+      }
+      final stat = file.statSync();
+      if (stat.type != FileSystemEntityType.file) {
+        return null;
+      }
+      return '${stat.size}:${stat.modified.microsecondsSinceEpoch}';
+    }
+
+    Future<void> requestSync({Iterable<String>? jarPaths}) async {
+      if (jarPaths != null) {
+        for (final path in jarPaths) {
+          final normalized = p.normalize(path.trim());
+          if (normalized.isEmpty) {
+            continue;
+          }
+          pendingJarPaths.add(normalized);
+        }
+      }
       if (syncing) {
-        pending = true;
         return;
       }
+
       syncing = true;
-      do {
-        pending = false;
-        await syncAll();
-      } while (pending);
-      syncing = false;
+      try {
+        while (pendingJarPaths.isNotEmpty) {
+          final jarBatch = pendingJarPaths.toList(growable: false);
+          pendingJarPaths.clear();
+
+          for (final path in jarBatch) {
+            final currentFingerprint = jarFingerprint(path);
+            if (currentFingerprint == null) {
+              continue;
+            }
+            final previousFingerprint = lastSyncedFingerprintByPath[path];
+            if (previousFingerprint == currentFingerprint) {
+              continue;
+            }
+            await syncChangedJar(path);
+            final afterFingerprint = jarFingerprint(path);
+            if (afterFingerprint != null) {
+              lastSyncedFingerprintByPath[path] = afterFingerprint;
+            }
+          }
+        }
+      } finally {
+        syncing = false;
+      }
     }
 
     final stop = Completer<void>();
@@ -853,13 +987,22 @@ class NativeCommandService {
     }
 
     final watchSub = sourceDir.watch(recursive: false).listen((event) {
-      final path = event.path.toLowerCase();
-      if (!path.endsWith('.jar')) {
+      if (event.isDirectory) {
         return;
       }
+      final path = p.normalize(event.path);
+      if (!path.toLowerCase().endsWith('.jar')) {
+        return;
+      }
+      if (event.type == FileSystemEvent.delete) {
+        return;
+      }
+      changedJarPaths.add(path);
       debounce?.cancel();
       debounce = Timer(const Duration(milliseconds: 350), () {
-        unawaited(requestSync());
+        final batch = changedJarPaths.toList(growable: false);
+        changedJarPaths.clear();
+        unawaited(requestSync(jarPaths: batch));
       });
     });
 
@@ -903,12 +1046,9 @@ class NativeCommandService {
     final spigotMc = options['spigot-mc']?.trim();
     if (spigotMc != null && spigotMc.isNotEmpty) {
       try {
-        await _buildTarget(
-          profile,
-          'spigot',
-          <String, String>{'mc': spigotMc},
-          io,
-        );
+        await _buildTarget(profile, 'spigot', <String, String>{
+          'mc': spigotMc,
+        }, io);
       } catch (e) {
         failures.add('spigot: $e');
       }
@@ -955,12 +1095,7 @@ class NativeCommandService {
         );
         return;
       case 'forge':
-        await _buildDownloadForge(
-          profile,
-          mc,
-          options['loader']?.trim(),
-          io,
-        );
+        await _buildDownloadForge(profile, mc, options['loader']?.trim(), io);
         return;
       case 'neoforge':
         await _buildDownloadNeoForge(
@@ -984,7 +1119,8 @@ class NativeCommandService {
     String mc,
     _NativeIoBuffer io,
   ) async {
-    final buildsUrl = 'https://api.papermc.io/v2/projects/$type/versions/$mc/builds';
+    final buildsUrl =
+        'https://api.papermc.io/v2/projects/$type/versions/$mc/builds';
     final json = await _httpGetJsonObject(buildsUrl);
     final buildsRaw = json['builds'];
     if (buildsRaw is! List) {
@@ -1040,7 +1176,9 @@ class NativeCommandService {
     String mc,
     _NativeIoBuffer io,
   ) async {
-    final meta = await _httpGetJsonObject('https://api.purpurmc.org/v2/purpur/$mc');
+    final meta = await _httpGetJsonObject(
+      'https://api.purpurmc.org/v2/purpur/$mc',
+    );
     final builds = meta['builds'];
     int? latestBuild;
     if (builds is Map && builds['latest'] != null) {
@@ -1075,10 +1213,7 @@ class NativeCommandService {
     );
     final builds = payload['builds'];
     if (builds is! List || builds.isEmpty) {
-      throw _NativeCommandException(
-        'No Canvas builds available for mc=$mc',
-        1,
-      );
+      throw _NativeCommandException('No Canvas builds available for mc=$mc', 1);
     }
 
     Map<String, dynamic>? selected;
@@ -1103,10 +1238,14 @@ class NativeCommandService {
 
     final downloadUrl = selected['downloadUrl']?.toString().trim();
     if (downloadUrl == null || downloadUrl.isEmpty) {
-      throw _NativeCommandException('Canvas API returned empty download URL', 1);
+      throw _NativeCommandException(
+        'Canvas API returned empty download URL',
+        1,
+      );
     }
     final buildNumber = selected['buildNumber']?.toString().trim() ?? 'unknown';
-    final channel = selected['channelVersion']?.toString().trim().isNotEmpty == true
+    final channel =
+        selected['channelVersion']?.toString().trim().isNotEmpty == true
         ? selected['channelVersion'].toString().trim()
         : mc;
     final output = p.join(
@@ -1141,7 +1280,9 @@ class NativeCommandService {
     );
     await _downloadToFile(downloadUrl, output);
     _registerBuiltJar(profile, 'fabric', output);
-    io.write('[OK] Cached fabric server launcher for mc=$mc loader=$loader installer=$installer');
+    io.write(
+      '[OK] Cached fabric server launcher for mc=$mc loader=$loader installer=$installer',
+    );
     io.write('[INFO] Jar: $output');
   }
 
@@ -1208,10 +1349,15 @@ class NativeCommandService {
       await _downloadToFile(buildToolsUrl, buildToolsJar);
     }
 
-    final workDir = p.join(buildDir, 'work-$mc-${DateTime.now().millisecondsSinceEpoch}');
+    final workDir = p.join(
+      buildDir,
+      'work-$mc-${DateTime.now().millisecondsSinceEpoch}',
+    );
     Directory(workDir).createSync(recursive: true);
 
-    io.write('[INFO] Running BuildTools for Spigot mc=$mc (this can take a while)');
+    io.write(
+      '[INFO] Running BuildTools for Spigot mc=$mc (this can take a while)',
+    );
     final result = await Process.run(
       'java',
       <String>['-jar', buildToolsJar, '--rev', mc, '--compile', 'SPIGOT'],
@@ -1229,7 +1375,9 @@ class NativeCommandService {
         Directory(workDir)
             .listSync(recursive: false, followLinks: false)
             .whereType<File>()
-            .where((f) => RegExp(r'^spigot-.*\.jar$').hasMatch(p.basename(f.path)))
+            .where(
+              (f) => RegExp(r'^spigot-.*\.jar$').hasMatch(p.basename(f.path)),
+            )
             .toList(growable: false)
           ..sort(
             (a, b) => a.lastModifiedSync().compareTo(b.lastModifiedSync()),
@@ -1280,7 +1428,10 @@ class NativeCommandService {
     final first = Map<String, dynamic>.from(payload.first as Map);
     final version = first['version']?.toString().trim() ?? '';
     if (version.isEmpty) {
-      throw _NativeCommandException('Fabric installer payload missing version', 1);
+      throw _NativeCommandException(
+        'Fabric installer payload missing version',
+        1,
+      );
     }
     return version;
   }
@@ -1305,10 +1456,13 @@ class NativeCommandService {
     final metadata = await _httpGetText(
       'https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml',
     );
-    final versions = RegExp(
-      r'<version>([^<]+)</version>',
-    ).allMatches(metadata).map((m) => m.group(1)!.trim()).toList(growable: false);
-    final matches = versions.where((v) => v.startsWith('$mc-')).toList(growable: false);
+    final versions = RegExp(r'<version>([^<]+)</version>')
+        .allMatches(metadata)
+        .map((m) => m.group(1)!.trim())
+        .toList(growable: false);
+    final matches = versions
+        .where((v) => v.startsWith('$mc-'))
+        .toList(growable: false);
     if (matches.isEmpty) {
       throw _NativeCommandException(
         'Could not resolve Forge loader for mc=$mc',
@@ -1324,9 +1478,10 @@ class NativeCommandService {
     final metadata = await _httpGetText(
       'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml',
     );
-    final versions = RegExp(
-      r'<version>([^<]+)</version>',
-    ).allMatches(metadata).map((m) => m.group(1)!.trim()).toList(growable: false);
+    final versions = RegExp(r'<version>([^<]+)</version>')
+        .allMatches(metadata)
+        .map((m) => m.group(1)!.trim())
+        .toList(growable: false);
     final matches = versions
         .where((v) => v.startsWith('$key.') || v.startsWith('$key-'))
         .toList(growable: false);
@@ -1694,7 +1849,12 @@ class NativeCommandService {
         (normalizedType == 'forge' || normalizedType == 'neoforge') &&
         _looksLikeInstallerJar(resolvedJarPath);
     if (installerBased) {
-      _serverCreateFromInstaller(profile, name, normalizedType, resolvedJarPath);
+      _serverCreateFromInstaller(
+        profile,
+        name,
+        normalizedType,
+        resolvedJarPath,
+      );
       _instanceApplyStyledMotd(profile, name, force: true);
       return;
     }
@@ -1704,11 +1864,7 @@ class NativeCommandService {
     _replaceWithSymlink(serverJar, resolvedJarPath);
 
     File(p.join(instanceDir, '.server-source')).writeAsStringSync(
-      [
-        'type=$normalizedType',
-        'launch=jar',
-        'jar=$resolvedJarPath',
-      ].join('\n'),
+      ['type=$normalizedType', 'launch=jar', 'jar=$resolvedJarPath'].join('\n'),
     );
     _instanceApplyStyledMotd(profile, name, force: true);
   }
@@ -1787,8 +1943,9 @@ class NativeCommandService {
     }
 
     final candidates = <String>[];
-    for (final entity
-        in Directory(instanceDir).listSync(recursive: true, followLinks: false)) {
+    for (final entity in Directory(
+      instanceDir,
+    ).listSync(recursive: true, followLinks: false)) {
       if (entity is! File) {
         continue;
       }
@@ -1827,9 +1984,30 @@ class NativeCommandService {
       );
     }
 
+    await _runtimeEnsureDropinsWatcher(profile, io);
+
     if (await _runtimeRunning(profile, instance)) {
       io.write('[WARN] Already running: $instance');
       return;
+    }
+
+    final startupSync = _pluginsSyncInstance(
+      profile,
+      instance,
+      clean: false,
+      sourceModsOverride: false,
+      strict: false,
+    );
+    if (startupSync.copiedJars.isNotEmpty) {
+      io.write(
+        '[SYNC] Startup copied ${startupSync.copiedJars.length} jar(s) -> $instance',
+      );
+      io.write('[SYNC] ${startupSync.copiedJars.join(', ')}');
+    }
+    if (startupSync.failedJars.isNotEmpty) {
+      for (final failed in startupSync.failedJars) {
+        io.error('[WARN] Startup sync failed for $instance: $failed');
+      }
     }
 
     await _runtimePrepareInstancePort(profile, instance, io);
@@ -1860,8 +2038,7 @@ class NativeCommandService {
     final javaCommand = javaCommandParts.map(_shellQuote).join(' ');
 
     final runScript =
-        'cd ${_shellQuote(launchWorkingDir)} && '
-        '$javaCommand 2>&1 | tee -a ${_shellQuote(logFile.path)}';
+        'cd ${_shellQuote(launchWorkingDir)} && exec $javaCommand';
     final tmuxSession = _tmuxSessionName(profile, instance);
 
     // Clear stale runtime markers when switching to tmux-backed runtime.
@@ -1886,6 +2063,7 @@ class NativeCommandService {
         1,
       );
     }
+    await _tmuxEnablePaneLogging(tmuxSession, logFile.path);
 
     await Future<void>.delayed(const Duration(milliseconds: 350));
     final running = await _tmuxSessionExists(tmuxSession);
@@ -1901,6 +2079,66 @@ class NativeCommandService {
     io.write('[OK] Runtime started: $instance');
     io.write('[INFO] tmux session: $tmuxSession');
     io.write('[INFO] Log: ${logFile.path}');
+  }
+
+  Future<void> _tmuxEnablePaneLogging(
+    String tmuxSession,
+    String logFilePath,
+  ) async {
+    final command = 'cat >> ${_shellQuote(logFilePath)}';
+    final targets = <String>['$tmuxSession:0.0', '$tmuxSession:0'];
+    for (final target in targets) {
+      final result = await _runProcess('tmux', <String>[
+        'pipe-pane',
+        '-o',
+        '-t',
+        target,
+        command,
+      ]);
+      if (result.exitCode == 0) {
+        return;
+      }
+    }
+  }
+
+  Future<void> _runtimeEnsureDropinsWatcher(
+    ConsumerProfile profile,
+    _NativeIoBuffer io,
+  ) async {
+    if (!_isPluginConsumer(profile)) {
+      return;
+    }
+
+    final session = _pluginsWatchSessionName(profile, mods: false);
+    if (await _tmuxSessionExists(session)) {
+      return;
+    }
+
+    try {
+      await _pluginsWatchStart(profile, io, mods: false);
+    } catch (e) {
+      io.error('[WARN] Could not auto-start plugins watcher: $e');
+    }
+  }
+
+  Future<void> _announceDropinSync(
+    ConsumerProfile profile,
+    String instance,
+    int updatedCount,
+  ) async {
+    if (updatedCount <= 0) {
+      return;
+    }
+    final session = _tmuxSessionName(profile, instance);
+    if (!await _tmuxSessionExists(session)) {
+      return;
+    }
+    await _runProcess('tmux', <String>[
+      'display-message',
+      '-t',
+      session,
+      'Dropins synced: $updatedCount jar update(s)',
+    ]);
   }
 
   Future<void> _runtimeConsole(
@@ -1942,6 +2180,187 @@ class NativeCommandService {
     await _runtimeAttachTmux(profile, instance, io);
   }
 
+  Future<void> _runtimeConsoles(
+    ConsumerProfile profile,
+    _NativeIoBuffer io, {
+    required String layout,
+  }) async {
+    if (!await _tmuxInstalled()) {
+      throw _NativeCommandException(
+        'tmux is required for runtime consoles. Install tmux and retry.',
+        2,
+      );
+    }
+
+    final running = await _runtimeListRunning(profile);
+    if (running.isEmpty) {
+      io.write('[WARN] No running servers.');
+      return;
+    }
+    running.sort();
+
+    final layoutName = switch (layout) {
+      'lateral' => 'even-horizontal',
+      _ => 'tiled',
+    };
+
+    final session = _allConsolesSessionName(profile);
+    if (await _tmuxSessionExists(session)) {
+      await _runProcess('tmux', <String>['kill-session', '-t', session]);
+    }
+
+    String paneCommandFor(String instance) {
+      final port = _instanceGetServerPort(profile, instance);
+      final logFile = _runtimeLogFile(profile, instance);
+      File(logFile).createSync(recursive: true);
+      final heading = '=== $instance (port $port) ===';
+      return 'printf %s\\n ${_shellQuote(heading)} && '
+          'tail -n 400 -F ${_shellQuote(logFile)}';
+    }
+
+    final first = running.first;
+    final create = await _runProcess('tmux', <String>[
+      'new-session',
+      '-d',
+      '-s',
+      session,
+      ..._tmuxDetachedSizeArgs(),
+      'sh -lc ${_shellQuote(paneCommandFor(first))}',
+    ]);
+    if (create.exitCode != 0) {
+      throw _NativeCommandException(
+        'Failed to open all consoles view: ${create.stderr}',
+        1,
+      );
+    }
+
+    for (var i = 1; i < running.length; i++) {
+      final instance = running[i];
+      final split = await _runProcess('tmux', <String>[
+        'split-window',
+        '-t',
+        '$session:0',
+        'sh -lc ${_shellQuote(paneCommandFor(instance))}',
+      ]);
+      if (split.exitCode != 0) {
+        throw _NativeCommandException(
+          'Failed to add pane for $instance: ${split.stderr}',
+          1,
+        );
+      }
+      await _runProcess('tmux', <String>[
+        'select-layout',
+        '-t',
+        '$session:0',
+        layoutName,
+      ]);
+    }
+    await _runProcess('tmux', <String>[
+      'select-layout',
+      '-t',
+      '$session:0',
+      layoutName,
+    ]);
+
+    await _tmuxConfigureConsoleSession(session);
+    await _runProcess('tmux', <String>[
+      'set-window-option',
+      '-t',
+      '$session:0',
+      'pane-border-status',
+      'top',
+    ]);
+    await _runProcess('tmux', <String>[
+      'set-window-option',
+      '-t',
+      '$session:0',
+      'pane-border-format',
+      '#{pane_title}',
+    ]);
+    for (var i = 0; i < running.length; i++) {
+      final instance = running[i];
+      final title = '$instance : ${_instanceGetServerPort(profile, instance)}';
+      await _runProcess('tmux', <String>[
+        'select-pane',
+        '-t',
+        '$session:0.$i',
+        '-T',
+        title,
+      ]);
+    }
+
+    Future<bool> bindRootIfMissing(String key, List<String> action) async {
+      final listKeys = await _runProcess('tmux', <String>[
+        'list-keys',
+        '-T',
+        'root',
+      ]);
+      var hasBinding = false;
+      if (listKeys.exitCode == 0) {
+        final lines = (listKeys.stdout ?? '')
+            .toString()
+            .split('\n')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty);
+        final pattern = RegExp('^bind-key(?:\\s+-T\\s+root)?\\s+$key\\b');
+        hasBinding = lines.any((line) => pattern.hasMatch(line));
+      }
+      if (hasBinding) {
+        return false;
+      }
+      final bind = await _runProcess('tmux', <String>[
+        'bind-key',
+        '-T',
+        'root',
+        key,
+        ...action,
+      ]);
+      return bind.exitCode == 0;
+    }
+
+    final boundEsc = await bindRootIfMissing('Escape', <String>[
+      'detach-client',
+    ]);
+    final boundLeft = await bindRootIfMissing('Left', <String>[
+      'select-pane',
+      '-L',
+    ]);
+    final boundRight = await bindRootIfMissing('Right', <String>[
+      'select-pane',
+      '-R',
+    ]);
+
+    final layoutLabel = layout == 'lateral' ? 'lateral' : 'grid';
+    io.write(
+      'All Consoles ($layoutLabel): ${running.length} running server(s)',
+    );
+    io.write('Navigate panes: Left/Right arrows');
+    io.write('Scroll: mouse wheel (or Ctrl+B then [ for copy mode)');
+    io.write('Detach: Esc (or Ctrl+B then D)');
+
+    final attach = await Process.start(
+      'tmux',
+      <String>['attach-session', '-t', session],
+      environment: _terminalAttachEnv(),
+      mode: ProcessStartMode.inheritStdio,
+    );
+    final exit = await attach.exitCode;
+
+    if (boundEsc) {
+      await _runProcess('tmux', <String>['unbind-key', '-T', 'root', 'Escape']);
+    }
+    if (boundLeft) {
+      await _runProcess('tmux', <String>['unbind-key', '-T', 'root', 'Left']);
+    }
+    if (boundRight) {
+      await _runProcess('tmux', <String>['unbind-key', '-T', 'root', 'Right']);
+    }
+
+    if (exit != 0) {
+      io.error('[ERROR] Failed to attach all consoles view (tmux exit=$exit).');
+    }
+  }
+
   Future<void> _runtimeAttachTmux(
     ConsumerProfile profile,
     String instance,
@@ -1949,10 +2368,7 @@ class NativeCommandService {
   ) async {
     final tmuxSession = _tmuxSessionName(profile, instance);
     if (!await _tmuxSessionExists(tmuxSession)) {
-      throw _NativeCommandException(
-        'No running tmux session for $instance',
-        2,
-      );
+      throw _NativeCommandException('No running tmux session for $instance', 2);
     }
 
     await _tmuxConfigureConsoleSession(tmuxSession);
@@ -1962,7 +2378,11 @@ class NativeCommandService {
     io.write('Scroll: mouse wheel (or Ctrl+B then [ for copy mode).');
 
     var temporaryEscBinding = false;
-    final listKeys = await _runProcess('tmux', <String>['list-keys', '-T', 'root']);
+    final listKeys = await _runProcess('tmux', <String>[
+      'list-keys',
+      '-T',
+      'root',
+    ]);
     var hasEscapeBinding = false;
     if (listKeys.exitCode == 0) {
       final lines = (listKeys.stdout ?? '')
@@ -1971,19 +2391,25 @@ class NativeCommandService {
           .map((e) => e.trim())
           .where((e) => e.isNotEmpty);
       hasEscapeBinding = lines.any(
-        (line) => RegExp(r'^bind-key(?:\s+-T\s+root)?\s+Escape\b').hasMatch(line),
+        (line) =>
+            RegExp(r'^bind-key(?:\s+-T\s+root)?\s+Escape\b').hasMatch(line),
       );
     }
 
     if (!hasEscapeBinding) {
-      final bind = await _runProcess(
-        'tmux',
-        <String>['bind-key', '-T', 'root', 'Escape', 'detach-client'],
-      );
+      final bind = await _runProcess('tmux', <String>[
+        'bind-key',
+        '-T',
+        'root',
+        'Escape',
+        'detach-client',
+      ]);
       if (bind.exitCode == 0) {
         temporaryEscBinding = true;
       } else {
-        io.error('[WARN] Could not enable Esc detach binding; use Ctrl+B then D.');
+        io.error(
+          '[WARN] Could not enable Esc detach binding; use Ctrl+B then D.',
+        );
       }
     }
 
@@ -2000,7 +2426,9 @@ class NativeCommandService {
     }
 
     if (exit != 0) {
-      io.error('[ERROR] Failed to attach console for $instance (tmux exit=$exit).');
+      io.error(
+        '[ERROR] Failed to attach console for $instance (tmux exit=$exit).',
+      );
     }
     io.write('Server console exited with code $exit');
   }
@@ -2045,7 +2473,9 @@ class NativeCommandService {
     var cols = 220;
     var rows = 60;
 
-    final envCols = int.tryParse((Platform.environment['COLUMNS'] ?? '').trim());
+    final envCols = int.tryParse(
+      (Platform.environment['COLUMNS'] ?? '').trim(),
+    );
     final envRows = int.tryParse((Platform.environment['LINES'] ?? '').trim());
     if (envCols != null && envCols > 0) {
       cols = envCols;
@@ -2246,18 +2676,39 @@ class NativeCommandService {
   }
 
   String _tmuxSessionName(ConsumerProfile profile, String instance) {
-    final safeProfile = profile.shortName.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
+    final safeProfile = profile.shortName.replaceAll(
+      RegExp(r'[^A-Za-z0-9_-]'),
+      '-',
+    );
     final safeInstance = instance.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
     return 'mc-$safeProfile-$safeInstance';
   }
 
-  String _pluginsWatchSessionName(ConsumerProfile profile, {required bool mods}) {
-    final safeProfile = profile.shortName.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
+  String _allConsolesSessionName(ConsumerProfile profile) {
+    final safeProfile = profile.shortName.replaceAll(
+      RegExp(r'[^A-Za-z0-9_-]'),
+      '-',
+    );
+    return 'mc-$safeProfile-all-consoles';
+  }
+
+  String _pluginsWatchSessionName(
+    ConsumerProfile profile, {
+    required bool mods,
+  }) {
+    final safeProfile = profile.shortName.replaceAll(
+      RegExp(r'[^A-Za-z0-9_-]'),
+      '-',
+    );
     return 'watch-$safeProfile-${mods ? 'mods' : 'plugins'}';
   }
 
   Future<bool> _tmuxSessionExists(String name) async {
-    final result = await _runProcess('tmux', <String>['has-session', '-t', name]);
+    final result = await _runProcess('tmux', <String>[
+      'has-session',
+      '-t',
+      name,
+    ]);
     return result.exitCode == 0;
   }
 
@@ -2345,12 +2796,7 @@ class NativeCommandService {
     final file = File(_runtimeSettingsFile(profile));
     file.createSync(recursive: true);
     file.writeAsStringSync(
-      '${[
-        '# Multiplexor runtime settings (${profile.shortName})',
-        'HEAP_SIZE=${settings.heap}',
-        'JVM_PROFILE=${settings.profile}',
-        'JVM_ARGS=${settings.jvmArgs}',
-      ].join('\n')}\n',
+      '${['# Multiplexor runtime settings (${profile.shortName})', 'HEAP_SIZE=${settings.heap}', 'JVM_PROFILE=${settings.profile}', 'JVM_ARGS=${settings.jvmArgs}'].join('\n')}\n',
     );
   }
 
@@ -2371,11 +2817,9 @@ class NativeCommandService {
 
   List<String> _javaArgsForLaunch(
     _LaunchTarget launch,
-    _RuntimeSettingsData settings,
-    {
+    _RuntimeSettingsData settings, {
     String? workingDirectory,
-  }
-  ) {
+  }) {
     final heap = settings.heap;
     final jvmArgsRaw = settings.jvmArgs;
 
@@ -2491,18 +2935,14 @@ class NativeCommandService {
   }
 
   void _migrateLegacyInstancesDirectory(String legacyDir, String externalDir) {
-    final legacyType = FileSystemEntity.typeSync(
-      legacyDir,
-      followLinks: false,
-    );
+    final legacyType = FileSystemEntity.typeSync(legacyDir, followLinks: false);
     if (legacyType != FileSystemEntityType.directory) {
       return;
     }
 
-    final legacyEntries = Directory(legacyDir).listSync(
-      recursive: false,
-      followLinks: false,
-    );
+    final legacyEntries = Directory(
+      legacyDir,
+    ).listSync(recursive: false, followLinks: false);
     for (final entry in legacyEntries) {
       final base = p.basename(entry.path);
       final destination = p.join(externalDir, base);
@@ -2574,22 +3014,20 @@ class NativeCommandService {
     String instance,
     _NativeIoBuffer io,
   ) async {
-    final current = _instanceGetServerPort(profile, instance);
-    if (!await _runtimePortInUse(profile, instance, current)) {
-      return;
-    }
-
     var port = 25565;
     while (port <= 65535) {
       if (!await _runtimePortInUse(profile, instance, port)) {
-        _instanceSetServerPort(profile, instance, port);
-        io.write('[INFO] Auto-assigned port for $instance: $port');
+        final current = _instanceGetServerPort(profile, instance);
+        if (current != port) {
+          _instanceSetServerPort(profile, instance, port);
+          io.write('[INFO] Auto-assigned port for $instance: $port');
+        }
         return;
       }
       port++;
     }
 
-    throw _NativeCommandException('No available port found in 1-65535', 2);
+    throw _NativeCommandException('No available port found in 25565-65535', 2);
   }
 
   Future<bool> _runtimePortInUse(
@@ -2626,7 +3064,11 @@ class NativeCommandService {
     if (!await _runtimeCanBind(InternetAddress.anyIPv6, port, v6Only: true)) {
       return true;
     }
-    if (!await _runtimeCanBind(InternetAddress.loopbackIPv6, port, v6Only: true)) {
+    if (!await _runtimeCanBind(
+      InternetAddress.loopbackIPv6,
+      port,
+      v6Only: true,
+    )) {
       return true;
     }
     return false;
@@ -2638,11 +3080,7 @@ class NativeCommandService {
     bool v6Only = false,
   }) async {
     try {
-      final socket = await ServerSocket.bind(
-        address,
-        port,
-        v6Only: v6Only,
-      );
+      final socket = await ServerSocket.bind(address, port, v6Only: v6Only);
       await socket.close();
       return true;
     } on SocketException catch (e) {
@@ -2761,11 +3199,12 @@ class NativeCommandService {
     _replaceWithSymlink(src, shared);
   }
 
-  int _pluginsSyncInstance(
+  _DropinSyncReport _pluginsSyncInstance(
     ConsumerProfile profile,
     String instance, {
     required bool clean,
     required bool sourceModsOverride,
+    required bool strict,
   }) {
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
@@ -2789,16 +3228,85 @@ class NativeCommandService {
       }
     }
 
-    var count = 0;
-    for (final entity in sourceDir.listSync()) {
-      if (entity is! File || !entity.path.endsWith('.jar')) {
-        continue;
+    final copied = <String>[];
+    final failed = <String>[];
+    final jars =
+        sourceDir
+            .listSync()
+            .whereType<File>()
+            .where((entity) => entity.path.toLowerCase().endsWith('.jar'))
+            .toList(growable: false)
+          ..sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
+
+    for (final entity in jars) {
+      try {
+        final targetPath = p.join(targetDir.path, p.basename(entity.path));
+        final sourceStat = entity.statSync();
+        _deletePathEntity(targetPath, recursive: true);
+        entity.copySync(targetPath);
+        File(targetPath).setLastModifiedSync(sourceStat.modified);
+        copied.add(p.basename(entity.path));
+      } catch (e) {
+        failed.add('${p.basename(entity.path)}: $e');
       }
-      entity.copySync(p.join(targetDir.path, p.basename(entity.path)));
-      count++;
     }
 
-    return count;
+    if (strict && failed.isNotEmpty) {
+      throw _NativeCommandException(
+        'Failed to sync ${failed.length} jar(s): ${failed.join('; ')}',
+        1,
+      );
+    }
+
+    return _DropinSyncReport(copiedJars: copied, failedJars: failed);
+  }
+
+  _DropinSyncReport _pluginsSyncOneJarToInstance(
+    ConsumerProfile profile,
+    String instance,
+    String sourceJarPath, {
+    required bool strict,
+  }) {
+    if (!_instanceExists(profile, instance)) {
+      throw _NativeCommandException('Instance not found: $instance', 2);
+    }
+
+    final sourceFile = File(sourceJarPath);
+    if (!sourceFile.existsSync()) {
+      return const _DropinSyncReport(
+        copiedJars: <String>[],
+        failedJars: <String>[],
+      );
+    }
+
+    final targetSubdir = _instanceDropinTargetSubdir(profile, instance);
+    final targetDir = Directory(
+      p.join(_instanceDir(profile, instance), targetSubdir),
+    );
+    targetDir.createSync(recursive: true);
+
+    final copied = <String>[];
+    final failed = <String>[];
+    final jarName = p.basename(sourceFile.path);
+    try {
+      final targetPath = p.join(targetDir.path, jarName);
+      final sourceStat = sourceFile.statSync();
+      _deletePathEntity(targetPath, recursive: true);
+      sourceFile.copySync(targetPath);
+      File(targetPath).setLastModifiedSync(sourceStat.modified);
+      copied.add(jarName);
+    } catch (e) {
+      failed.add('$jarName: $e');
+    }
+
+    if (strict && failed.isNotEmpty) {
+      throw _NativeCommandException(
+        'Failed to sync ${failed.length} jar(s): ${failed.join('; ')}',
+        1,
+      );
+    }
+
+    return _DropinSyncReport(copiedJars: copied, failedJars: failed);
   }
 
   String _instanceDropinTargetSubdir(ConsumerProfile profile, String instance) {
@@ -2926,7 +3434,9 @@ class NativeCommandService {
       return;
     }
 
-    final instance = normalized.isEmpty ? _currentInstance(profile) : normalized;
+    final instance = normalized.isEmpty
+        ? _currentInstance(profile)
+        : normalized;
     if (instance == null || instance.isEmpty) {
       throw _NativeCommandException('No active instance set', 2);
     }
@@ -3029,6 +3539,14 @@ class NativeCommandService {
       } catch (_) {}
     }
 
+    try {
+      Process.runSync('tmux', <String>[
+        'kill-session',
+        '-t',
+        _tmuxSessionName(profile, name),
+      ], runInShell: true);
+    } catch (_) {}
+
     _deletePathEntity(instancePath, recursive: true);
     File(_runtimeServerPidFile(profile, name)).deleteSyncSafe();
     File(_runtimeConsolePidFile(profile, name)).deleteSyncSafe();
@@ -3049,17 +3567,15 @@ class NativeCommandService {
     if (!entriesDir.existsSync()) {
       return;
     }
-    final entries = entriesDir.listSync(
-      recursive: false,
-      followLinks: false,
-    ).toList(growable: false);
+    final entries = entriesDir
+        .listSync(recursive: false, followLinks: false)
+        .toList(growable: false);
     if (entries.isEmpty) {
       return;
     }
-    final names = entries
-        .map((entry) => p.basename(entry.path))
-        .toList(growable: false)
-      ..sort();
+    final names =
+        entries.map((entry) => p.basename(entry.path)).toList(growable: false)
+          ..sort();
 
     if (interactive) {
       stdout.write('Type DELETE to remove ALL server instances: ');
@@ -3331,10 +3847,13 @@ class NativeCommandService {
     switch (type) {
       case FileSystemEntityType.file:
         File(linkPath).deleteSync();
+        break;
       case FileSystemEntityType.directory:
         Directory(linkPath).deleteSync(recursive: true);
+        break;
       case FileSystemEntityType.link:
         Link(linkPath).deleteSync();
+        break;
       case FileSystemEntityType.notFound:
       case FileSystemEntityType.pipe:
       case FileSystemEntityType.unixDomainSock:
@@ -3350,14 +3869,55 @@ class NativeCommandService {
     switch (type) {
       case FileSystemEntityType.file:
         File(path).deleteSync();
+        break;
       case FileSystemEntityType.directory:
-        Directory(path).deleteSync(recursive: recursive);
+        if (recursive) {
+          _deleteDirectoryTree(path);
+        } else {
+          Directory(path).deleteSync(recursive: false);
+        }
+        break;
       case FileSystemEntityType.link:
         Link(path).deleteSync();
-      case FileSystemEntityType.notFound:
+        break;
       case FileSystemEntityType.pipe:
       case FileSystemEntityType.unixDomainSock:
+        File(path).deleteSync();
         break;
+      case FileSystemEntityType.notFound:
+        break;
+    }
+  }
+
+  void _deleteDirectoryTree(String path) {
+    final directory = Directory(path);
+    if (!directory.existsSync()) {
+      return;
+    }
+
+    for (final entity in directory.listSync(
+      recursive: false,
+      followLinks: false,
+    )) {
+      _deletePathEntity(entity.path, recursive: true);
+    }
+
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      try {
+        directory.deleteSync(recursive: false);
+        return;
+      } on FileSystemException {
+        if (attempt == 3) {
+          rethrow;
+        }
+        sleep(Duration(milliseconds: 75 * attempt));
+        for (final entity in directory.listSync(
+          recursive: false,
+          followLinks: false,
+        )) {
+          _deletePathEntity(entity.path, recursive: true);
+        }
+      }
     }
   }
 
@@ -3395,7 +3955,12 @@ class NativeCommandService {
     final commandParts = <String>[_shellQuote(executable)];
 
     if (base == 'dart' || base == 'dart.exe' || base.startsWith('dart')) {
-      final script = p.join(context.rootDir, 'MultiplexorApp', 'bin', 'main.dart');
+      final script = p.join(
+        context.rootDir,
+        'MultiplexorApp',
+        'bin',
+        'main.dart',
+      );
       commandParts.add('run');
       commandParts.add(_shellQuote(script));
     }
@@ -3439,7 +4004,9 @@ class NativeCommandService {
     );
     io.write('');
     io.write('Runtime commands:');
-    io.write('  runtime start|console|stop|status|list [instance]');
+    io.write(
+      '  runtime start|console|consoles|consoles-lateral|stop|status|list [instance]',
+    );
     io.write('  runtime settings <show|presets|set-heap|set-preset|reset>');
     io.write('');
     io.write('Dropins commands:');
@@ -3619,13 +4186,13 @@ class NativeCommandService {
   static const Map<String, String> _runtimeSettingsPresets = <String, String>{
     'aikar':
         '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 '
-            '-XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapRegionSize=8M '
-            '-XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 '
-            '-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem -Dfile.encoding=UTF-8',
+        '-XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapRegionSize=8M '
+        '-XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 '
+        '-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem -Dfile.encoding=UTF-8',
     'vanilla': '-Dfile.encoding=UTF-8',
     'conservative':
         '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=300 '
-            '-XX:+DisableExplicitGC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8',
+        '-XX:+DisableExplicitGC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8',
   };
 
   static const List<String> _sharedConfigFilesBase = <String>[
@@ -3699,9 +4266,9 @@ class _RuntimeSettingsData {
     this.heap = '4G',
     this.jvmArgs =
         '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 '
-            '-XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapRegionSize=8M '
-            '-XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 '
-            '-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem -Dfile.encoding=UTF-8',
+        '-XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapRegionSize=8M '
+        '-XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 '
+        '-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem -Dfile.encoding=UTF-8',
     this.profile = 'aikar',
   });
 
@@ -3722,6 +4289,13 @@ class _RuntimeSettingsData {
       profile: profile ?? this.profile,
     );
   }
+}
+
+class _DropinSyncReport {
+  const _DropinSyncReport({required this.copiedJars, required this.failedJars});
+
+  final List<String> copiedJars;
+  final List<String> failedJars;
 }
 
 class _Version implements Comparable<_Version> {

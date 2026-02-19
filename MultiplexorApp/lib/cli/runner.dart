@@ -245,6 +245,14 @@ Future<int> _runRuntime(List<String> rest) async {
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
       });
       return 0;
+    case 'consoles':
+    case 'console-all':
+      await handleRuntimeConsoles();
+      return 0;
+    case 'consoles-lateral':
+    case 'console-lateral':
+      await handleRuntimeConsolesLateral();
+      return 0;
     case 'start':
       await handleRuntimeStart(<String, dynamic>{
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
@@ -288,7 +296,7 @@ Future<int> _runRuntime(List<String> rest) async {
       }
     default:
       stderr.writeln(
-        'Usage: runtime <console|start|stop|status|list|settings> [instance|args]',
+        'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args]',
       );
       return 2;
   }

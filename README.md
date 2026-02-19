@@ -66,6 +66,8 @@ For `--type`, the jar is resolved from the consumer build cache under `consumers
 ```bash
 ./start.sh runtime start [instance]
 ./start.sh runtime console [instance]
+./start.sh runtime consoles
+./start.sh runtime consoles-lateral
 ./start.sh runtime stop [instance]
 ./start.sh runtime status [instance]
 ./start.sh runtime list

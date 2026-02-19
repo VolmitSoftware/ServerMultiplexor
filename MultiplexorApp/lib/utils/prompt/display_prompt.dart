@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:dart_console/dart_console.dart';
+
 class DisplayPrompt {
   static const String _reset = '\x1B[0m';
   static const String _bold = '\x1B[1m';
@@ -17,7 +19,8 @@ class DisplayPrompt {
     if (subtitle != null) {
       lines.add(subtitle);
     }
-    final width = lines.map((line) => line.length).fold(0, (a, b) => a > b ? a : b) + 6;
+    final width =
+        lines.map((line) => line.length).fold(0, (a, b) => a > b ? a : b) + 6;
     final top = '╔${'═' * width}╗';
     final bottom = '╚${'═' * width}╝';
 
@@ -49,8 +52,21 @@ class DisplayPrompt {
     stdout.writeln('$_red[ERROR]$_reset $message');
   }
 
-  static Future<void> pressEnter({String message = 'Press Enter to continue...'}) async {
+  static Future<void> pressEnter({
+    String message = 'Press Enter to continue...',
+  }) async {
     stdout.write(message);
+    if (stdin.hasTerminal && stdout.hasTerminal) {
+      try {
+        final console = Console();
+        console.readLine(cancelOnEscape: true);
+        return;
+      } on StdinException {
+        // Fall through to stdin.readLineSync fallback.
+      } on OSError {
+        // Fall through to stdin.readLineSync fallback.
+      }
+    }
     try {
       stdin.readLineSync();
     } on StdinException {

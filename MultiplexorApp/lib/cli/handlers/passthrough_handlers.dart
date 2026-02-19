@@ -190,6 +190,12 @@ Future<void> handleRuntimeConsole(Map<String, dynamic> args) async {
   await _runAndExit(cmd);
 }
 
+Future<void> handleRuntimeConsoles() async =>
+    _runAndExit(<String>['runtime', 'consoles']);
+
+Future<void> handleRuntimeConsolesLateral() async =>
+    _runAndExit(<String>['runtime', 'consoles-lateral']);
+
 Future<void> handleRuntimeStart(Map<String, dynamic> args) async {
   final instance = _arg(args, 'instance');
   final cmd = <String>['runtime', 'start'];
@@ -220,10 +226,7 @@ Future<void> handleRuntimeStatus(Map<String, dynamic> args) async {
 Future<void> handleRuntimeList() async =>
     _runAndExit(<String>['runtime', 'list']);
 
-Future<void> handleRuntimeSettings(
-  String action, {
-  String? value,
-}) async {
+Future<void> handleRuntimeSettings(String action, {String? value}) async {
   final cmd = <String>['runtime', 'settings', action];
   if (value != null && value.trim().isNotEmpty) {
     cmd.add(value.trim());
