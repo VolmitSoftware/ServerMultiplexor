@@ -162,7 +162,11 @@ List<String> _normalizePositionalArgs(List<String> args) {
       }
       return args;
     case 'instance':
-      if (sub == 'create' || sub == 'activate' || sub == 'path' || sub == 'delete') {
+      if (sub == 'create' ||
+          sub == 'activate' ||
+          sub == 'path' ||
+          sub == 'delete' ||
+          sub == 'reset') {
         return injectSingleValue('name', 2);
       }
       if (sub == 'motd-style') {

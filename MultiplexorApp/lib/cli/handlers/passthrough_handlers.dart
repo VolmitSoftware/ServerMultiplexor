@@ -121,6 +121,15 @@ Future<void> handleInstanceDelete(Map<String, dynamic> args) async {
   await _runAndExit(<String>['instance', 'delete', name]);
 }
 
+Future<void> handleInstanceReset(Map<String, dynamic> args) async {
+  final name = _arg(args, 'name');
+  if (name == null) {
+    stderr.writeln('Usage: instance reset <name>');
+    exit(2);
+  }
+  await _runAndExit(<String>['instance', 'reset', name]);
+}
+
 Future<void> handleInstanceCreate(Map<String, dynamic> args) async {
   final name = _arg(args, 'name');
   if (name == null) {
@@ -198,9 +207,13 @@ Future<void> handleRuntimeConsolesLateral() async =>
 
 Future<void> handleRuntimeStart(Map<String, dynamic> args) async {
   final instance = _arg(args, 'instance');
+  final noConsole = _flag(args, 'no-console');
   final cmd = <String>['runtime', 'start'];
   if (instance != null) {
     cmd.add(instance);
+  }
+  if (noConsole) {
+    cmd.add('--no-console');
   }
   await _runAndExit(cmd);
 }

@@ -19,9 +19,10 @@ Everything (wizard + commands) is implemented in `MultiplexorApp`.
 
 Isolation rules:
 
-- No shared config files between instances.
+- No shared config files between instances except plugin `ops.json`.
 - Mod consumers are fully isolated from plugin consumers.
 - `shared-plugin-data` is used only by `plugin` (for Iris packs).
+- Plugin instances share operators via `shared-plugin-data/ops/ops.json`.
 - No archive workflow.
 
 ## Quick Start
@@ -64,14 +65,37 @@ For `--type`, the jar is resolved from the consumer build cache under `consumers
 `tmux` is required for background runtime + live console attach.
 
 ```bash
-./start.sh runtime start [instance]
-./start.sh runtime console [instance]
+./start.sh runtime start [instance] [--no-console]
+./start.sh runtime start [--instance <name>] [--no-console]
+./start.sh runtime console [instance|--instance <name>]
 ./start.sh runtime consoles
 ./start.sh runtime consoles-lateral
 ./start.sh runtime stop [instance]
 ./start.sh runtime status [instance]
 ./start.sh runtime list
 ```
+
+Notes:
+
+- `runtime start` auto-opens console by default.
+- Use `--no-console` for background/bulk starts.
+- `runtime console` auto-targets the server when exactly one is running.
+
+Wizard IA:
+
+- Main sections: `Run`, `Instances`, `Build/JVM`, `Exit`.
+- `Run -> Start one stopped instance` auto-opens that console.
+- `Run -> Open console` skips picker when exactly one server is running.
+- `Run -> Start all stopped instances` starts in background and opens console view once at the end.
+
+Instance reset:
+
+```bash
+./start.sh instance reset <name>
+```
+
+- Resets worlds/config/plugins/mods/logs to baseline.
+- Keeps launch artifacts so the instance remains launchable.
 
 Runtime JVM settings (wizard-backed):
 

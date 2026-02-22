@@ -203,6 +203,11 @@ Future<int> _runInstance(List<String> rest) async {
         'name': parsed.option('name') ?? parsed.positionalOrNull(0),
       });
       return 0;
+    case 'reset':
+      await handleInstanceReset(<String, dynamic>{
+        'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+      });
+      return 0;
     case 'activate':
       await handleInstanceActivate(<String, dynamic>{
         'name': parsed.option('name') ?? parsed.positionalOrNull(0),
@@ -229,7 +234,7 @@ Future<int> _runInstance(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: instance <list|create|clone|delete|activate|path|port|motd-style|current|delete-all>',
+        'Usage: instance <list|create|clone|delete|reset|activate|path|port|motd-style|current|delete-all>',
       );
       return 2;
   }
@@ -256,6 +261,7 @@ Future<int> _runRuntime(List<String> rest) async {
     case 'start':
       await handleRuntimeStart(<String, dynamic>{
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
+        'no-console': parsed.flag('no-console'),
       });
       return 0;
     case 'stop':
@@ -296,7 +302,7 @@ Future<int> _runRuntime(List<String> rest) async {
       }
     default:
       stderr.writeln(
-        'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args]',
+        'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args] (start supports --instance/--no-console)',
       );
       return 2;
   }
@@ -406,6 +412,7 @@ _ParsedTokens _parse(List<String> tokens) {
   final options = <String, String>{};
   final flags = <String, bool>{};
   final positional = <String>[];
+  const booleanFlags = <String>{'all', 'auto-build', 'clean', 'no-console'};
 
   for (var i = 0; i < tokens.length; i++) {
     final t = tokens[i];
@@ -417,7 +424,23 @@ _ParsedTokens _parse(List<String> tokens) {
     final withoutPrefix = t.substring(2);
     if (withoutPrefix.contains('=')) {
       final parts = withoutPrefix.split('=');
-      options[parts.first] = parts.sublist(1).join('=');
+      final name = parts.first;
+      final value = parts.sublist(1).join('=');
+      if (booleanFlags.contains(name)) {
+        final normalized = value.trim().toLowerCase();
+        flags[name] =
+            normalized != '0' &&
+            normalized != 'false' &&
+            normalized != 'no' &&
+            normalized != 'off';
+      } else {
+        options[name] = value;
+      }
+      continue;
+    }
+
+    if (booleanFlags.contains(withoutPrefix)) {
+      flags[withoutPrefix] = true;
       continue;
     }
 

@@ -142,7 +142,7 @@ class NativeCommandService {
         return 0;
       case 'create':
         final name = _requireValue(rest, 'Usage: instance create <name>');
-        _instanceCreateBlank(profile, name);
+        _instanceCreateBlank(profile, name, io: io);
         io.write(
           '[OK] Instance created: $name (port ${_instanceGetServerPort(profile, name)})',
         );
@@ -154,7 +154,7 @@ class NativeCommandService {
             2,
           );
         }
-        _instanceClone(profile, rest[0], rest[1]);
+        _instanceClone(profile, rest[0], rest[1], io: io);
         io.write(
           '[OK] Cloned instance: ${rest[0]} -> ${rest[1]} (port ${_instanceGetServerPort(profile, rest[1])})',
         );
@@ -163,6 +163,11 @@ class NativeCommandService {
         final name = _requireValue(rest, 'Usage: instance delete <name>');
         _instanceDelete(profile, name);
         io.write('[OK] Deleted instance: $name');
+        return 0;
+      case 'reset':
+        final name = _requireValue(rest, 'Usage: instance reset <name>');
+        await _instanceReset(profile, name, io);
+        io.write('[OK] Reset instance: $name');
         return 0;
       case 'activate':
         final name = _requireValue(rest, 'Usage: instance activate <name>');
@@ -191,7 +196,7 @@ class NativeCommandService {
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: instance <list|create|clone|delete|activate|path|port|motd-style|current|delete-all>',
+          'Usage: instance <list|create|clone|delete|reset|activate|path|port|motd-style|current|delete-all>',
           2,
         );
     }
@@ -272,7 +277,7 @@ class NativeCommandService {
     final profile = _activeConsumer;
 
     if (jar != null && jar.isNotEmpty) {
-      _serverCreateFromJar(profile, name, type: type, jarPath: jar);
+      _serverCreateFromJar(profile, name, type: type, jarPath: jar, io: io);
       io.write(
         '[OK] Server instance created: $name ($type, port ${_instanceGetServerPort(profile, name)})',
       );
@@ -292,7 +297,7 @@ class NativeCommandService {
       );
     }
 
-    _serverCreateFromJar(profile, name, type: type, jarPath: jarPath);
+    _serverCreateFromJar(profile, name, type: type, jarPath: jarPath, io: io);
     io.write(
       '[OK] Server instance created: $name ($type mc=$mc, port ${_instanceGetServerPort(profile, name)})',
     );
@@ -301,15 +306,20 @@ class NativeCommandService {
 
   Future<int> _dispatchRuntime(List<String> args, _NativeIoBuffer io) async {
     final sub = args.isEmpty ? 'status' : args.first;
-    final instance = args.length > 1 ? args[1] : null;
+    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
     final profile = _activeConsumer;
 
     switch (sub) {
       case 'start':
-        await _runtimeStart(profile, instance, io);
+        final parsed = _parseRuntimeTargetArgs(rest, allowNoConsole: true);
+        await _runtimeStart(profile, parsed.instance, io);
+        if (!parsed.noConsole) {
+          await _runtimeConsole(profile, parsed.instance, io);
+        }
         return 0;
       case 'console':
-        await _runtimeConsole(profile, instance, io);
+        final parsed = _parseRuntimeTargetArgs(rest, allowNoConsole: false);
+        await _runtimeConsole(profile, parsed.instance, io);
         return 0;
       case 'consoles':
       case 'console-all':
@@ -320,10 +330,10 @@ class NativeCommandService {
         await _runtimeConsoles(profile, io, layout: 'lateral');
         return 0;
       case 'stop':
-        await _runtimeStop(profile, instance, io);
+        await _runtimeStop(profile, rest.isNotEmpty ? rest.first : null, io);
         return 0;
       case 'status':
-        await _runtimeStatus(profile, instance, io);
+        await _runtimeStatus(profile, rest.isNotEmpty ? rest.first : null, io);
         return 0;
       case 'list':
         for (final name in await _runtimeListRunning(profile)) {
@@ -331,10 +341,10 @@ class NativeCommandService {
         }
         return 0;
       case 'settings':
-        return _dispatchRuntimeSettings(profile, args.sublist(1), io);
+        return _dispatchRuntimeSettings(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args]',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args] (start supports --instance/--no-console)',
           2,
         );
     }
@@ -1823,11 +1833,68 @@ class NativeCommandService {
     return options;
   }
 
+  _RuntimeTargetArgs _parseRuntimeTargetArgs(
+    List<String> args, {
+    required bool allowNoConsole,
+  }) {
+    String? instance;
+    var noConsole = false;
+
+    for (var i = 0; i < args.length; i++) {
+      final arg = args[i].trim();
+      if (arg.isEmpty) {
+        continue;
+      }
+
+      if (arg == '--no-console') {
+        if (!allowNoConsole) {
+          throw _NativeCommandException('Unknown runtime arg: $arg', 2);
+        }
+        noConsole = true;
+        continue;
+      }
+
+      if (arg == '--instance') {
+        if (i + 1 >= args.length) {
+          throw _NativeCommandException('Missing value for --instance', 2);
+        }
+        final value = args[i + 1].trim();
+        if (value.isEmpty) {
+          throw _NativeCommandException('Missing value for --instance', 2);
+        }
+        instance = value;
+        i++;
+        continue;
+      }
+
+      if (arg.startsWith('--instance=')) {
+        final value = arg.substring('--instance='.length).trim();
+        if (value.isEmpty) {
+          throw _NativeCommandException('Missing value for --instance', 2);
+        }
+        instance = value;
+        continue;
+      }
+
+      if (arg.startsWith('--')) {
+        throw _NativeCommandException('Unknown runtime arg: $arg', 2);
+      }
+
+      if (instance != null) {
+        throw _NativeCommandException('Unknown runtime arg: $arg', 2);
+      }
+      instance = arg;
+    }
+
+    return _RuntimeTargetArgs(instance: instance, noConsole: noConsole);
+  }
+
   void _serverCreateFromJar(
     ConsumerProfile profile,
     String name, {
     required String type,
     required String jarPath,
+    _NativeIoBuffer? io,
   }) {
     if (name.trim().isEmpty) {
       throw _NativeCommandException('Server name required', 2);
@@ -1842,7 +1909,7 @@ class NativeCommandService {
       resolvedJarPath = jarFile.resolveSymbolicLinksSync();
     } catch (_) {}
 
-    _instanceCreateBlank(profile, name);
+    _instanceCreateBlank(profile, name, io: io);
 
     final normalizedType = type.toLowerCase().trim();
     final installerBased =
@@ -1977,6 +2044,8 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
+    _instanceEnsureSharedPluginOps(profile, instance, io: io);
+
     if (!await _tmuxInstalled()) {
       throw _NativeCommandException(
         'tmux is required for runtime start/console. Install tmux and retry.',
@@ -2024,7 +2093,9 @@ class NativeCommandService {
     Directory(runtimeDir).createSync(recursive: true);
 
     final logFile = File(_runtimeLogFile(profile, instance));
-    logFile.createSync(recursive: true);
+    logFile
+      ..createSync(recursive: true)
+      ..writeAsStringSync('');
     final settings = _runtimeSettingsLoad(profile);
     final launchWorkingDir = _runtimeLaunchWorkingDir(profile, instance);
     final javaCommandParts = <String>[
@@ -2146,11 +2217,28 @@ class NativeCommandService {
     String? inputInstance,
     _NativeIoBuffer io,
   ) async {
-    final instance = inputInstance?.trim().isNotEmpty == true
+    String? instance = inputInstance?.trim().isNotEmpty == true
         ? inputInstance!.trim()
-        : _currentInstance(profile);
+        : null;
+
+    if (instance == null) {
+      final running = await _runtimeListRunning(profile);
+      if (running.length == 1) {
+        instance = running.first;
+        io.write('[INFO] One running server detected: $instance');
+      }
+    }
+
+    instance ??= _currentInstance(profile);
 
     if (instance == null || instance.isEmpty) {
+      final running = await _runtimeListRunning(profile);
+      if (running.length > 1) {
+        throw _NativeCommandException(
+          'Multiple servers are running. Use: runtime console <instance>',
+          2,
+        );
+      }
       throw _NativeCommandException('No active instance set', 2);
     }
 
@@ -2166,6 +2254,10 @@ class NativeCommandService {
     }
 
     final tmuxSession = _tmuxSessionName(profile, instance);
+    if (await _tmuxSessionExists(tmuxSession) &&
+        !await _tmuxSessionHasLivePane(tmuxSession)) {
+      await _runProcess('tmux', <String>['kill-session', '-t', tmuxSession]);
+    }
     if (!await _tmuxSessionExists(tmuxSession)) {
       io.write('[INFO] Runtime is not running. Starting $instance...');
       await _runtimeStart(profile, instance, io);
@@ -2211,11 +2303,16 @@ class NativeCommandService {
 
     String paneCommandFor(String instance) {
       final port = _instanceGetServerPort(profile, instance);
-      final logFile = _runtimeLogFile(profile, instance);
-      File(logFile).createSync(recursive: true);
+      final targetSession = _tmuxSessionName(profile, instance);
       final heading = '=== $instance (port $port) ===';
-      return 'printf %s\\n ${_shellQuote(heading)} && '
-          'tail -n 400 -F ${_shellQuote(logFile)}';
+      final missingMessage = 'Session not available: $instance';
+      return 'printf %s\\n ${_shellQuote(heading)}; '
+          'if tmux has-session -t ${_shellQuote(targetSession)} 2>/dev/null; then '
+          'exec env -u TMUX tmux attach-session -t ${_shellQuote(targetSession)}; '
+          'else '
+          'echo ${_shellQuote(missingMessage)}; '
+          'exec sh; '
+          'fi';
     }
 
     final first = running.first;
@@ -2335,6 +2432,7 @@ class NativeCommandService {
       'All Consoles ($layoutLabel): ${running.length} running server(s)',
     );
     io.write('Navigate panes: Left/Right arrows');
+    io.write('Type directly in focused pane (interactive).');
     io.write('Scroll: mouse wheel (or Ctrl+B then [ for copy mode)');
     io.write('Detach: Esc (or Ctrl+B then D)');
 
@@ -2611,7 +2709,11 @@ class NativeCommandService {
     }
 
     final tmuxSession = _tmuxSessionName(profile, instance);
-    final tmuxRunning = await _tmuxSessionExists(tmuxSession);
+    var tmuxRunning = await _tmuxSessionExists(tmuxSession);
+    if (tmuxRunning && !await _tmuxSessionHasLivePane(tmuxSession)) {
+      await _runProcess('tmux', <String>['kill-session', '-t', tmuxSession]);
+      tmuxRunning = false;
+    }
     final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
     final consolePid = _readPid(_runtimeConsolePidFile(profile, instance));
     final serverRunning =
@@ -2653,8 +2755,12 @@ class NativeCommandService {
   }
 
   Future<bool> _runtimeRunning(ConsumerProfile profile, String instance) async {
-    if (await _tmuxSessionExists(_tmuxSessionName(profile, instance))) {
-      return true;
+    final session = _tmuxSessionName(profile, instance);
+    if (await _tmuxSessionExists(session)) {
+      if (await _tmuxSessionHasLivePane(session)) {
+        return true;
+      }
+      await _runProcess('tmux', <String>['kill-session', '-t', session]);
     }
 
     final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
@@ -2710,6 +2816,25 @@ class NativeCommandService {
       name,
     ]);
     return result.exitCode == 0;
+  }
+
+  Future<bool> _tmuxSessionHasLivePane(String session) async {
+    final result = await _runProcess('tmux', <String>[
+      'list-panes',
+      '-t',
+      session,
+      '-F',
+      '#{pane_dead}',
+    ]);
+    if (result.exitCode != 0) {
+      return false;
+    }
+    final lines = (result.stdout ?? '')
+        .toString()
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty);
+    return lines.any((line) => line == '0');
   }
 
   Future<bool> _pidRunning(int pid) async {
@@ -3463,7 +3588,145 @@ class NativeCommandService {
     return out;
   }
 
-  void _instanceCreateBlank(ConsumerProfile profile, String name) {
+  String _pluginSharedOpsFile(ConsumerProfile profile) {
+    return p.join(
+      _consumerRoot(profile),
+      'shared-plugin-data',
+      'ops',
+      'ops.json',
+    );
+  }
+
+  void _opsWarn(_NativeIoBuffer? io, String message) {
+    final line = '[WARN] $message';
+    if (io != null) {
+      io.error(line);
+      return;
+    }
+    stderr.writeln(line);
+  }
+
+  List<Map<String, dynamic>> _readOpsEntries(
+    String filePath, {
+    _NativeIoBuffer? io,
+    String? contextLabel,
+  }) {
+    final file = File(filePath);
+    if (!file.existsSync()) {
+      return const <Map<String, dynamic>>[];
+    }
+
+    try {
+      final raw = file.readAsStringSync();
+      if (raw.trim().isEmpty) {
+        return const <Map<String, dynamic>>[];
+      }
+
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) {
+        _opsWarn(
+          io,
+          'Invalid ops format in ${contextLabel ?? filePath}; expected JSON array. Treating as empty.',
+        );
+        return const <Map<String, dynamic>>[];
+      }
+
+      final out = <Map<String, dynamic>>[];
+      for (final item in decoded) {
+        if (item is Map) {
+          out.add(Map<String, dynamic>.from(item));
+        }
+      }
+      return out;
+    } catch (e) {
+      _opsWarn(
+        io,
+        'Could not parse ops file ${contextLabel ?? filePath}: $e. Treating as empty.',
+      );
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  String? _opsMergeKey(Map<String, dynamic> entry) {
+    final uuid = entry['uuid']?.toString().trim();
+    if (uuid != null && uuid.isNotEmpty) {
+      return 'uuid:${uuid.toLowerCase()}';
+    }
+    final name = entry['name']?.toString().trim();
+    if (name != null && name.isNotEmpty) {
+      return 'name:${name.toLowerCase()}';
+    }
+    return null;
+  }
+
+  void _instanceEnsureSharedPluginOps(
+    ConsumerProfile profile,
+    String instance, {
+    _NativeIoBuffer? io,
+  }) {
+    if (!_isPluginConsumer(profile) || !_instanceExists(profile, instance)) {
+      return;
+    }
+
+    final sharedOpsPath = _pluginSharedOpsFile(profile);
+    final sharedOpsFile = File(sharedOpsPath);
+    sharedOpsFile.createSync(recursive: true);
+    if (sharedOpsFile.readAsStringSync().trim().isEmpty) {
+      sharedOpsFile.writeAsStringSync('[]\n');
+    }
+
+    final instanceOpsPath = p.join(_instanceDir(profile, instance), 'ops.json');
+    final instanceOpsLinkedToShared =
+        _isLink(instanceOpsPath) &&
+        _resolveLinkTargetAbsolute(instanceOpsPath) == sharedOpsPath;
+
+    final sharedEntries = _readOpsEntries(
+      sharedOpsPath,
+      io: io,
+      contextLabel: 'shared ops',
+    );
+    final instanceEntries = instanceOpsLinkedToShared
+        ? const <Map<String, dynamic>>[]
+        : _readOpsEntries(
+            instanceOpsPath,
+            io: io,
+            contextLabel: 'instance $instance ops',
+          );
+
+    final byKey = <String, Map<String, dynamic>>{};
+    var unnamedCounter = 0;
+    for (final source in <List<Map<String, dynamic>>>[
+      sharedEntries,
+      instanceEntries,
+    ]) {
+      for (final entry in source) {
+        final key = _opsMergeKey(entry) ?? 'unnamed:${unnamedCounter++}';
+        byKey[key] = Map<String, dynamic>.from(entry);
+      }
+    }
+
+    final keys = byKey.keys.toList(growable: false)..sort();
+    final merged = <Map<String, dynamic>>[];
+    for (final key in keys) {
+      final entry = byKey[key];
+      if (entry != null) {
+        merged.add(entry);
+      }
+    }
+
+    sharedOpsFile.writeAsStringSync(
+      '${const JsonEncoder.withIndent('  ').convert(merged)}\n',
+    );
+    if (!instanceOpsLinkedToShared) {
+      _replaceWithSymlink(instanceOpsPath, sharedOpsPath);
+    }
+  }
+
+  void _instanceCreateBlank(
+    ConsumerProfile profile,
+    String name, {
+    _NativeIoBuffer? io,
+  }) {
     if (name.trim().isEmpty) {
       throw _NativeCommandException('Instance name required', 2);
     }
@@ -3495,9 +3758,15 @@ class NativeCommandService {
       _irisPacksLinkInstance(profile, name);
     }
     _configLinkInstance(profile, name);
+    _instanceEnsureSharedPluginOps(profile, name, io: io);
   }
 
-  void _instanceClone(ConsumerProfile profile, String source, String target) {
+  void _instanceClone(
+    ConsumerProfile profile,
+    String source,
+    String target, {
+    _NativeIoBuffer? io,
+  }) {
     if (!_instanceExists(profile, source)) {
       throw _NativeCommandException('Source instance not found: $source', 2);
     }
@@ -3513,6 +3782,7 @@ class NativeCommandService {
       _irisPacksLinkInstance(profile, target);
     }
     _configLinkInstance(profile, target);
+    _instanceEnsureSharedPluginOps(profile, target, io: io);
   }
 
   void _instanceDelete(ConsumerProfile profile, String name) {
@@ -3592,6 +3862,114 @@ class NativeCommandService {
     File(_activeInstanceFile(profile)).deleteSyncSafe();
     File(_activeInstanceLink(profile)).deleteSyncSafe();
     File(_rootActiveInstanceLink()).deleteSyncSafe();
+  }
+
+  Future<void> _instanceReset(
+    ConsumerProfile profile,
+    String name,
+    _NativeIoBuffer io,
+  ) async {
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+
+    if (await _runtimeRunning(profile, name)) {
+      await _runtimeStop(profile, name, io);
+    }
+
+    final instancePath = _instanceDir(profile, name);
+    final backupPath =
+        '$instancePath.reset-backup.${DateTime.now().millisecondsSinceEpoch}';
+
+    final instanceDir = Directory(instancePath);
+    try {
+      instanceDir.renameSync(backupPath);
+    } catch (_) {
+      _copyDirectory(instanceDir, Directory(backupPath));
+      _deletePathEntity(instancePath, recursive: true);
+    }
+
+    try {
+      _instanceCreateBlank(profile, name, io: io);
+      _restoreFactoryArtifactsFromBackup(profile, name, backupPath: backupPath);
+      _instanceEnsureSharedPluginOps(profile, name, io: io);
+      _deletePathEntity(backupPath, recursive: true);
+    } catch (e) {
+      try {
+        _deletePathEntity(instancePath, recursive: true);
+      } catch (_) {}
+      try {
+        Directory(backupPath).renameSync(instancePath);
+      } catch (_) {
+        if (Directory(backupPath).existsSync()) {
+          _copyDirectory(Directory(backupPath), Directory(instancePath));
+          _deletePathEntity(backupPath, recursive: true);
+        }
+      }
+      if (e is _NativeCommandException) {
+        rethrow;
+      }
+      throw _NativeCommandException('Failed to reset $name: $e', 1);
+    }
+  }
+
+  void _restoreFactoryArtifactsFromBackup(
+    ConsumerProfile profile,
+    String instance, {
+    required String backupPath,
+  }) {
+    final backupDir = Directory(backupPath);
+    if (!backupDir.existsSync()) {
+      return;
+    }
+
+    final targetDir = _instanceDir(profile, instance);
+    for (final entity in backupDir.listSync(
+      recursive: false,
+      followLinks: false,
+    )) {
+      final base = p.basename(entity.path);
+      final baseLower = base.toLowerCase();
+      final isDir = entity is Directory;
+      if (_shouldFactoryResetRootEntry(baseLower, isDirectory: isDir)) {
+        continue;
+      }
+
+      final destination = p.join(targetDir, base);
+      if (entity is Directory) {
+        _copyDirectory(entity, Directory(destination));
+      } else if (entity is File) {
+        File(destination).createSync(recursive: true);
+        entity.copySync(destination);
+      } else if (entity is Link) {
+        _replaceWithSymlink(destination, entity.targetSync());
+      }
+    }
+  }
+
+  bool _shouldFactoryResetRootEntry(String name, {required bool isDirectory}) {
+    if (isDirectory) {
+      if (name == 'plugins' ||
+          name == 'mods' ||
+          name == 'logs' ||
+          name == 'config' ||
+          name == 'crash-reports') {
+        return true;
+      }
+      return name == 'world' || name.startsWith('world_');
+    }
+
+    if (name.endsWith('.yml') || name.endsWith('.yaml')) {
+      return true;
+    }
+
+    return name == 'server.properties' ||
+        name == 'eula.txt' ||
+        name == 'ops.json' ||
+        name == 'whitelist.json' ||
+        name == 'banned-ips.json' ||
+        name == 'banned-players.json' ||
+        name == 'usercache.json';
   }
 
   void _instanceActivate(ConsumerProfile profile, String name) {
@@ -3994,7 +4372,7 @@ class NativeCommandService {
     io.write('');
     io.write('Instance commands:');
     io.write(
-      '  instance list|create|clone|delete|activate|path|port|motd-style|current|delete-all',
+      '  instance list|create|clone|delete|reset|activate|path|port|motd-style|current|delete-all',
     );
     io.write('');
     io.write('Server commands:');
@@ -4004,9 +4382,11 @@ class NativeCommandService {
     );
     io.write('');
     io.write('Runtime commands:');
+    io.write('  runtime start [instance] [--instance <name>] [--no-console]');
     io.write(
-      '  runtime start|console|consoles|consoles-lateral|stop|status|list [instance]',
+      '  runtime console [instance] [--instance <name>]  # auto-picks if one running',
     );
+    io.write('  runtime consoles|consoles-lateral|stop|status|list [instance]');
     io.write('  runtime settings <show|presets|set-heap|set-preset|reset>');
     io.write('');
     io.write('Dropins commands:');
@@ -4198,7 +4578,6 @@ class NativeCommandService {
   static const List<String> _sharedConfigFilesBase = <String>[
     'banned-ips.json',
     'banned-players.json',
-    'ops.json',
     'whitelist.json',
     'bukkit.yml',
     'commands.yml',
@@ -4289,6 +4668,13 @@ class _RuntimeSettingsData {
       profile: profile ?? this.profile,
     );
   }
+}
+
+class _RuntimeTargetArgs {
+  const _RuntimeTargetArgs({required this.instance, required this.noConsole});
+
+  final String? instance;
+  final bool noConsole;
 }
 
 class _DropinSyncReport {

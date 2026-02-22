@@ -28,14 +28,7 @@ class InteractiveWizard {
     try {
       while (true) {
         await _showHeader();
-        final options = <String>[
-          'Server Control',
-          'Instance Management',
-          'Runtime Settings',
-          'Build and Sync',
-          'Consumer Profile',
-          'Exit',
-        ];
+        final options = <String>['Run', 'Instances', 'Build/JVM', 'Exit'];
         late final int choice;
         try {
           choice = await UserPrompt.menu('Main Menu', options);
@@ -45,20 +38,14 @@ class InteractiveWizard {
         final selected = options[choice];
 
         switch (selected) {
-          case 'Server Control':
+          case 'Run':
             await _runEscapableStep(_serverControlMenu);
             break;
-          case 'Instance Management':
+          case 'Instances':
             await _runEscapableStep(_instancesMenu);
             break;
-          case 'Runtime Settings':
-            await _runEscapableStep(_runtimeSettingsMenu);
-            break;
-          case 'Build and Sync':
-            await _runEscapableStep(_buildAndSyncMenu);
-            break;
-          case 'Consumer Profile':
-            await _runEscapableStep(_switchConsumer);
+          case 'Build/JVM':
+            await _runEscapableStep(_buildAndJvmMenu);
             break;
           case 'Exit':
             return;
@@ -122,7 +109,9 @@ class InteractiveWizard {
       UserPrompt.info(
         'Start servers, open live consoles, and stop running servers.',
       );
-      UserPrompt.info('Dropins auto-sync to all targets before start.');
+      UserPrompt.info(
+        'Single start auto-opens console. Start-all opens all consoles.',
+      );
 
       final options = <String>[];
       if (stopped.isNotEmpty) {
@@ -149,7 +138,7 @@ class InteractiveWizard {
       }
       late final int choice;
       try {
-        choice = await UserPrompt.menu('Server Control', options);
+        choice = await UserPrompt.menu('Run', options);
       } on PromptBackNavigation {
         return;
       }
@@ -207,15 +196,14 @@ class InteractiveWizard {
     final options = candidates
         .map((name) => name == active ? '$name (active)' : name)
         .toList(growable: false);
-    final picked = await UserPrompt.pick(
-      'Start which instance in background?',
-      options,
-    );
+    final picked = await UserPrompt.pick('Start which instance?', options);
     final selected = _instanceNameFromMenuLine(picked);
 
     await _syncDropinsAllTargets();
-    await passthrough.run(<String>['runtime', 'start', selected]);
-    await UserPrompt.pressEnter();
+    final code = await passthrough.run(<String>['runtime', 'start', selected]);
+    if (code != 0) {
+      await UserPrompt.pressEnter();
+    }
   }
 
   Future<void> _startAllStoppedInstances() async {
@@ -238,7 +226,7 @@ class InteractiveWizard {
     }
 
     final confirm = await UserPrompt.confirm(
-      'Start all ${candidates.length} stopped instance(s) in background?',
+      'Start all ${candidates.length} stopped instance(s)?',
       defaultValue: true,
     );
     if (!confirm) {
@@ -247,15 +235,18 @@ class InteractiveWizard {
 
     var started = 0;
     var failed = 0;
+    final startedNames = <String>[];
     await _syncDropinsAllTargets();
     for (final instance in candidates) {
       final code = await passthrough.run(<String>[
         'runtime',
         'start',
         instance,
+        '--no-console',
       ]);
       if (code == 0) {
         started++;
+        startedNames.add(instance);
       } else {
         failed++;
       }
@@ -266,7 +257,18 @@ class InteractiveWizard {
     } else {
       UserPrompt.warn('Started $started instance(s), failed $failed.');
     }
-    await UserPrompt.pressEnter();
+
+    if (started == 0) {
+      await UserPrompt.pressEnter();
+      return;
+    }
+
+    if (started == 1) {
+      await passthrough.run(<String>['runtime', 'console', startedNames.first]);
+      return;
+    }
+
+    await _openAllRunningConsoles('grid');
   }
 
   Future<void> _instancesMenu() async {
@@ -274,15 +276,17 @@ class InteractiveWizard {
       await _showHeader();
       final instances = await _instanceNames();
       UserPrompt.info(
-        'Create from cached builds, activate, configure, and delete instances.',
+        'Manage instances, active profile, ports, resets, and cleanup.',
       );
       final options = <String>[
+        'Switch Consumer Profile',
         'Switch Existing Instance',
         'Create From Type (cached build)',
       ];
       if (instances.isNotEmpty) {
         options.add('Set Instance Port');
         options.add('Apply Styled MOTD');
+        options.add('Reset One Instance (factory)');
         if (instances.length > 1) {
           options.add('Apply Styled MOTD to All');
         }
@@ -300,6 +304,9 @@ class InteractiveWizard {
       final selected = options[choice];
 
       switch (selected) {
+        case 'Switch Consumer Profile':
+          await _runEscapableStep(_switchConsumer);
+          break;
         case 'Switch Existing Instance':
           await _runEscapableStep(_switchExistingInstance);
           break;
@@ -311,6 +318,9 @@ class InteractiveWizard {
           break;
         case 'Apply Styled MOTD':
           await _runEscapableStep(_applyStyledMotdForOne);
+          break;
+        case 'Reset One Instance (factory)':
+          await _runEscapableStep(_resetOneInstance);
           break;
         case 'Apply Styled MOTD to All':
           await _runEscapableStep(_applyStyledMotdForAll);
@@ -539,6 +549,46 @@ class InteractiveWizard {
     await UserPrompt.pressEnter();
   }
 
+  Future<void> _resetOneInstance() async {
+    final instances = await _instanceNames();
+    if (instances.isEmpty) {
+      UserPrompt.warn('No instances found.');
+      await UserPrompt.pressEnter();
+      return;
+    }
+
+    final active = await _activeInstance();
+    final running = (await _runningServers()).toSet();
+    final options = instances
+        .map((name) {
+          final tags = <String>[];
+          if (name == active) {
+            tags.add('active');
+          }
+          if (running.contains(name)) {
+            tags.add('running');
+          }
+          if (tags.isEmpty) {
+            return name;
+          }
+          return '$name (${tags.join(', ')})';
+        })
+        .toList(growable: false);
+
+    final picked = await UserPrompt.pick('Reset which instance?', options);
+    final target = _instanceNameFromMenuLine(picked);
+    final confirmed = await UserPrompt.confirm(
+      'Factory reset $target? Launch artifacts are kept; worlds/config/plugins/mods are wiped.',
+      defaultValue: false,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    await passthrough.run(<String>['instance', 'reset', target]);
+    await UserPrompt.pressEnter();
+  }
+
   Future<void> _deleteAllInstances() async {
     final instances = await _instanceNames();
     if (instances.isEmpty) {
@@ -591,64 +641,79 @@ class InteractiveWizard {
       statuses[server] = await _instanceRuntimeStatus(server);
     }
 
-    final options = servers
-        .map((server) {
-          final status = statuses[server];
-          final mode = status?.mode ?? 'unknown';
-          var suffix = '';
-          if (mode == 'watchdog') {
-            suffix = ' [restart to tmux]';
-          } else if (mode != 'tmux') {
-            suffix = ' [unavailable]';
-          }
-          return 'Console: $server (port ${status?.port ?? '?'})$suffix';
-        })
-        .toList(growable: false);
+    String? target;
+    if (servers.length == 1) {
+      target = servers.first;
+      UserPrompt.info('One running server detected: $target');
+    } else {
+      final options = servers
+          .map((server) {
+            final status = statuses[server];
+            final mode = status?.mode ?? 'unknown';
+            var suffix = '';
+            if (mode == 'watchdog') {
+              suffix = ' [restart to tmux]';
+            } else if (mode != 'tmux') {
+              suffix = ' [unavailable]';
+            }
+            return 'Console: $server (port ${status?.port ?? '?'})$suffix';
+          })
+          .toList(growable: false);
 
-    final picked = await UserPrompt.pick(
-      'Open console for which running server?',
-      options,
-    );
-    final target = _instanceNameFromAction(picked, 'Console: ');
-    if (target == null) {
-      UserPrompt.warn('Could not parse server selection.');
-      await UserPrompt.pressEnter();
-      return;
+      final picked = await UserPrompt.pick(
+        'Open console for which running server?',
+        options,
+      );
+      target = _instanceNameFromAction(picked, 'Console: ');
+      if (target == null) {
+        UserPrompt.warn('Could not parse server selection.');
+        await UserPrompt.pressEnter();
+        return;
+      }
     }
 
-    final status = statuses[target];
+    final selectedTarget = target;
+
+    final status = statuses[selectedTarget];
     final mode = status?.mode ?? 'unknown';
     if (mode == 'tmux') {
-      UserPrompt.info('Opening console for $target');
+      UserPrompt.info('Opening console for $selectedTarget');
       UserPrompt.info(
         'Return to menu without killing server: Esc (or Ctrl+B then D)',
       );
-      await _openConsoleInChildProcess(target);
+      await _openConsoleInChildProcess(selectedTarget);
       return;
     }
 
     if (mode == 'watchdog') {
       UserPrompt.warn(
-        'Live console attach is unavailable for $target in watchdog mode.',
+        'Live console attach is unavailable for $selectedTarget in watchdog mode.',
       );
       final restartToTmux = await UserPrompt.confirm(
-        'Stop and restart $target in tmux mode, then open console now?',
+        'Stop and restart $selectedTarget in tmux mode, then open console now?',
         defaultValue: true,
       );
       if (!restartToTmux) {
         return;
       }
-      await passthrough.run(<String>['runtime', 'stop', target]);
-      await passthrough.run(<String>['runtime', 'start', target]);
-      UserPrompt.info('Opening tmux console for $target');
+      await passthrough.run(<String>['runtime', 'stop', selectedTarget]);
+      await passthrough.run(<String>[
+        'runtime',
+        'start',
+        selectedTarget,
+        '--no-console',
+      ]);
+      UserPrompt.info('Opening tmux console for $selectedTarget');
       UserPrompt.info(
         'Return to menu without killing server: Esc (or Ctrl+B then D)',
       );
-      await _openConsoleInChildProcess(target);
+      await _openConsoleInChildProcess(selectedTarget);
       return;
     }
 
-    UserPrompt.warn('Console for $target is unavailable in mode: $mode');
+    UserPrompt.warn(
+      'Console for $selectedTarget is unavailable in mode: $mode',
+    );
     await UserPrompt.pressEnter();
   }
 
@@ -713,9 +778,6 @@ class InteractiveWizard {
       await UserPrompt.pressEnter();
       return true;
     }
-
-    UserPrompt.info('Detach back to wizard: Esc (or Ctrl+B then D).');
-    await _openConsoleInChildProcess(name);
     return true;
   }
 
@@ -750,24 +812,35 @@ class InteractiveWizard {
     await UserPrompt.pressEnter();
   }
 
-  Future<void> _buildAndSyncMenu() async {
+  Future<void> _buildAndJvmMenu() async {
+    const heapOptions = <String>['2G', '4G', '6G', '8G', '10G', '12G', '16G'];
+    const presetLabels = <String, String>{
+      'Aikar (recommended)': 'aikar',
+      'Vanilla (minimal flags)': 'vanilla',
+      'Conservative (lower pause pressure)': 'conservative',
+    };
+
     while (true) {
       await _showHeader();
       final pluginConsumer = _isPluginConsumerSelected();
       final dropinCommand = pluginConsumer ? 'plugins' : 'mods';
       final dropinLabel = pluginConsumer ? 'Plugins' : 'Mods';
-      UserPrompt.info(
-        'Build cache + artifact sync actions for the active consumer.',
-      );
+      final settings = await _runtimeSettings();
+      UserPrompt.row('Heap size:', settings.heap ?? '4G');
+      UserPrompt.row('Flag profile:', settings.profile ?? 'aikar');
+      UserPrompt.info('Build cache, dropin sync, and JVM tuning in one menu.');
       final options = <String>[
-        'Sync Repos (all) - pull latest upstream repos',
-        'Show Build Cache - list cached built jars',
-        'Sync $dropinLabel to All Valid Targets - copy dropins into every instance',
-        'Show $dropinLabel Source - show dropins folder path',
+        'Sync Repos (all)',
+        'Show Build Cache',
+        'Sync $dropinLabel to All Valid Targets',
+        'Show $dropinLabel Source',
+        'Set Heap Size',
+        'Set JVM Flag Profile',
+        'Reset JVM to Recommended (4G + Aikar)',
       ];
       late final int choice;
       try {
-        choice = await UserPrompt.menu('Build & Sync', options);
+        choice = await UserPrompt.menu('Build/JVM', options);
       } on PromptBackNavigation {
         return;
       }
@@ -789,46 +862,7 @@ class InteractiveWizard {
           await passthrough.run(<String>[dropinCommand, 'show-source']);
           await UserPrompt.pressEnter();
           break;
-      }
-    }
-  }
-
-  Future<void> _runtimeSettingsMenu() async {
-    const heapOptions = <String>['2G', '4G', '6G', '8G', '10G', '12G', '16G'];
-    const presetLabels = <String, String>{
-      'Aikar (recommended)': 'aikar',
-      'Vanilla (minimal flags)': 'vanilla',
-      'Conservative (lower pause pressure)': 'conservative',
-    };
-
-    while (true) {
-      await _showHeader();
-      final settings = await _runtimeSettings();
-      UserPrompt.row('Heap size:', settings.heap ?? '4G');
-      UserPrompt.row('Flag profile:', settings.profile ?? 'aikar');
-      final argsPreview = settings.jvmArgs == null
-          ? 'unknown'
-          : settings.jvmArgs!.length > 100
-          ? '${settings.jvmArgs!.substring(0, 100)}...'
-          : settings.jvmArgs!;
-      UserPrompt.row('JVM args:', argsPreview);
-      stdout.writeln('');
-
-      const options = <String>[
-        'Set Heap Size',
-        'Set JVM Flag Profile',
-        'Reset to Recommended (4G + Aikar)',
-      ];
-      late final int choice;
-      try {
-        choice = await UserPrompt.menu('Runtime/JVM Settings', options);
-      } on PromptBackNavigation {
-        return;
-      }
-      final selected = options[choice];
-
-      switch (selected) {
-        case 'Set Heap Size':
+        case 4:
           final currentHeap = (settings.heap ?? '4G').toUpperCase();
           var heapIndex = heapOptions.indexWhere(
             (candidate) => candidate.toUpperCase() == currentHeap,
@@ -849,7 +883,7 @@ class InteractiveWizard {
           ]);
           await UserPrompt.pressEnter();
           break;
-        case 'Set JVM Flag Profile':
+        case 5:
           final labels = presetLabels.keys.toList(growable: false);
           final currentProfile = (settings.profile ?? 'aikar').toLowerCase();
           var presetIndex = labels.indexWhere(
@@ -872,7 +906,7 @@ class InteractiveWizard {
           ]);
           await UserPrompt.pressEnter();
           break;
-        case 'Reset to Recommended (4G + Aikar)':
+        case 6:
           await passthrough.run(<String>['runtime', 'settings', 'reset']);
           await UserPrompt.pressEnter();
           break;
