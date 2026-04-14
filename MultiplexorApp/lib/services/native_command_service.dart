@@ -1700,6 +1700,11 @@ class NativeCommandService {
     final normalized = type.toLowerCase();
     final profile = _activeConsumer;
 
+    final upstream = await _resolveLatestSupportedMcVersion(normalized);
+    if (upstream != null && upstream.isNotEmpty) {
+      return upstream;
+    }
+
     if (<String>{'paper', 'purpur', 'folia', 'canvas'}.contains(normalized)) {
       final stable = await _repoLatestStableVersion(profile, normalized);
       if (stable != null && stable.isNotEmpty) {
@@ -1749,6 +1754,209 @@ class NativeCommandService {
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<String?> _resolveLatestSupportedMcVersion(String type) async {
+    try {
+      switch (type) {
+        case 'paper':
+        case 'folia':
+          return _resolveLatestPaperLikeMcVersion(type);
+        case 'purpur':
+          return _resolveLatestPurpurMcVersion();
+        case 'canvas':
+          return _resolveLatestCanvasMcVersion();
+        case 'fabric':
+          return _resolveLatestFabricMcVersion();
+        case 'forge':
+          return _resolveLatestForgeMcVersion();
+        case 'neoforge':
+          return _resolveLatestNeoForgeMcVersion();
+        case 'spigot':
+          return _resolveLatestSpigotMcVersion();
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  Future<String?> _resolveLatestPaperLikeMcVersion(String type) async {
+    final payload = await _httpGetJsonObject(
+      'https://api.papermc.io/v2/projects/$type',
+    );
+    final versionsRaw = payload['versions'];
+    if (versionsRaw is! List) {
+      return null;
+    }
+    return _latestStableMcVersionFromValues(versionsRaw);
+  }
+
+  Future<String?> _resolveLatestPurpurMcVersion() async {
+    final payload = await _httpGetJsonObject(
+      'https://api.purpurmc.org/v2/purpur',
+    );
+    final versionsRaw = payload['versions'];
+    if (versionsRaw is! List) {
+      return null;
+    }
+    return _latestStableMcVersionFromValues(versionsRaw);
+  }
+
+  Future<String?> _resolveLatestCanvasMcVersion() async {
+    final payload = await _httpGetJsonObject(
+      'https://canvasmc.io/api/v2/builds/all',
+    );
+    final buildsRaw = payload['builds'];
+    if (buildsRaw is! List) {
+      return null;
+    }
+
+    final versions = <String>{};
+    for (final raw in buildsRaw) {
+      if (raw is! Map) {
+        continue;
+      }
+      final candidate =
+          raw['channelVersion']?.toString().trim() ??
+          raw['minecraftVersion']?.toString().trim() ??
+          '';
+      if (_isStableMcVersion(candidate)) {
+        versions.add(candidate);
+      }
+    }
+    return _latestStableMcVersionFromValues(versions);
+  }
+
+  Future<String?> _resolveLatestFabricMcVersion() async {
+    final latestRelease = await _latestMinecraftRelease();
+    if (latestRelease.isNotEmpty &&
+        await _fabricSupportsMcVersion(latestRelease)) {
+      return latestRelease;
+    }
+
+    final payload = await _httpGetJsonList(
+      'https://meta.fabricmc.net/v2/versions/game',
+    );
+    final versions = <String>{};
+    for (final raw in payload) {
+      if (raw is! Map) {
+        continue;
+      }
+      if (raw['stable'] != true) {
+        continue;
+      }
+      final version = raw['version']?.toString().trim() ?? '';
+      if (_isStableMcVersion(version)) {
+        versions.add(version);
+      }
+    }
+
+    final ordered = versions.toList(growable: false)..sort(_compareVersions);
+    for (final version in ordered.reversed) {
+      if (await _fabricSupportsMcVersion(version)) {
+        return version;
+      }
+    }
+    return null;
+  }
+
+  Future<String?> _resolveLatestForgeMcVersion() async {
+    final payload = await _httpGetJsonObject(
+      'https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json',
+    );
+    final promosRaw = payload['promos'];
+    if (promosRaw is! Map) {
+      return null;
+    }
+
+    final versions = <String>{};
+    for (final entry in promosRaw.entries) {
+      final key = entry.key.toString().trim();
+      if (!key.endsWith('-latest') && !key.endsWith('-recommended')) {
+        continue;
+      }
+      final version = key.split('-').first.trim();
+      if (_isStableMcVersion(version)) {
+        versions.add(version);
+      }
+    }
+    return _latestStableMcVersionFromValues(versions);
+  }
+
+  Future<String?> _resolveLatestNeoForgeMcVersion() async {
+    final metadata = await _httpGetText(
+      'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml',
+    );
+    final versions = RegExp(r'<version>([^<]+)</version>')
+        .allMatches(metadata)
+        .map((m) => m.group(1)?.trim() ?? '')
+        .map(_minecraftVersionFromNeoForgeLoader)
+        .whereType<String>()
+        .toSet();
+    return _latestStableMcVersionFromValues(versions);
+  }
+
+  Future<String?> _resolveLatestSpigotMcVersion() async {
+    final html = await _httpGetText('https://hub.spigotmc.org/versions/');
+    final versions = RegExp(r'href="(\d+\.\d+(?:\.\d+)?)\.json"')
+        .allMatches(html)
+        .map((m) => m.group(1)?.trim() ?? '')
+        .where(_isStableMcVersion)
+        .toSet();
+    return _latestStableMcVersionFromValues(versions);
+  }
+
+  Future<bool> _fabricSupportsMcVersion(String mc) async {
+    try {
+      final payload = await _httpGetJsonList(
+        'https://meta.fabricmc.net/v2/versions/loader/$mc',
+      );
+      return payload.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String? _minecraftVersionFromNeoForgeLoader(String loaderVersion) {
+    final match = RegExp(
+      r'^(\d+)\.(\d+)(?:\.(\d+))?(?:[.-]|$)',
+    ).firstMatch(loaderVersion);
+    if (match == null) {
+      return null;
+    }
+
+    final major = int.tryParse(match.group(1) ?? '');
+    final minor = int.tryParse(match.group(2) ?? '');
+    final patch = int.tryParse(match.group(3) ?? '');
+    if (major == null || minor == null) {
+      return null;
+    }
+
+    // Older NeoForge loader ids drop the leading "1." from Minecraft releases
+    // and use the third segment for the loader build rather than the MC patch.
+    if (major < 24) {
+      return '1.$major.$minor';
+    }
+
+    return '$major.$minor.${patch ?? 0}';
+  }
+
+  String? _latestStableMcVersionFromValues(Iterable<dynamic> values) {
+    final versions =
+        values
+            .map((value) => value?.toString().trim() ?? '')
+            .where(_isStableMcVersion)
+            .toSet()
+            .toList(growable: false)
+          ..sort(_compareVersions);
+    if (versions.isEmpty) {
+      return null;
+    }
+    return versions.last;
+  }
+
+  bool _isStableMcVersion(String value) {
+    return RegExp(r'^\d+\.\d+(\.\d+)?$').hasMatch(value.trim());
   }
 
   Future<List<String>> _repoStableVersions(
@@ -2107,9 +2315,12 @@ class NativeCommandService {
       ),
     ];
     final javaCommand = javaCommandParts.map(_shellQuote).join(' ');
+    final serverPidFile = _runtimeServerPidFile(profile, instance);
 
     final runScript =
-        'cd ${_shellQuote(launchWorkingDir)} && exec $javaCommand';
+        'cd ${_shellQuote(launchWorkingDir)} && '
+        'printf "%s\\n" "\$\$" > ${_shellQuote(serverPidFile)} && '
+        'exec $javaCommand';
     final tmuxSession = _tmuxSessionName(profile, instance);
 
     // Clear stale runtime markers when switching to tmux-backed runtime.
@@ -2146,9 +2357,15 @@ class NativeCommandService {
     }
 
     await _tmuxConfigureConsoleSession(tmuxSession);
+    await _tmuxSetRuntimeUiLabel(tmuxSession, 'jvm-starting');
 
     io.write('[OK] Runtime started: $instance');
     io.write('[INFO] tmux session: $tmuxSession');
+    final serverPid = await _awaitRuntimeServerPid(profile, instance);
+    if (serverPid != null) {
+      await _tmuxSetRuntimeUiLabel(tmuxSession, 'jvm-$serverPid');
+      io.write('[INFO] server pid: $serverPid');
+    }
     io.write('[INFO] Log: ${logFile.path}');
   }
 
@@ -2540,6 +2757,20 @@ class NativeCommandService {
         'set-window-option',
         '-t',
         '$tmuxSession:0',
+        'automatic-rename',
+        'off',
+      ],
+      <String>[
+        'set-window-option',
+        '-t',
+        '$tmuxSession:0',
+        'allow-rename',
+        'off',
+      ],
+      <String>[
+        'set-window-option',
+        '-t',
+        '$tmuxSession:0',
         'window-size',
         'latest',
       ],
@@ -2563,6 +2794,22 @@ class NativeCommandService {
       }
       if (!ok) {
         return;
+      }
+    }
+  }
+
+  Future<void> _tmuxSetRuntimeUiLabel(String tmuxSession, String label) async {
+    final commands = <List<String>>[
+      <String>['rename-window', '-t', '$tmuxSession:0', label],
+      <String>['select-pane', '-t', '$tmuxSession:0.0', '-T', label],
+    ];
+    for (final args in commands) {
+      for (var attempt = 0; attempt < 5; attempt++) {
+        final result = await _runProcess('tmux', args);
+        if (result.exitCode == 0) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
       }
     }
   }
@@ -2855,8 +3102,10 @@ class NativeCommandService {
     var jvmArgs = _RuntimeSettingsData.defaults.jvmArgs;
     var runtimeProfile = _RuntimeSettingsData.defaults.profile;
     final file = File(_runtimeSettingsFile(profile));
+    var loadedFromFile = false;
 
     if (file.existsSync()) {
+      loadedFromFile = true;
       for (final raw in file.readAsLinesSync()) {
         final line = raw.trim();
         if (line.isEmpty || line.startsWith('#') || !line.contains('=')) {
@@ -2903,15 +3152,28 @@ class NativeCommandService {
       runtimeProfile = envProfile.trim().toLowerCase();
     }
 
+    final normalizedJvmArgs = _runtimeSettingsNormalizeJvmArgs(jvmArgs);
+    final shouldRewriteNormalizedSettings =
+        loadedFromFile &&
+        envHeap == null &&
+        envJvmArgs == null &&
+        envProfile == null &&
+        normalizedJvmArgs != jvmArgs;
+    jvmArgs = normalizedJvmArgs;
+
     if (!_runtimeSettingsPresets.containsKey(runtimeProfile)) {
       runtimeProfile = _runtimeSettingsGuessProfileForArgs(jvmArgs);
     }
 
-    return _RuntimeSettingsData(
+    final settings = _RuntimeSettingsData(
       heap: heap,
       jvmArgs: jvmArgs,
       profile: runtimeProfile,
     );
+    if (shouldRewriteNormalizedSettings) {
+      _runtimeSettingsSave(profile, settings);
+    }
+    return settings;
   }
 
   void _runtimeSettingsSave(
@@ -2920,8 +3182,9 @@ class NativeCommandService {
   ) {
     final file = File(_runtimeSettingsFile(profile));
     file.createSync(recursive: true);
+    final normalizedArgs = _runtimeSettingsNormalizeJvmArgs(settings.jvmArgs);
     file.writeAsStringSync(
-      '${['# Multiplexor runtime settings (${profile.shortName})', 'HEAP_SIZE=${settings.heap}', 'JVM_PROFILE=${settings.profile}', 'JVM_ARGS=${settings.jvmArgs}'].join('\n')}\n',
+      '${['# Multiplexor runtime settings (${profile.shortName})', 'HEAP_SIZE=${settings.heap}', 'JVM_PROFILE=${settings.profile}', 'JVM_ARGS=$normalizedArgs'].join('\n')}\n',
     );
   }
 
@@ -2938,6 +3201,16 @@ class NativeCommandService {
       }
     }
     return 'custom';
+  }
+
+  String _runtimeSettingsNormalizeJvmArgs(String args) {
+    final tokens = args
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((token) => token.isNotEmpty)
+        .where((token) => token != '-XX:+PerfDisableSharedMem')
+        .toList(growable: false);
+    return tokens.join(' ');
   }
 
   List<String> _javaArgsForLaunch(
@@ -3197,6 +3470,20 @@ class NativeCommandService {
       return true;
     }
     return false;
+  }
+
+  Future<int?> _awaitRuntimeServerPid(
+    ConsumerProfile profile,
+    String instance,
+  ) async {
+    for (var attempt = 0; attempt < 10; attempt++) {
+      final pid = _readPid(_runtimeServerPidFile(profile, instance));
+      if (pid != null && await _pidRunning(pid)) {
+        return pid;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return null;
   }
 
   Future<bool> _runtimeCanBind(
@@ -4568,7 +4855,7 @@ class NativeCommandService {
         '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 '
         '-XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapRegionSize=8M '
         '-XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 '
-        '-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem -Dfile.encoding=UTF-8',
+        '-XX:+UseStringDeduplication -Dfile.encoding=UTF-8',
     'vanilla': '-Dfile.encoding=UTF-8',
     'conservative':
         '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=300 '
@@ -4647,7 +4934,7 @@ class _RuntimeSettingsData {
         '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 '
         '-XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapRegionSize=8M '
         '-XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 '
-        '-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem -Dfile.encoding=UTF-8',
+        '-XX:+UseStringDeduplication -Dfile.encoding=UTF-8',
     this.profile = 'aikar',
   });
 
