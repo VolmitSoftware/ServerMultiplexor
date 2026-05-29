@@ -9,6 +9,9 @@ import '../utils/process_runner.dart';
 import 'consumer_service.dart';
 import 'manager_context.dart';
 
+part 'native_command_help.dart';
+part 'native_cli_output.dart';
+
 class NativeCommandService {
   NativeCommandService({required this.context, required this.consumerService});
 
@@ -289,10 +292,25 @@ class NativeCommandService {
         ? requestedMc!
         : await _resolveLatestMcVersion(type);
 
-    final jarPath = _findCachedJar(profile, type: type, mc: mc);
+    final autoBuild = options['auto-build'] == 'true';
+    var jarPath = _findCachedJar(
+      profile,
+      type: type,
+      mc: mc,
+      allowLatestFallback: requestedMc == null,
+    );
+    if (autoBuild) {
+      io.write('[INFO] Refreshing $type for mc=$mc from upstream sources');
+      jarPath = await _buildTarget(
+        profile,
+        type,
+        _serverCreateBuildOptions(options, mc),
+        io,
+      );
+    }
     if (jarPath == null) {
       throw _NativeCommandException(
-        'No cached jar for $type mc=$mc in ${_buildDir(profile, type)}. Build/download a jar or use --jar <path>.',
+        'No cached jar for $type mc=$mc in ${_buildDir(profile, type)}. Run build $type --mc $mc, use server create $name --type $type --mc $mc --auto-build, or use --jar <path>.',
         2,
       );
     }
@@ -1072,7 +1090,7 @@ class NativeCommandService {
     }
   }
 
-  Future<void> _buildTarget(
+  Future<String> _buildTarget(
     ConsumerProfile profile,
     String type,
     Map<String, String> options,
@@ -1087,43 +1105,36 @@ class NativeCommandService {
     switch (normalized) {
       case 'paper':
       case 'folia':
-        await _buildDownloadPaperLike(profile, normalized, mc, io);
-        return;
+        return _buildDownloadPaperLike(profile, normalized, mc, io);
       case 'purpur':
-        await _buildDownloadPurpur(profile, mc, io);
-        return;
+        return _buildDownloadPurpur(profile, mc, io);
       case 'canvas':
-        await _buildDownloadCanvas(profile, mc, io);
-        return;
+        return _buildDownloadCanvas(profile, mc, io);
       case 'fabric':
-        await _buildDownloadFabric(
+        return _buildDownloadFabric(
           profile,
           mc,
           options['loader']?.trim(),
           options['installer']?.trim(),
           io,
         );
-        return;
       case 'forge':
-        await _buildDownloadForge(profile, mc, options['loader']?.trim(), io);
-        return;
+        return _buildDownloadForge(profile, mc, options['loader']?.trim(), io);
       case 'neoforge':
-        await _buildDownloadNeoForge(
+        return _buildDownloadNeoForge(
           profile,
           mc,
           options['loader']?.trim(),
           io,
         );
-        return;
       case 'spigot':
-        await _buildWithBuildTools(profile, mc, io);
-        return;
+        return _buildWithBuildTools(profile, mc, io);
       default:
         throw _NativeCommandException('Unknown build target: $type', 2);
     }
   }
 
-  Future<void> _buildDownloadPaperLike(
+  Future<String> _buildDownloadPaperLike(
     ConsumerProfile profile,
     String type,
     String mc,
@@ -1179,9 +1190,10 @@ class NativeCommandService {
     _registerBuiltJar(profile, type, output);
     io.write('[OK] Cached $type build $bestBuild for mc=$mc');
     io.write('[INFO] Jar: $output');
+    return output;
   }
 
-  Future<void> _buildDownloadPurpur(
+  Future<String> _buildDownloadPurpur(
     ConsumerProfile profile,
     String mc,
     _NativeIoBuffer io,
@@ -1211,9 +1223,10 @@ class NativeCommandService {
     _registerBuiltJar(profile, 'purpur', output);
     io.write('[OK] Cached purpur build $latestBuild for mc=$mc');
     io.write('[INFO] Jar: $output');
+    return output;
   }
 
-  Future<void> _buildDownloadCanvas(
+  Future<String> _buildDownloadCanvas(
     ConsumerProfile profile,
     String mc,
     _NativeIoBuffer io,
@@ -1226,7 +1239,8 @@ class NativeCommandService {
       throw _NativeCommandException('No Canvas builds available for mc=$mc', 1);
     }
 
-    Map<String, dynamic>? selected;
+    Map<String, dynamic>? selectedStable;
+    Map<String, dynamic>? selectedAny;
     for (final raw in builds) {
       if (raw is! Map) {
         continue;
@@ -1234,11 +1248,11 @@ class NativeCommandService {
       final candidate = Map<String, dynamic>.from(raw);
       final experimental = candidate['isExperimental'] == true;
       if (!experimental) {
-        selected = candidate;
-        break;
+        selectedStable = _newerCanvasBuild(selectedStable, candidate);
       }
-      selected ??= candidate;
+      selectedAny = _newerCanvasBuild(selectedAny, candidate);
     }
+    final selected = selectedStable ?? selectedAny;
     if (selected == null) {
       throw _NativeCommandException(
         'No downloadable Canvas build found for mc=$mc',
@@ -1266,9 +1280,33 @@ class NativeCommandService {
     _registerBuiltJar(profile, 'canvas', output);
     io.write('[OK] Cached canvas build $buildNumber for mc=$channel');
     io.write('[INFO] Jar: $output');
+    return output;
   }
 
-  Future<void> _buildDownloadFabric(
+  Map<String, dynamic> _newerCanvasBuild(
+    Map<String, dynamic>? current,
+    Map<String, dynamic> candidate,
+  ) {
+    if (current == null) {
+      return candidate;
+    }
+
+    final currentNumber = int.tryParse(
+      current['buildNumber']?.toString().trim() ?? '',
+    );
+    final candidateNumber = int.tryParse(
+      candidate['buildNumber']?.toString().trim() ?? '',
+    );
+    if (candidateNumber == null) {
+      return current;
+    }
+    if (currentNumber == null || candidateNumber > currentNumber) {
+      return candidate;
+    }
+    return current;
+  }
+
+  Future<String> _buildDownloadFabric(
     ConsumerProfile profile,
     String mc,
     String? loaderInput,
@@ -1294,9 +1332,10 @@ class NativeCommandService {
       '[OK] Cached fabric server launcher for mc=$mc loader=$loader installer=$installer',
     );
     io.write('[INFO] Jar: $output');
+    return output;
   }
 
-  Future<void> _buildDownloadForge(
+  Future<String> _buildDownloadForge(
     ConsumerProfile profile,
     String mc,
     String? loaderInput,
@@ -1316,9 +1355,10 @@ class NativeCommandService {
     _registerBuiltJar(profile, 'forge', output);
     io.write('[OK] Cached forge installer for mc=$mc loader=$loader');
     io.write('[INFO] Jar: $output');
+    return output;
   }
 
-  Future<void> _buildDownloadNeoForge(
+  Future<String> _buildDownloadNeoForge(
     ConsumerProfile profile,
     String mc,
     String? loaderInput,
@@ -1337,9 +1377,10 @@ class NativeCommandService {
     _registerBuiltJar(profile, 'neoforge', output);
     io.write('[OK] Cached neoforge installer for loader=$loader');
     io.write('[INFO] Jar: $output');
+    return output;
   }
 
-  Future<void> _buildWithBuildTools(
+  Future<String> _buildWithBuildTools(
     ConsumerProfile profile,
     String mc,
     _NativeIoBuffer io,
@@ -1354,9 +1395,16 @@ class NativeCommandService {
         ? Platform.environment['SPIGOT_BUILDTOOLS_URL']!.trim()
         : 'https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar';
     final buildToolsJar = p.join(toolsDir, 'BuildTools.jar');
-    if (!File(buildToolsJar).existsSync()) {
-      io.write('[INFO] Downloading BuildTools.jar');
+    final cachedBuildTools = File(buildToolsJar).existsSync();
+    try {
+      io.write('[INFO] Refreshing BuildTools.jar from upstream');
       await _downloadToFile(buildToolsUrl, buildToolsJar);
+    } on _NativeCommandException catch (e) {
+      if (!cachedBuildTools) {
+        rethrow;
+      }
+      io.error('[WARN] ${e.message}');
+      io.error('[WARN] Using cached BuildTools.jar: $buildToolsJar');
     }
 
     final workDir = p.join(
@@ -1405,45 +1453,56 @@ class NativeCommandService {
     _registerBuiltJar(profile, 'spigot', output);
     io.write('[OK] Cached spigot server jar for mc=$mc');
     io.write('[INFO] Jar: $output');
+    return output;
   }
 
   Future<String> _resolveLatestFabricLoader(String mc) async {
     final payload = await _httpGetJsonList(
       'https://meta.fabricmc.net/v2/versions/loader/$mc',
     );
-    if (payload.isEmpty || payload.first is! Map) {
+    final versions = <String>[];
+    for (final raw in payload) {
+      if (raw is! Map) {
+        continue;
+      }
+      final loader = raw['loader'];
+      if (loader is! Map || loader['version'] == null) {
+        continue;
+      }
+      final version = loader['version'].toString().trim();
+      if (version.isNotEmpty) {
+        versions.add(version);
+      }
+    }
+    versions.sort(_compareDottedVersions);
+    if (versions.isEmpty) {
       throw _NativeCommandException(
         'Could not resolve Fabric loader for mc=$mc',
         1,
       );
     }
-    final first = Map<String, dynamic>.from(payload.first as Map);
-    final loader = first['loader'];
-    if (loader is! Map || loader['version'] == null) {
-      throw _NativeCommandException(
-        'Fabric loader payload missing version for mc=$mc',
-        1,
-      );
-    }
-    return loader['version'].toString().trim();
+    return versions.last;
   }
 
   Future<String> _resolveLatestFabricInstaller() async {
     final payload = await _httpGetJsonList(
       'https://meta.fabricmc.net/v2/versions/installer',
     );
-    if (payload.isEmpty || payload.first is! Map) {
+    final versions = <String>[];
+    for (final raw in payload) {
+      if (raw is! Map) {
+        continue;
+      }
+      final version = raw['version']?.toString().trim() ?? '';
+      if (version.isNotEmpty) {
+        versions.add(version);
+      }
+    }
+    versions.sort(_compareDottedVersions);
+    if (versions.isEmpty) {
       throw _NativeCommandException('Could not resolve Fabric installer', 1);
     }
-    final first = Map<String, dynamic>.from(payload.first as Map);
-    final version = first['version']?.toString().trim() ?? '';
-    if (version.isEmpty) {
-      throw _NativeCommandException(
-        'Fabric installer payload missing version',
-        1,
-      );
-    }
-    return version;
+    return versions.last;
   }
 
   Future<String> _resolveLatestForgeLoader(String mc) async {
@@ -1454,7 +1513,7 @@ class NativeCommandService {
       final promosRaw = promotions['promos'];
       if (promosRaw is Map) {
         final promos = Map<String, dynamic>.from(promosRaw);
-        for (final key in <String>['$mc-recommended', '$mc-latest']) {
+        for (final key in <String>['$mc-latest', '$mc-recommended']) {
           final value = promos[key]?.toString().trim() ?? '';
           if (value.isNotEmpty) {
             return value;
@@ -1479,8 +1538,10 @@ class NativeCommandService {
         1,
       );
     }
-    final full = matches.last;
-    return full.substring('$mc-'.length);
+    final loaders =
+        matches.map((full) => full.substring('$mc-'.length)).toList()
+          ..sort(_compareDottedVersions);
+    return loaders.last;
   }
 
   Future<String> _resolveLatestNeoForgeLoader(String mc) async {
@@ -1501,6 +1562,7 @@ class NativeCommandService {
         1,
       );
     }
+    matches.sort(_compareDottedVersions);
     return matches.last;
   }
 
@@ -1670,30 +1732,29 @@ class NativeCommandService {
     _NativeIoBuffer io,
   ) async {
     if (target == 'all') {
-      for (final type in const <String>['paper', 'purpur', 'folia', 'canvas']) {
+      for (final type in _allBuildTypes) {
         await _buildVersions(profile, type, io);
         io.write('');
       }
-      io.write(
-        'forge/fabric/neoforge/spigot versions are resolved dynamically at runtime.',
+      return;
+    }
+
+    if (!_allBuildTypes.contains(target)) {
+      throw _NativeCommandException(
+        'Usage: build versions [paper|purpur|spigot|folia|canvas|forge|fabric|neoforge]',
+        2,
       );
-      return;
     }
 
-    if (<String>{'paper', 'purpur', 'folia', 'canvas'}.contains(target)) {
-      io.write('$target stable versions (origin/ver/*):');
-      final versions = await _repoStableVersions(profile, target);
-      if (versions.isEmpty) {
-        io.write('  (none: run repos sync $target)');
-      } else {
-        for (final version in versions) {
-          io.write('  - $version');
-        }
-      }
+    io.write('$target supported Minecraft versions:');
+    final versions = await _buildSupportedVersions(profile, target);
+    if (versions.isEmpty) {
+      io.write('  (none: upstream metadata unavailable)');
       return;
     }
-
-    io.write('$target versions are resolved dynamically.');
+    for (final version in versions) {
+      io.write('  - $version');
+    }
   }
 
   Future<String> _resolveLatestMcVersion(String type) async {
@@ -1721,6 +1782,46 @@ class NativeCommandService {
       'Could not resolve latest Minecraft version for $type',
       2,
     );
+  }
+
+  Future<List<String>> _buildSupportedVersions(
+    ConsumerProfile profile,
+    String type,
+  ) async {
+    try {
+      final upstream = await _resolveSupportedMcVersions(type);
+      if (upstream.isNotEmpty) {
+        return upstream;
+      }
+    } catch (_) {}
+
+    if (<String>{'paper', 'purpur', 'folia', 'canvas'}.contains(type)) {
+      return _repoStableVersions(profile, type);
+    }
+
+    return const <String>[];
+  }
+
+  Future<List<String>> _resolveSupportedMcVersions(String type) {
+    switch (type) {
+      case 'paper':
+      case 'folia':
+        return _resolvePaperLikeMcVersions(type);
+      case 'purpur':
+        return _resolvePurpurMcVersions();
+      case 'canvas':
+        return _resolveCanvasMcVersions();
+      case 'fabric':
+        return _resolveFabricMcVersions();
+      case 'forge':
+        return _resolveForgeMcVersions();
+      case 'neoforge':
+        return _resolveNeoForgeMcVersions();
+      case 'spigot':
+        return _resolveSpigotMcVersions();
+      default:
+        return Future<List<String>>.value(const <String>[]);
+    }
   }
 
   Future<String> _latestMinecraftRelease() async {
@@ -1781,34 +1882,49 @@ class NativeCommandService {
   }
 
   Future<String?> _resolveLatestPaperLikeMcVersion(String type) async {
+    final versions = await _resolvePaperLikeMcVersions(type);
+    return versions.isEmpty ? null : versions.last;
+  }
+
+  Future<String?> _resolveLatestPurpurMcVersion() async {
+    final versions = await _resolvePurpurMcVersions();
+    return versions.isEmpty ? null : versions.last;
+  }
+
+  Future<String?> _resolveLatestCanvasMcVersion() async {
+    final versions = await _resolveCanvasMcVersions();
+    return versions.isEmpty ? null : versions.last;
+  }
+
+  Future<List<String>> _resolvePaperLikeMcVersions(String type) async {
     final payload = await _httpGetJsonObject(
       'https://api.papermc.io/v2/projects/$type',
     );
     final versionsRaw = payload['versions'];
     if (versionsRaw is! List) {
-      return null;
+      return const <String>[];
     }
-    return _latestStableMcVersionFromValues(versionsRaw);
+    return _stableSortedMcVersions(versionsRaw);
   }
 
-  Future<String?> _resolveLatestPurpurMcVersion() async {
+  Future<List<String>> _resolvePurpurMcVersions() async {
     final payload = await _httpGetJsonObject(
       'https://api.purpurmc.org/v2/purpur',
     );
     final versionsRaw = payload['versions'];
     if (versionsRaw is! List) {
-      return null;
+      return const <String>[];
     }
-    return _latestStableMcVersionFromValues(versionsRaw);
+    return _stableSortedMcVersions(versionsRaw);
   }
 
-  Future<String?> _resolveLatestCanvasMcVersion() async {
+  Future<List<String>> _resolveCanvasMcVersions() async {
     final payload = await _httpGetJsonObject(
       'https://canvasmc.io/api/v2/builds/all',
     );
     final buildsRaw = payload['builds'];
     if (buildsRaw is! List) {
-      return null;
+      return const <String>[];
     }
 
     final versions = <String>{};
@@ -1824,7 +1940,7 @@ class NativeCommandService {
         versions.add(candidate);
       }
     }
-    return _latestStableMcVersionFromValues(versions);
+    return _stableSortedMcVersions(versions);
   }
 
   Future<String?> _resolveLatestFabricMcVersion() async {
@@ -1860,13 +1976,38 @@ class NativeCommandService {
     return null;
   }
 
+  Future<List<String>> _resolveFabricMcVersions() async {
+    final payload = await _httpGetJsonList(
+      'https://meta.fabricmc.net/v2/versions/game',
+    );
+    final versions = <String>{};
+    for (final raw in payload) {
+      if (raw is! Map) {
+        continue;
+      }
+      if (raw['stable'] != true) {
+        continue;
+      }
+      final version = raw['version']?.toString().trim() ?? '';
+      if (_isStableMcVersion(version)) {
+        versions.add(version);
+      }
+    }
+    return _stableSortedMcVersions(versions);
+  }
+
   Future<String?> _resolveLatestForgeMcVersion() async {
+    final versions = await _resolveForgeMcVersions();
+    return versions.isEmpty ? null : versions.last;
+  }
+
+  Future<List<String>> _resolveForgeMcVersions() async {
     final payload = await _httpGetJsonObject(
       'https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json',
     );
     final promosRaw = payload['promos'];
     if (promosRaw is! Map) {
-      return null;
+      return const <String>[];
     }
 
     final versions = <String>{};
@@ -1880,10 +2021,15 @@ class NativeCommandService {
         versions.add(version);
       }
     }
-    return _latestStableMcVersionFromValues(versions);
+    return _stableSortedMcVersions(versions);
   }
 
   Future<String?> _resolveLatestNeoForgeMcVersion() async {
+    final versions = await _resolveNeoForgeMcVersions();
+    return versions.isEmpty ? null : versions.last;
+  }
+
+  Future<List<String>> _resolveNeoForgeMcVersions() async {
     final metadata = await _httpGetText(
       'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml',
     );
@@ -1893,17 +2039,22 @@ class NativeCommandService {
         .map(_minecraftVersionFromNeoForgeLoader)
         .whereType<String>()
         .toSet();
-    return _latestStableMcVersionFromValues(versions);
+    return _stableSortedMcVersions(versions);
   }
 
   Future<String?> _resolveLatestSpigotMcVersion() async {
+    final versions = await _resolveSpigotMcVersions();
+    return versions.isEmpty ? null : versions.last;
+  }
+
+  Future<List<String>> _resolveSpigotMcVersions() async {
     final html = await _httpGetText('https://hub.spigotmc.org/versions/');
     final versions = RegExp(r'href="(\d+\.\d+(?:\.\d+)?)\.json"')
         .allMatches(html)
         .map((m) => m.group(1)?.trim() ?? '')
         .where(_isStableMcVersion)
         .toSet();
-    return _latestStableMcVersionFromValues(versions);
+    return _stableSortedMcVersions(versions);
   }
 
   Future<bool> _fabricSupportsMcVersion(String mc) async {
@@ -1941,18 +2092,13 @@ class NativeCommandService {
     return '$major.$minor.${patch ?? 0}';
   }
 
-  String? _latestStableMcVersionFromValues(Iterable<dynamic> values) {
-    final versions =
-        values
-            .map((value) => value?.toString().trim() ?? '')
-            .where(_isStableMcVersion)
-            .toSet()
-            .toList(growable: false)
-          ..sort(_compareVersions);
-    if (versions.isEmpty) {
-      return null;
-    }
-    return versions.last;
+  List<String> _stableSortedMcVersions(Iterable<dynamic> values) {
+    return values
+        .map((value) => value?.toString().trim() ?? '')
+        .where(_isStableMcVersion)
+        .toSet()
+        .toList(growable: false)
+      ..sort(_compareVersions);
   }
 
   bool _isStableMcVersion(String value) {
@@ -2013,6 +2159,27 @@ class NativeCommandService {
     return av.compareTo(bv);
   }
 
+  int _compareDottedVersions(String a, String b) {
+    final av = _versionNumberParts(a);
+    final bv = _versionNumberParts(b);
+    final length = av.length > bv.length ? av.length : bv.length;
+    for (var i = 0; i < length; i++) {
+      final left = i < av.length ? av[i] : 0;
+      final right = i < bv.length ? bv[i] : 0;
+      if (left != right) {
+        return left.compareTo(right);
+      }
+    }
+    return a.compareTo(b);
+  }
+
+  List<int> _versionNumberParts(String value) {
+    return RegExp(r'\d+')
+        .allMatches(value)
+        .map((match) => int.parse(match.group(0)!))
+        .toList(growable: false);
+  }
+
   Map<String, String> _parseOptions(List<String> args) {
     final options = <String, String>{};
 
@@ -2039,6 +2206,20 @@ class NativeCommandService {
     }
 
     return options;
+  }
+
+  Map<String, String> _serverCreateBuildOptions(
+    Map<String, String> options,
+    String mc,
+  ) {
+    final buildOptions = <String, String>{'mc': mc};
+    for (final key in const <String>['loader', 'installer']) {
+      final value = options[key]?.trim();
+      if (value != null && value.isNotEmpty) {
+        buildOptions[key] = value;
+      }
+    }
+    return buildOptions;
   }
 
   _RuntimeTargetArgs _parseRuntimeTargetArgs(
@@ -4280,6 +4461,7 @@ class NativeCommandService {
     ConsumerProfile profile, {
     required String type,
     required String mc,
+    bool allowLatestFallback = true,
   }) {
     final dir = Directory(_buildDir(profile, type));
     if (!dir.existsSync()) {
@@ -4301,9 +4483,11 @@ class NativeCommandService {
       return jars.first.path;
     }
 
-    final latest = File(p.join(dir.path, 'latest.jar'));
-    if (latest.existsSync()) {
-      return latest.path;
+    if (allowLatestFallback) {
+      final latest = File(p.join(dir.path, 'latest.jar'));
+      if (latest.existsSync()) {
+        return latest.path;
+      }
     }
 
     return null;
@@ -4644,61 +4828,6 @@ class NativeCommandService {
     return args.first.trim();
   }
 
-  void _printHelp(_NativeIoBuffer io) {
-    io.write('Minecraft Dev Wizard (native mode)');
-    io.write('');
-    io.write('Default:');
-    io.write('  multiplexor                # open wizard');
-    io.write(
-      '  multiplexor --consumer <plugin|forge|fabric|neoforge> <command>',
-    );
-    io.write('  multiplexor --root <path> <command>');
-    io.write('');
-    io.write('Consumer commands:');
-    io.write('  consumer list|show|use|path');
-    io.write('');
-    io.write('Instance commands:');
-    io.write(
-      '  instance list|create|clone|delete|reset|activate|path|port|motd-style|current|delete-all',
-    );
-    io.write('');
-    io.write('Server commands:');
-    io.write('  server create <name> --jar <path> [--type label]');
-    io.write(
-      '  server create <name> --type <paper|purpur|folia|canvas|spigot|forge|fabric|neoforge> [--mc <version>]',
-    );
-    io.write('');
-    io.write('Runtime commands:');
-    io.write('  runtime start [instance] [--instance <name>] [--no-console]');
-    io.write(
-      '  runtime console [instance] [--instance <name>]  # auto-picks if one running',
-    );
-    io.write('  runtime consoles|consoles-lateral|stop|status|list [instance]');
-    io.write('  runtime settings <show|presets|set-heap|set-preset|reset>');
-    io.write('');
-    io.write('Dropins commands:');
-    io.write('  plugins show-source');
-    io.write('  plugins sync [instance|--all] [--clean]');
-    io.write('  plugins watch-status|watch-start|watch-stop');
-    io.write('  mods show-source');
-    io.write('  mods sync [instance|--all] [--clean]');
-    io.write('');
-    io.write('Config commands:');
-    io.write('  config localize [instance|--all]');
-    io.write('  config status [instance]');
-    io.write('');
-    io.write('Build/repos commands:');
-    io.write('  repos sync [all|paper|purpur|folia|canvas]');
-    io.write(
-      '  build <paper|purpur|folia|canvas|spigot|forge|fabric|neoforge> [--mc <version>] [--loader <version>] [--installer <version>]',
-    );
-    io.write('  build test-latest [--spigot-mc <version>]');
-    io.write('  build latest <type>');
-    io.write('  build list');
-    io.write('  build list-all [type]');
-    io.write('  build versions [type]');
-  }
-
   ConsumerProfile get _activeConsumer {
     return context.requestedConsumer ?? consumerService.readActive();
   }
@@ -4876,36 +5005,6 @@ class NativeCommandService {
   ];
 
   static const List<String> _sharedConfigDirsBase = <String>['config'];
-}
-
-class _NativeIoBuffer {
-  _NativeIoBuffer({required this.stream});
-
-  final bool stream;
-  final StringBuffer _stdout = StringBuffer();
-  final StringBuffer _stderr = StringBuffer();
-
-  void write(String line) {
-    _stdout.writeln(line);
-    if (stream) {
-      stdout.writeln(line);
-    }
-  }
-
-  void error(String line) {
-    _stderr.writeln(line);
-    if (stream) {
-      stderr.writeln(line);
-    }
-  }
-
-  CapturedResult result(int exitCode) {
-    return CapturedResult(
-      exitCode: exitCode,
-      stdout: _stdout.toString(),
-      stderr: _stderr.toString(),
-    );
-  }
 }
 
 class _NativeCommandException implements Exception {

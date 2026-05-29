@@ -19,6 +19,17 @@ class InteractiveWizard {
   final PassthroughService passthrough;
   final ConsumerProfile? requestedConsumer;
 
+  static const List<String> _serverTypes = <String>[
+    'paper',
+    'purpur',
+    'folia',
+    'canvas',
+    'spigot',
+    'forge',
+    'fabric',
+    'neoforge',
+  ];
+
   Future<void> run() async {
     if (!stdin.hasTerminal || !stdout.hasTerminal) {
       await _runTextFallback();
@@ -281,7 +292,7 @@ class InteractiveWizard {
       final options = <String>[
         'Switch Consumer Profile',
         'Switch Existing Instance',
-        'Create From Type (cached build)',
+        'Create Server From Type',
       ];
       if (instances.isNotEmpty) {
         options.add('Set Instance Port');
@@ -310,7 +321,7 @@ class InteractiveWizard {
         case 'Switch Existing Instance':
           await _runEscapableStep(_switchExistingInstance);
           break;
-        case 'Create From Type (cached build)':
+        case 'Create Server From Type':
           await _runEscapableStep(_createFromType);
           break;
         case 'Set Instance Port':
@@ -356,24 +367,9 @@ class InteractiveWizard {
   }
 
   Future<void> _createFromType() async {
-    final type = await UserPrompt.pick('Target type', const <String>[
-      'paper',
-      'purpur',
-      'folia',
-      'canvas',
-      'spigot',
-      'forge',
-      'fabric',
-      'neoforge',
-    ]);
-
-    final latest = await _resolveLatestVersion(type);
-    final version = await UserPrompt.input(
-      'Minecraft version',
-      defaultValue: latest,
-      validator: (raw) => raw.trim().isNotEmpty,
-      validationMessage: 'Version is required',
-    );
+    final type = await _pickServerType();
+    final versionChoice = await _pickSupportedVersion(type);
+    final version = versionChoice.version;
 
     final suggestedName = '$type-${version.trim()}';
     final name = await UserPrompt.input(
@@ -383,7 +379,11 @@ class InteractiveWizard {
       validationMessage: 'Use letters, numbers, ., _, or - with no spaces.',
     );
 
-    final code = await passthrough.run(<String>[
+    final refresh = await UserPrompt.confirm(
+      'Build/download ${_serverTypeLabel(type)} Minecraft $version before create?',
+      defaultValue: true,
+    );
+    final command = <String>[
       'server',
       'create',
       name,
@@ -391,7 +391,16 @@ class InteractiveWizard {
       type,
       '--mc',
       version.trim(),
-    ]);
+    ];
+    if (refresh) {
+      command.add('--auto-build');
+    }
+
+    UserPrompt.info(
+      'Creating ${_serverTypeLabel(type)} server for Minecraft $version'
+      '${versionChoice.isLatest ? ' (latest supported)' : ''}.',
+    );
+    final code = await passthrough.run(command);
 
     if (code == 0) {
       await _syncDropinsAllTargets();
@@ -831,6 +840,7 @@ class InteractiveWizard {
       UserPrompt.info('Build cache, dropin sync, and JVM tuning in one menu.');
       final options = <String>[
         'Sync Repos (all)',
+        'Build Server Jar / Installer',
         'Show Build Cache',
         'Sync $dropinLabel to All Valid Targets',
         'Show $dropinLabel Source',
@@ -851,18 +861,21 @@ class InteractiveWizard {
           await UserPrompt.pressEnter();
           break;
         case 1:
+          await _runEscapableStep(_buildServerArtifact);
+          break;
+        case 2:
           await passthrough.run(<String>['build', 'list']);
           await UserPrompt.pressEnter();
           break;
-        case 2:
+        case 3:
           await passthrough.run(<String>[dropinCommand, 'sync', '--all']);
           await UserPrompt.pressEnter();
           break;
-        case 3:
+        case 4:
           await passthrough.run(<String>[dropinCommand, 'show-source']);
           await UserPrompt.pressEnter();
           break;
-        case 4:
+        case 5:
           final currentHeap = (settings.heap ?? '4G').toUpperCase();
           var heapIndex = heapOptions.indexWhere(
             (candidate) => candidate.toUpperCase() == currentHeap,
@@ -883,7 +896,7 @@ class InteractiveWizard {
           ]);
           await UserPrompt.pressEnter();
           break;
-        case 5:
+        case 6:
           final labels = presetLabels.keys.toList(growable: false);
           final currentProfile = (settings.profile ?? 'aikar').toLowerCase();
           var presetIndex = labels.indexWhere(
@@ -906,12 +919,101 @@ class InteractiveWizard {
           ]);
           await UserPrompt.pressEnter();
           break;
-        case 6:
+        case 7:
           await passthrough.run(<String>['runtime', 'settings', 'reset']);
           await UserPrompt.pressEnter();
           break;
       }
     }
+  }
+
+  Future<void> _buildServerArtifact() async {
+    final type = await _pickServerType();
+    final versionChoice = await _pickSupportedVersion(type);
+    final version = versionChoice.version;
+    final label = _serverTypeLabel(type);
+    final confirm = await UserPrompt.confirm(
+      'Build/download $label for Minecraft $version'
+      '${versionChoice.isLatest ? ' (latest supported)' : ''}?',
+      defaultValue: true,
+    );
+    if (!confirm) {
+      return;
+    }
+
+    UserPrompt.info(
+      'Building $label for Minecraft $version'
+      '${versionChoice.isLatest ? ' (latest supported by $label)' : ''}.',
+    );
+    await passthrough.run(<String>['build', type, '--mc', version]);
+    await UserPrompt.pressEnter();
+  }
+
+  Future<String> _pickServerType() {
+    return UserPrompt.pick('Server platform', _serverTypes);
+  }
+
+  Future<_BuildVersionChoice> _pickSupportedVersion(String type) async {
+    final label = _serverTypeLabel(type);
+    UserPrompt.info('Checking supported Minecraft versions for $label...');
+    final supported = await _resolveSupportedVersions(type);
+    final latest = await _resolveLatestVersion(type);
+
+    if (supported.isEmpty) {
+      final manual = await UserPrompt.input(
+        '$label Minecraft version',
+        defaultValue: latest,
+        validator: _looksLikeMinecraftVersion,
+        validationMessage: 'Use a version like 1.21.11 or 26.1.2.',
+      );
+      return _BuildVersionChoice(
+        version: manual.trim(),
+        isLatest: manual.trim() == latest,
+      );
+    }
+
+    final newestFirst = supported.reversed.toList(growable: false);
+    final visible = newestFirst.take(30).toList(growable: true);
+    if (!visible.contains(latest)) {
+      visible.insert(0, latest);
+    }
+
+    final labels = <String>[];
+    final byLabel = <String, _BuildVersionChoice>{};
+    for (final version in visible) {
+      final isLatest = version == latest;
+      final option =
+          'Minecraft $version${isLatest ? ' (latest supported by $label)' : ''}';
+      labels.add(option);
+      byLabel[option] = _BuildVersionChoice(
+        version: version,
+        isLatest: isLatest,
+      );
+    }
+
+    final manualLabel = supported.length > visible.length
+        ? 'Enter another version (${supported.length - visible.length} older not shown)'
+        : 'Enter another version';
+    labels.add(manualLabel);
+
+    final selected = await UserPrompt.pick(
+      '$label version (${supported.length} supported)',
+      labels,
+    );
+    if (selected == manualLabel) {
+      final manual = await UserPrompt.input(
+        '$label Minecraft version',
+        defaultValue: latest,
+        validator: _looksLikeMinecraftVersion,
+        validationMessage: 'Use a version like 1.21.11 or 26.1.2.',
+      );
+      return _BuildVersionChoice(
+        version: manual.trim(),
+        isLatest: manual.trim() == latest,
+      );
+    }
+
+    return byLabel[selected]!;
   }
 
   Future<_RuntimeSettings> _runtimeSettings() async {
@@ -1086,6 +1188,70 @@ class InteractiveWizard {
     return '1.21.1';
   }
 
+  Future<List<String>> _resolveSupportedVersions(String type) async {
+    final result = await passthrough.capture(<String>[
+      'build',
+      'versions',
+      type,
+    ]);
+    if (!result.success) {
+      return const <String>[];
+    }
+
+    final versions =
+        '${result.stdout}\n${result.stderr}'
+            .split('\n')
+            .map(
+              (line) => RegExp(
+                r'^\s*-\s*(\d+\.\d+(?:\.\d+)?)\s*$',
+              ).firstMatch(line)?.group(1),
+            )
+            .whereType<String>()
+            .toSet()
+            .toList(growable: false)
+          ..sort(_compareMinecraftVersions);
+    return versions;
+  }
+
+  int _compareMinecraftVersions(String a, String b) {
+    final av = _versionParts(a);
+    final bv = _versionParts(b);
+    final length = av.length > bv.length ? av.length : bv.length;
+    for (var i = 0; i < length; i++) {
+      final left = i < av.length ? av[i] : 0;
+      final right = i < bv.length ? bv[i] : 0;
+      if (left != right) {
+        return left.compareTo(right);
+      }
+    }
+    return a.compareTo(b);
+  }
+
+  List<int> _versionParts(String value) {
+    return value
+        .split('.')
+        .map((part) => int.tryParse(part) ?? 0)
+        .toList(growable: false);
+  }
+
+  bool _looksLikeMinecraftVersion(String input) {
+    return RegExp(r'^\d+\.\d+(\.\d+)?$').hasMatch(input.trim());
+  }
+
+  String _serverTypeLabel(String type) {
+    return switch (type) {
+      'paper' => 'Paper',
+      'purpur' => 'Purpur',
+      'folia' => 'Folia',
+      'canvas' => 'Canvas',
+      'spigot' => 'Spigot',
+      'forge' => 'Forge',
+      'fabric' => 'Fabric',
+      'neoforge' => 'NeoForge',
+      _ => type,
+    };
+  }
+
   bool _isValidInstanceName(String input) {
     return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(input.trim());
   }
@@ -1130,4 +1296,11 @@ class _RuntimeSettings {
   final String? heap;
   final String? profile;
   final String? jvmArgs;
+}
+
+class _BuildVersionChoice {
+  const _BuildVersionChoice({required this.version, required this.isLatest});
+
+  final String version;
+  final bool isLatest;
 }

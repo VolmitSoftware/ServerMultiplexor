@@ -51,14 +51,16 @@ Mod jars sources:
 
 ## Server Targets
 
-`server create` supports cached or custom jars:
+`server create` supports cached, auto-built/downloaded, or custom jars:
 
 ```bash
 ./start.sh server create <name> --jar <path-to-server-jar> [--type label]
 ./start.sh server create <name> --type <paper|purpur|folia|canvas|spigot|forge|fabric|neoforge> [--mc <version>]
+./start.sh server create <name> --type <paper|purpur|folia|canvas|spigot|forge|fabric|neoforge> [--mc <version>] --auto-build
 ```
 
 For `--type`, the jar is resolved from the consumer build cache under `consumers/<consumer>/builds/<type>`.
+Use `--auto-build` when you want `server create` to refresh from the upstream source first instead of using the current cache.
 
 ## Runtime
 
@@ -87,6 +89,7 @@ Wizard IA:
 - `Run -> Start one stopped instance` auto-opens that console.
 - `Run -> Open console` skips picker when exactly one server is running.
 - `Run -> Start all stopped instances` starts in background and opens console view once at the end.
+- `Build/JVM -> Build Server Jar / Installer` lets you pick a platform and one of its supported Minecraft versions, with the upstream latest clearly labeled.
 
 Instance reset:
 
@@ -129,5 +132,7 @@ Plugin watcher commands:
 
 Notes:
 
+- Latest version and loader resolution reads upstream metadata on each run.
+- Spigot builds refresh `BuildTools.jar` from the Spigot Jenkins source before running, falling back to a cached copy only if refresh fails.
 - `forge` / `neoforge` build commands cache installer jars and `server create --type ...` auto-installs to args-file launch mode.
 - If the workspace path contains `[` or `]`, mod consumer instances (`forge`/`fabric`/`neoforge`) are automatically stored in `~/.multiplexor/instance-store/<workspace-hash>/<consumer>` to keep launcher/runtime paths valid.
