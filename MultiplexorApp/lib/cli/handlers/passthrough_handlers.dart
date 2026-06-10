@@ -239,6 +239,9 @@ Future<void> handleRuntimeStatus(Map<String, dynamic> args) async {
 Future<void> handleRuntimeList() async =>
     _runAndExit(<String>['runtime', 'list']);
 
+Future<void> handleRuntimeStates() async =>
+    _runAndExit(<String>['runtime', 'states']);
+
 Future<void> handleRuntimeSettings(String action, {String? value}) async {
   final cmd = <String>['runtime', 'settings', action];
   if (value != null && value.trim().isNotEmpty) {

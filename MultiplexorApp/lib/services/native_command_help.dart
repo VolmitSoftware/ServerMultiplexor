@@ -67,6 +67,7 @@ void _printHelp(_NativeIoBuffer io) {
     'consoles-lateral',
     'stop [instance]',
     'status [instance]',
+    'states',
     'list',
     'settings <show|presets|set-heap|set-preset|reset>',
   ]);

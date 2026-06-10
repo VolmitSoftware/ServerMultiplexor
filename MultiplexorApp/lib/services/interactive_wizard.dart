@@ -1,13 +1,18 @@
 import 'dart:io';
 
-import 'package:path/path.dart' as p;
-
 import '../models/consumer_profile.dart';
+import '../utils/process_runner.dart';
 import '../utils/user_prompt.dart';
-import 'app_context.dart';
 import 'consumer_service.dart';
 import 'passthrough_service.dart';
+import 'runtime_state.dart';
 
+/// Dashboard-driven interactive wizard.
+///
+/// One screen lists every instance with its live state; selecting an
+/// instance opens a flat, state-aware action menu. Global actions sit
+/// below the instance list with single-key shortcuts. All background
+/// commands run shielded so stray keystrokes cannot corrupt the UI.
 class InteractiveWizard {
   InteractiveWizard({
     required this.consumerService,
@@ -31,359 +36,475 @@ class InteractiveWizard {
   ];
 
   Future<void> run() async {
-    if (!stdin.hasTerminal || !stdout.hasTerminal) {
-      await _runTextFallback();
+    if (!Ui.hasTerminal) {
+      _printTextFallback();
       return;
     }
 
+    TermIo.instance.installSignalRestore();
     try {
       while (true) {
-        await _showHeader();
-        final options = <String>['Run', 'Instances', 'Build/JVM', 'Exit'];
-        late final int choice;
+        final _DashboardData data = await Ui.shielded(_loadDashboardData);
+        _renderHeader(data);
+
+        _DashChoice choice;
         try {
-          choice = await UserPrompt.menu('Main Menu', options);
+          choice = await _dashboardMenu(data);
         } on PromptBackNavigation {
           return;
         }
-        final selected = options[choice];
 
-        switch (selected) {
-          case 'Run':
-            await _runEscapableStep(_serverControlMenu);
-            break;
-          case 'Instances':
-            await _runEscapableStep(_instancesMenu);
-            break;
-          case 'Build/JVM':
-            await _runEscapableStep(_buildAndJvmMenu);
-            break;
-          case 'Exit':
-            return;
+        if (choice.kind == _Act.quit) {
+          return;
         }
+        await _runStep(() => _dispatch(choice, data.rows));
       }
     } on PromptInputUnavailable catch (e) {
-      UserPrompt.error('Input stream lost: $e');
-      stdout.writeln('Wizard closed to avoid a menu redraw loop.');
+      Ui.error('Input stream lost: $e');
+      stdout.writeln('Wizard closed to avoid a redraw loop.');
+    } finally {
+      TermIo.instance.restoreTerminal();
     }
   }
 
-  Future<void> _runTextFallback() async {
-    await _showHeader();
+  void _printTextFallback() {
     stdout.writeln('Interactive mode requires a TTY.');
     stdout.writeln('Run commands directly, for example:');
-    stdout.writeln('  ./start.sh consumer show');
-    stdout.writeln('  ./start.sh instance list');
+    stdout.writeln('  ./start.sh runtime states');
     stdout.writeln('  ./start.sh runtime console <instance>');
+    stdout.writeln('  ./start.sh server create demo --type purpur');
   }
 
-  Future<void> _showHeader() async {
-    UserPrompt.clearScreen();
-
-    final activeConsumer = requestedConsumer ?? consumerService.readActive();
-    final activeInstance = await _activeInstanceWithPort();
-    final dropins = await _dropinsSource();
-    final running = await _runningServersWithPorts();
-
-    UserPrompt.banner('Minecraft Dev Wizard', subtitle: 'Backend: native-dart');
-
-    UserPrompt.row('Consumer:', activeConsumer.shortName);
-    UserPrompt.row('Active instance:', activeInstance ?? 'none');
-    UserPrompt.row(
-      activeConsumer == ConsumerProfile.plugin ? 'Plugin jars:' : 'Mod jars:',
-      dropins ?? 'unknown',
-    );
-    if (running.isNotEmpty) {
-      UserPrompt.row('Running:', running.join(', '));
-    }
-    stdout.writeln('');
-  }
-
-  Future<void> _runEscapableStep(Future<void> Function() step) async {
+  Future<void> _runStep(Future<void> Function() step) async {
     try {
       await step();
     } on PromptBackNavigation {
-      // ESC always cancels the current step and returns to the previous page.
+      // Escape returns to the dashboard.
     }
   }
 
-  Future<void> _serverControlMenu() async {
-    while (true) {
-      await _showHeader();
-      final running = await _runningServers();
-      final all = await _instanceNames();
-      final stopped = all
-          .where((name) => !running.contains(name))
-          .toList(growable: false);
-      final stoppedCount = stopped.length;
-      UserPrompt.info('Running: ${running.length}  Stopped: $stoppedCount');
-      UserPrompt.info(
-        'Start servers, open live consoles, and stop running servers.',
-      );
-      UserPrompt.info(
-        'Single start auto-opens console. Start-all opens all consoles.',
-      );
+  // ─── Dashboard ───────────────────────────────────────────────────────
 
-      final options = <String>[];
-      if (stopped.isNotEmpty) {
-        options.add('Start one stopped instance');
+  Future<_DashboardData> _loadDashboardData() async {
+    return _DashboardData(
+      rows: await _loadInstanceRows(),
+      active: await _activeInstance(),
+      dropins: await _dropinsSource(),
+    );
+  }
+
+  void _renderHeader(_DashboardData data) {
+    Ui.clearScreen();
+    final ConsumerProfile consumer = _activeConsumer();
+    Ui.appHeader('MULTIPLEXOR', <String>[
+      'consumer: ${consumer.shortName}',
+      if (data.active != null) 'active: ${data.active}',
+      if (data.dropins != null)
+        '${_isPluginConsumer() ? 'plugins' : 'mods'}: '
+            '${_shortenPath(data.dropins!)}',
+    ]);
+    Ui.blank();
+  }
+
+  Future<_DashChoice> _dashboardMenu(_DashboardData data) async {
+    final List<_InstanceRow> rows = data.rows;
+    final List<_InstanceRow> running = rows
+        .where((_InstanceRow r) => r.state != RuntimeState.stopped)
+        .toList(growable: false);
+    final List<_InstanceRow> stopped = rows
+        .where((_InstanceRow r) => r.state == RuntimeState.stopped)
+        .toList(growable: false);
+    final String? active = data.active;
+
+    final List<MenuEntry<_DashChoice>> entries = <MenuEntry<_DashChoice>>[];
+
+    if (rows.isEmpty) {
+      entries.add(
+        MenuEntry<_DashChoice>(
+          'Create your first server',
+          value: const _DashChoice(_Act.create),
+          shortcut: 'n',
+        ),
+      );
+    } else {
+      entries.add(const MenuEntry<_DashChoice>.separator('servers'));
+      for (final _InstanceRow row in rows) {
+        entries.add(
+          MenuEntry<_DashChoice>(
+            row.name,
+            value: _DashChoice(_Act.instance, instance: row.name),
+            badge: '${_stateGlyph(row.state)} ${row.state.name}',
+            badgeColor: _stateColor(row.state),
+            detail:
+                ':${row.port}${row.name == active ? '  ${Ansi.style('active', Ansi.cyan)}' : ''}',
+          ),
+        );
       }
+      entries.add(const MenuEntry<_DashChoice>.separator());
+      entries.add(
+        MenuEntry<_DashChoice>(
+          'New instance',
+          value: const _DashChoice(_Act.create),
+          shortcut: 'n',
+        ),
+      );
       if (stopped.length > 1) {
-        options.add('Start all stopped instances');
-      }
-      if (running.isNotEmpty) {
-        options.add('Open console for running server');
-        if (running.length > 1) {
-          options.add('Open all running consoles (grid)');
-          options.add('Open all running consoles (lateral)');
-        }
-        options.add('Stop one running server');
+        entries.add(
+          MenuEntry<_DashChoice>(
+            'Start all stopped',
+            value: const _DashChoice(_Act.startAll),
+            shortcut: 's',
+            detail: '${stopped.length} instances',
+          ),
+        );
       }
       if (running.length > 1) {
-        options.add('Stop all running servers');
+        entries.add(
+          MenuEntry<_DashChoice>(
+            'Stop all running',
+            value: const _DashChoice(_Act.stopAll),
+            shortcut: 'k',
+            detail: '${running.length} instances',
+          ),
+        );
+        entries.add(
+          MenuEntry<_DashChoice>(
+            'All consoles',
+            value: const _DashChoice(_Act.consolesGrid),
+            shortcut: 'g',
+            detail: 'grid view',
+          ),
+        );
+        entries.add(
+          MenuEntry<_DashChoice>(
+            'All consoles',
+            value: const _DashChoice(_Act.consolesLateral),
+            detail: 'side-by-side view',
+          ),
+        );
       }
-      if (options.isEmpty) {
-        UserPrompt.warn('No instances available. Create one first.');
-        await UserPrompt.pressEnter();
-        return;
-      }
-      late final int choice;
-      try {
-        choice = await UserPrompt.menu('Run', options);
-      } on PromptBackNavigation {
-        return;
-      }
+    }
 
-      final selected = options[choice];
-      switch (selected) {
-        case 'Start one stopped instance':
-          await _runEscapableStep(_startInstanceFromStopped);
-          break;
-        case 'Start all stopped instances':
-          await _runEscapableStep(_startAllStoppedInstances);
-          break;
-        case 'Open console for running server':
-          await _runEscapableStep(_openConsoleForRunningServer);
-          break;
-        case 'Open all running consoles (grid)':
-          await _runEscapableStep(() => _openAllRunningConsoles('grid'));
-          break;
-        case 'Open all running consoles (lateral)':
-          await _runEscapableStep(() => _openAllRunningConsoles('lateral'));
-          break;
-        case 'Stop one running server':
-          await _runEscapableStep(_stopOneRunningServer);
-          break;
-        case 'Stop all running servers':
-          for (final server in running) {
-            await passthrough.run(<String>['runtime', 'stop', server]);
-          }
-          await UserPrompt.pressEnter();
-          break;
-      }
+    entries.add(
+      MenuEntry<_DashChoice>(
+        'Build & tuning',
+        value: const _DashChoice(_Act.buildMenu),
+        shortcut: 'b',
+        detail: 'jars, repos, sync, JVM',
+      ),
+    );
+    entries.add(
+      MenuEntry<_DashChoice>(
+        'Switch consumer',
+        value: const _DashChoice(_Act.consumer),
+        shortcut: 'c',
+        detail: _activeConsumer().shortName,
+      ),
+    );
+    entries.add(
+      MenuEntry<_DashChoice>(
+        'Refresh',
+        value: const _DashChoice(_Act.refresh),
+        shortcut: 'r',
+      ),
+    );
+    entries.add(
+      MenuEntry<_DashChoice>(
+        'Quit',
+        value: const _DashChoice(_Act.quit),
+        shortcut: 'q',
+      ),
+    );
+
+    return menuSelect<_DashChoice>(
+      'Dashboard',
+      entries,
+      initialIndex: rows.isEmpty ? 0 : 1,
+    );
+  }
+
+  Future<void> _dispatch(_DashChoice choice, List<_InstanceRow> rows) async {
+    switch (choice.kind) {
+      case _Act.instance:
+        await _instanceMenu(choice.instance!);
+        return;
+      case _Act.create:
+        await _createInstance();
+        return;
+      case _Act.startAll:
+        await _startAllStopped(rows);
+        return;
+      case _Act.stopAll:
+        await _stopAllRunning(rows);
+        return;
+      case _Act.consolesGrid:
+        await _shellRun(<String>['runtime', 'consoles']);
+        return;
+      case _Act.consolesLateral:
+        await _shellRun(<String>['runtime', 'consoles-lateral']);
+        return;
+      case _Act.buildMenu:
+        await _buildAndTuningMenu();
+        return;
+      case _Act.consumer:
+        await _switchConsumer();
+        return;
+      case _Act.refresh:
+      case _Act.quit:
+        return;
     }
   }
 
-  Future<void> _startInstanceFromStopped() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found. Create one first.');
-      await UserPrompt.pressEnter();
+  // ─── Instance actions ────────────────────────────────────────────────
+
+  Future<void> _instanceMenu(String name) async {
+    final _InstanceRow? row = await Ui.shielded(() => _loadInstanceRow(name));
+    if (row == null) {
       return;
     }
+    final String? active = await Ui.shielded(_activeInstance);
+    final bool isActive = name == active;
+    final bool isStopped = row.state == RuntimeState.stopped;
+    final bool isRunning = row.state == RuntimeState.running;
 
-    final running = (await _runningServers()).toSet();
-    final active = await _activeInstance();
-    final candidates = instances
-        .where((name) => !running.contains(name))
+    final List<MenuEntry<_InstanceAct>> entries = <MenuEntry<_InstanceAct>>[];
+    if (isStopped) {
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Start',
+          value: _InstanceAct.startWithConsole,
+          shortcut: 'o',
+          detail: 'opens console',
+        ),
+      );
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Start in background',
+          value: _InstanceAct.startBackground,
+        ),
+      );
+    } else {
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Open console',
+          value: _InstanceAct.console,
+          shortcut: 'o',
+          detail: 'esc detaches, server keeps running',
+        ),
+      );
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Restart',
+          value: _InstanceAct.restart,
+          shortcut: 't',
+        ),
+      );
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Stop',
+          value: _InstanceAct.stop,
+          shortcut: 'x',
+        ),
+      );
+    }
+    entries.add(const MenuEntry<_InstanceAct>.separator());
+    if (!isActive) {
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Make active',
+          value: _InstanceAct.activate,
+        ),
+      );
+    }
+    entries.add(
+      const MenuEntry<_InstanceAct>('Set port', value: _InstanceAct.port),
+    );
+    entries.add(
+      const MenuEntry<_InstanceAct>(
+        'Apply styled MOTD',
+        value: _InstanceAct.motd,
+      ),
+    );
+    if (isStopped) {
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Factory reset',
+          value: _InstanceAct.reset,
+          detail: 'wipes worlds, config, dropins',
+        ),
+      );
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Delete',
+          value: _InstanceAct.delete,
+          detail: 'removes the instance entirely',
+        ),
+      );
+    }
+    entries.add(const MenuEntry<_InstanceAct>.separator());
+    entries.add(
+      const MenuEntry<_InstanceAct>('Back', value: _InstanceAct.back),
+    );
+
+    final String badge =
+        '${_stateGlyph(row.state)} ${row.state.name} on :${row.port}'
+        '${isActive ? ' · active' : ''}';
+    if (!isRunning && !isStopped) {
+      Ui.note('Server is ${row.state.name}; the dashboard updates on refresh.');
+    }
+    final _InstanceAct action = await menuSelect<_InstanceAct>(
+      '$name  ${Ansi.style(badge, _stateColor(row.state))}',
+      entries,
+    );
+
+    switch (action) {
+      case _InstanceAct.startWithConsole:
+        await _syncDropinsAllTargets();
+        await _shellRun(<String>['runtime', 'start', name]);
+        return;
+      case _InstanceAct.startBackground:
+        await _syncDropinsAllTargets();
+        Ui.doing('Starting $name in background');
+        final int code = await _shellRun(<String>[
+          'runtime',
+          'start',
+          name,
+          '--no-console',
+        ]);
+        if (code != 0) {
+          await Ui.pause();
+        }
+        return;
+      case _InstanceAct.console:
+        await _shellRun(<String>['runtime', 'console', name]);
+        return;
+      case _InstanceAct.restart:
+        Ui.doing('Restarting $name');
+        await _shellRun(<String>['runtime', 'stop', name]);
+        final int code = await _shellRun(<String>[
+          'runtime',
+          'start',
+          name,
+          '--no-console',
+        ]);
+        if (code == 0) {
+          Ui.success('$name is starting back up.');
+        } else {
+          await Ui.pause();
+        }
+        return;
+      case _InstanceAct.stop:
+        Ui.doing('Stopping $name');
+        await _shellRun(<String>['runtime', 'stop', name]);
+        return;
+      case _InstanceAct.activate:
+        await _shellRun(<String>['instance', 'activate', name]);
+        return;
+      case _InstanceAct.port:
+        await _setInstancePort(name);
+        return;
+      case _InstanceAct.motd:
+        await _shellRun(<String>['instance', 'motd-style', name]);
+        await Ui.pause();
+        return;
+      case _InstanceAct.reset:
+        final bool confirmed = await Ui.confirm(
+          'Factory reset $name? Worlds, config, and dropins are wiped.',
+          defaultValue: false,
+        );
+        if (confirmed) {
+          await _shellRun(<String>['instance', 'reset', name]);
+          await Ui.pause();
+        }
+        return;
+      case _InstanceAct.delete:
+        final bool confirmed = await Ui.confirm(
+          'Delete instance $name permanently?',
+          defaultValue: false,
+        );
+        if (confirmed) {
+          await _shellRun(<String>['instance', 'delete', name]);
+        }
+        return;
+      case _InstanceAct.back:
+        return;
+    }
+  }
+
+  Future<void> _startAllStopped(List<_InstanceRow> rows) async {
+    final List<String> stopped = rows
+        .where((_InstanceRow r) => r.state == RuntimeState.stopped)
+        .map((_InstanceRow r) => r.name)
         .toList(growable: false);
-
-    if (candidates.isEmpty) {
-      UserPrompt.warn('No stopped instances available to start.');
-      await UserPrompt.pressEnter();
+    if (stopped.isEmpty) {
       return;
     }
-
-    final options = candidates
-        .map((name) => name == active ? '$name (active)' : name)
-        .toList(growable: false);
-    final picked = await UserPrompt.pick('Start which instance?', options);
-    final selected = _instanceNameFromMenuLine(picked);
 
     await _syncDropinsAllTargets();
-    final code = await passthrough.run(<String>['runtime', 'start', selected]);
-    if (code != 0) {
-      await UserPrompt.pressEnter();
-    }
-  }
-
-  Future<void> _startAllStoppedInstances() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found. Create one first.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final running = (await _runningServers()).toSet();
-    final candidates = instances
-        .where((name) => !running.contains(name))
-        .toList(growable: false);
-
-    if (candidates.isEmpty) {
-      UserPrompt.warn('No stopped instances available to start.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final confirm = await UserPrompt.confirm(
-      'Start all ${candidates.length} stopped instance(s)?',
-      defaultValue: true,
-    );
-    if (!confirm) {
-      return;
-    }
-
     var started = 0;
     var failed = 0;
-    final startedNames = <String>[];
-    await _syncDropinsAllTargets();
-    for (final instance in candidates) {
-      final code = await passthrough.run(<String>[
+    final List<String> startedNames = <String>[];
+    for (final String name in stopped) {
+      Ui.doing('Starting $name');
+      final int code = await _shellRun(<String>[
         'runtime',
         'start',
-        instance,
+        name,
         '--no-console',
       ]);
       if (code == 0) {
         started++;
-        startedNames.add(instance);
+        startedNames.add(name);
       } else {
         failed++;
       }
     }
 
-    if (failed == 0) {
-      UserPrompt.success('Started $started instance(s).');
-    } else {
-      UserPrompt.warn('Started $started instance(s), failed $failed.');
+    if (failed > 0) {
+      Ui.warn('Started $started instance(s), failed $failed.');
+      await Ui.pause();
     }
-
-    if (started == 0) {
-      await UserPrompt.pressEnter();
-      return;
-    }
-
     if (started == 1) {
-      await passthrough.run(<String>['runtime', 'console', startedNames.first]);
-      return;
-    }
-
-    await _openAllRunningConsoles('grid');
-  }
-
-  Future<void> _instancesMenu() async {
-    while (true) {
-      await _showHeader();
-      final instances = await _instanceNames();
-      UserPrompt.info(
-        'Manage instances, active profile, ports, resets, and cleanup.',
-      );
-      final options = <String>[
-        'Switch Consumer Profile',
-        'Switch Existing Instance',
-        'Create Server From Type',
-      ];
-      if (instances.isNotEmpty) {
-        options.add('Set Instance Port');
-        options.add('Apply Styled MOTD');
-        options.add('Reset One Instance (factory)');
-        if (instances.length > 1) {
-          options.add('Apply Styled MOTD to All');
-        }
-        options.add('Delete One Instance');
-        if (instances.length > 1) {
-          options.add('Delete All Instances');
-        }
-      }
-      late final int choice;
-      try {
-        choice = await UserPrompt.menu('Instances', options);
-      } on PromptBackNavigation {
-        return;
-      }
-      final selected = options[choice];
-
-      switch (selected) {
-        case 'Switch Consumer Profile':
-          await _runEscapableStep(_switchConsumer);
-          break;
-        case 'Switch Existing Instance':
-          await _runEscapableStep(_switchExistingInstance);
-          break;
-        case 'Create Server From Type':
-          await _runEscapableStep(_createFromType);
-          break;
-        case 'Set Instance Port':
-          await _runEscapableStep(_setInstancePort);
-          break;
-        case 'Apply Styled MOTD':
-          await _runEscapableStep(_applyStyledMotdForOne);
-          break;
-        case 'Reset One Instance (factory)':
-          await _runEscapableStep(_resetOneInstance);
-          break;
-        case 'Apply Styled MOTD to All':
-          await _runEscapableStep(_applyStyledMotdForAll);
-          break;
-        case 'Delete One Instance':
-          await _runEscapableStep(_deleteOneInstance);
-          break;
-        case 'Delete All Instances':
-          await _runEscapableStep(_deleteAllInstances);
-          break;
-      }
+      await _shellRun(<String>['runtime', 'console', startedNames.first]);
+    } else if (started > 1) {
+      await _shellRun(<String>['runtime', 'consoles']);
     }
   }
 
-  Future<void> _switchExistingInstance() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found. Create one first.');
-      await UserPrompt.pressEnter();
-      return;
+  Future<void> _stopAllRunning(List<_InstanceRow> rows) async {
+    final List<String> running = rows
+        .where((_InstanceRow r) => r.state != RuntimeState.stopped)
+        .map((_InstanceRow r) => r.name)
+        .toList(growable: false);
+    for (final String name in running) {
+      Ui.doing('Stopping $name');
+      await _shellRun(<String>['runtime', 'stop', name]);
     }
-
-    final selected = await UserPrompt.pick('Select instance', instances);
-    final code = await passthrough.run(<String>[
-      'instance',
-      'activate',
-      selected,
-    ]);
-    if (code == 0) {
-      UserPrompt.success('Active instance: $selected');
-    }
-    await UserPrompt.pressEnter();
   }
 
-  Future<void> _createFromType() async {
-    final type = await _pickServerType();
-    final versionChoice = await _pickSupportedVersion(type);
-    final version = versionChoice.version;
+  // ─── Create flow ─────────────────────────────────────────────────────
 
-    final suggestedName = '$type-${version.trim()}';
-    final name = await UserPrompt.input(
+  Future<void> _createInstance() async {
+    final String type = await Ui.pick('Server platform', _serverTypes);
+    final _BuildVersionChoice versionChoice = await _pickSupportedVersion(
+      type,
+    );
+    final String version = versionChoice.version;
+
+    final String name = await Ui.input(
       'Instance name',
-      defaultValue: suggestedName,
+      defaultValue: '$type-${version.trim()}',
       validator: _isValidInstanceName,
       validationMessage: 'Use letters, numbers, ., _, or - with no spaces.',
     );
 
-    final refresh = await UserPrompt.confirm(
-      'Build/download ${_serverTypeLabel(type)} Minecraft $version before create?',
+    final bool refresh = await Ui.confirm(
+      'Refresh ${_serverTypeLabel(type)} $version from upstream first?',
       defaultValue: true,
     );
-    final command = <String>[
+
+    Ui.doing('Creating ${_serverTypeLabel(type)} $version server "$name"');
+    final int code = await _shellRun(<String>[
       'server',
       'create',
       name,
@@ -391,576 +512,247 @@ class InteractiveWizard {
       type,
       '--mc',
       version.trim(),
-    ];
-    if (refresh) {
-      command.add('--auto-build');
-    }
-
-    UserPrompt.info(
-      'Creating ${_serverTypeLabel(type)} server for Minecraft $version'
-      '${versionChoice.isLatest ? ' (latest supported)' : ''}.',
-    );
-    final code = await passthrough.run(command);
-
-    if (code == 0) {
-      await _syncDropinsAllTargets();
-      if (await _autoLaunchFirstInstance(name)) {
-        return;
-      }
-
-      final activate = await UserPrompt.confirm(
-        'Activate $name now?',
-        defaultValue: true,
-      );
-      if (activate) {
-        await passthrough.run(<String>['instance', 'activate', name]);
-      }
-    }
-
-    await UserPrompt.pressEnter();
-  }
-
-  Future<void> _syncDropinsAllTargets() async {
-    if (_isPluginConsumerSelected()) {
-      await passthrough.run(<String>['plugins', 'sync', '--all']);
-    } else {
-      await passthrough.run(<String>['mods', 'sync', '--all']);
-    }
-  }
-
-  Future<void> _setInstancePort() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found. Create one first.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final active = await _activeInstance();
-    final instanceOptions = instances
-        .map((name) => name == active ? '$name (active)' : name)
-        .toList(growable: false);
-    final picked = await UserPrompt.pick(
-      'Set port for which instance?',
-      instanceOptions,
-    );
-    final target = _instanceNameFromMenuLine(picked);
-
-    final currentPortRaw = await passthrough.captureStdoutLine(<String>[
-      'instance',
-      'port',
-      target,
+      if (refresh) '--auto-build',
     ]);
-    final currentPort = int.tryParse((currentPortRaw ?? '').trim());
-
-    final portPool = <int>{
-      for (var p = 25565; p <= 25575; p++) p,
-      ?currentPort,
-    }.toList(growable: false)..sort();
-
-    final portOptions = portPool
-        .map((p) => currentPort == p ? '$p (current)' : '$p')
-        .toList(growable: false);
-
-    var initialIndex = 0;
-    if (currentPort != null) {
-      final idx = portPool.indexOf(currentPort);
-      if (idx >= 0) {
-        initialIndex = idx;
-      }
-    }
-
-    final selectedPortLine = await UserPrompt.pick(
-      'Select server port',
-      portOptions,
-      initialIndex: initialIndex,
-    );
-    final selectedPort = selectedPortLine.split(' ').first.trim();
-    await passthrough.run(<String>['instance', 'port', target, selectedPort]);
-    await UserPrompt.pressEnter();
-  }
-
-  Future<void> _applyStyledMotdForOne() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found. Create one first.');
-      await UserPrompt.pressEnter();
+    if (code != 0) {
+      await Ui.pause();
       return;
     }
 
-    final active = await _activeInstance();
-    final options = instances
-        .map((name) => name == active ? '$name (active)' : name)
-        .toList(growable: false);
-    final picked = await UserPrompt.pick('Apply styled MOTD to', options);
-    final target = _instanceNameFromMenuLine(picked);
-    await passthrough.run(<String>['instance', 'motd-style', target]);
-    await UserPrompt.pressEnter();
-  }
+    await _syncDropinsAllTargets();
 
-  Future<void> _applyStyledMotdForAll() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found. Create one first.');
-      await UserPrompt.pressEnter();
+    final List<String> all = await _instanceNames();
+    if (all.length == 1 && all.first == name) {
+      Ui.info('First instance: activating and opening console.');
+      await _shellRun(<String>['instance', 'activate', name]);
+      await _shellRun(<String>['runtime', 'start', name]);
       return;
     }
 
-    final confirmed = await UserPrompt.confirm(
-      'Apply platform-styled MOTD to all ${instances.length} instances?',
+    final bool activate = await Ui.confirm(
+      'Make $name the active instance?',
       defaultValue: true,
     );
-    if (!confirmed) {
-      return;
+    if (activate) {
+      await _shellRun(<String>['instance', 'activate', name]);
     }
-
-    await passthrough.run(<String>['instance', 'motd-style', '--all']);
-    await UserPrompt.pressEnter();
   }
 
-  Future<void> _deleteOneInstance() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found.');
-      await UserPrompt.pressEnter();
-      return;
-    }
+  Future<void> _setInstancePort(String name) async {
+    final String? currentRaw = await passthrough.captureStdoutLine(<String>[
+      'instance',
+      'port',
+      name,
+    ]);
+    final int? current = int.tryParse((currentRaw ?? '').trim());
 
-    final active = await _activeInstance();
-    final running = (await _runningServers()).toSet();
-    final options = instances
-        .map((name) {
-          final tags = <String>[];
-          if (name == active) {
-            tags.add('active');
-          }
-          if (running.contains(name)) {
-            tags.add('running');
-          }
-          if (tags.isEmpty) {
-            return name;
-          }
-          return '$name (${tags.join(', ')})';
-        })
-        .toList(growable: false);
+    final List<int> pool = <int>{
+      for (int port = 25565; port <= 25575; port++) port,
+      ?current,
+    }.toList(growable: false)..sort();
 
-    final picked = await UserPrompt.pick('Delete which instance?', options);
-    final target = _instanceNameFromMenuLine(picked);
-    final confirmed = await UserPrompt.confirm(
-      'Delete instance $target?',
-      defaultValue: false,
+    final List<MenuEntry<int>> entries = <MenuEntry<int>>[
+      for (final int port in pool)
+        MenuEntry<int>(
+          '$port',
+          value: port,
+          detail: port == current ? 'current' : null,
+        ),
+    ];
+    final int initialIndex = current == null
+        ? 0
+        : pool.indexOf(current).clamp(0, pool.length - 1);
+
+    final int port = await menuSelect<int>(
+      'Port for $name',
+      entries,
+      initialIndex: initialIndex,
     );
-    if (!confirmed) {
-      return;
-    }
-
-    await passthrough.run(<String>['instance', 'delete', target]);
-    await UserPrompt.pressEnter();
-  }
-
-  Future<void> _resetOneInstance() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final active = await _activeInstance();
-    final running = (await _runningServers()).toSet();
-    final options = instances
-        .map((name) {
-          final tags = <String>[];
-          if (name == active) {
-            tags.add('active');
-          }
-          if (running.contains(name)) {
-            tags.add('running');
-          }
-          if (tags.isEmpty) {
-            return name;
-          }
-          return '$name (${tags.join(', ')})';
-        })
-        .toList(growable: false);
-
-    final picked = await UserPrompt.pick('Reset which instance?', options);
-    final target = _instanceNameFromMenuLine(picked);
-    final confirmed = await UserPrompt.confirm(
-      'Factory reset $target? Launch artifacts are kept; worlds/config/plugins/mods are wiped.',
-      defaultValue: false,
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    await passthrough.run(<String>['instance', 'reset', target]);
-    await UserPrompt.pressEnter();
-  }
-
-  Future<void> _deleteAllInstances() async {
-    final instances = await _instanceNames();
-    if (instances.isEmpty) {
-      UserPrompt.warn('No instances found.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final confirmed = await UserPrompt.confirm(
-      'Delete all ${instances.length} instances for this consumer?',
-      defaultValue: false,
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    var deleted = 0;
-    var failed = 0;
-    for (final instance in instances) {
-      final code = await passthrough.run(<String>[
-        'instance',
-        'delete',
-        instance,
-      ]);
-      if (code == 0) {
-        deleted++;
-      } else {
-        failed++;
-      }
-    }
-
-    if (failed == 0) {
-      UserPrompt.success('Deleted $deleted instance(s).');
-    } else {
-      UserPrompt.warn('Deleted $deleted instance(s), failed $failed.');
-    }
-    await UserPrompt.pressEnter();
-  }
-
-  Future<void> _openConsoleForRunningServer() async {
-    final servers = await _runningServers();
-    if (servers.isEmpty) {
-      UserPrompt.warn('No running servers.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final statuses = <String, _RuntimeStatus>{};
-    for (final server in servers) {
-      statuses[server] = await _instanceRuntimeStatus(server);
-    }
-
-    String? target;
-    if (servers.length == 1) {
-      target = servers.first;
-      UserPrompt.info('One running server detected: $target');
-    } else {
-      final options = servers
-          .map((server) {
-            final status = statuses[server];
-            final mode = status?.mode ?? 'unknown';
-            var suffix = '';
-            if (mode == 'watchdog') {
-              suffix = ' [restart to tmux]';
-            } else if (mode != 'tmux') {
-              suffix = ' [unavailable]';
-            }
-            return 'Console: $server (port ${status?.port ?? '?'})$suffix';
-          })
-          .toList(growable: false);
-
-      final picked = await UserPrompt.pick(
-        'Open console for which running server?',
-        options,
-      );
-      target = _instanceNameFromAction(picked, 'Console: ');
-      if (target == null) {
-        UserPrompt.warn('Could not parse server selection.');
-        await UserPrompt.pressEnter();
-        return;
-      }
-    }
-
-    final selectedTarget = target;
-
-    final status = statuses[selectedTarget];
-    final mode = status?.mode ?? 'unknown';
-    if (mode == 'tmux') {
-      UserPrompt.info('Opening console for $selectedTarget');
-      UserPrompt.info(
-        'Return to menu without killing server: Esc (or Ctrl+B then D)',
-      );
-      await _openConsoleInChildProcess(selectedTarget);
-      return;
-    }
-
-    if (mode == 'watchdog') {
-      UserPrompt.warn(
-        'Live console attach is unavailable for $selectedTarget in watchdog mode.',
-      );
-      final restartToTmux = await UserPrompt.confirm(
-        'Stop and restart $selectedTarget in tmux mode, then open console now?',
-        defaultValue: true,
-      );
-      if (!restartToTmux) {
-        return;
-      }
-      await passthrough.run(<String>['runtime', 'stop', selectedTarget]);
-      await passthrough.run(<String>[
-        'runtime',
-        'start',
-        selectedTarget,
-        '--no-console',
-      ]);
-      UserPrompt.info('Opening tmux console for $selectedTarget');
-      UserPrompt.info(
-        'Return to menu without killing server: Esc (or Ctrl+B then D)',
-      );
-      await _openConsoleInChildProcess(selectedTarget);
-      return;
-    }
-
-    UserPrompt.warn(
-      'Console for $selectedTarget is unavailable in mode: $mode',
-    );
-    await UserPrompt.pressEnter();
-  }
-
-  Future<void> _openAllRunningConsoles(String layout) async {
-    final servers = await _runningServers();
-    if (servers.length < 2) {
-      UserPrompt.warn(
-        'Need at least two running servers for side-by-side view.',
-      );
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final label = layout == 'lateral' ? 'lateral' : 'grid';
-    UserPrompt.info('Opening all running consoles in $label view...');
-    UserPrompt.info(
-      'Navigate panes with Left/Right. Scroll with mouse wheel (or Ctrl+B then [).',
-    );
-    final cmd = layout == 'lateral' ? 'consoles-lateral' : 'consoles';
-    await passthrough.run(<String>['runtime', cmd]);
-  }
-
-  Future<void> _stopOneRunningServer() async {
-    final servers = await _runningServers();
-    if (servers.isEmpty) {
-      UserPrompt.warn('No running servers.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    final options = <String>[];
-    for (final server in servers) {
-      final status = await _instanceRuntimeStatus(server);
-      options.add('Stop: $server (port ${status.port ?? '?'})');
-    }
-
-    final picked = await UserPrompt.pick('Stop which running server?', options);
-    final target = _instanceNameFromAction(picked, 'Stop: ');
-    if (target == null) {
-      UserPrompt.warn('Could not parse server selection.');
-      await UserPrompt.pressEnter();
-      return;
-    }
-
-    await passthrough.run(<String>['runtime', 'stop', target]);
-    await UserPrompt.pressEnter();
-  }
-
-  Future<bool> _autoLaunchFirstInstance(String name) async {
-    final all = await _instanceNames();
-    final isFirstAndOnly = all.length == 1 && all.first == name;
-    if (!isFirstAndOnly) {
-      return false;
-    }
-
-    UserPrompt.info(
-      'First instance created: auto-activating and opening console.',
-    );
-    await passthrough.run(<String>['instance', 'activate', name]);
-    final startCode = await passthrough.run(<String>['runtime', 'start', name]);
-    if (startCode != 0) {
-      await UserPrompt.pressEnter();
-      return true;
-    }
-    return true;
-  }
-
-  Future<void> _openConsoleInChildProcess(String instance) async {
-    final consumer =
-        (requestedConsumer ?? consumerService.readActive()).shortName;
-    final startScript = p.join(appContext.rootDir, 'start.sh');
-    final env = Map<String, String>.from(Platform.environment);
-    final term = (env['TERM'] ?? '').trim().toLowerCase();
-    if (term.isEmpty || term == 'dumb') {
-      env['TERM'] = 'xterm-256color';
-    }
-    final process = await Process.start(
-      startScript,
-      <String>['--consumer', consumer, 'runtime', 'console', instance],
-      workingDirectory: appContext.rootDir,
-      environment: env,
-      mode: ProcessStartMode.inheritStdio,
-      runInShell: true,
-    );
-    await process.exitCode;
+    await _shellRun(<String>['instance', 'port', name, '$port']);
   }
 
   Future<void> _switchConsumer() async {
-    final options = consumerService
+    final List<String> options = consumerService
         .listProfiles()
-        .map((e) => e.shortName)
+        .map((ConsumerProfile e) => e.shortName)
         .toList(growable: false);
-
-    final selected = await UserPrompt.pick('Consumer profile', options);
-    await passthrough.run(<String>['consumer', 'use', selected]);
-    await UserPrompt.pressEnter();
+    final String selected = await Ui.pick('Consumer profile', options);
+    await _shellRun(<String>['consumer', 'use', selected]);
   }
 
-  Future<void> _buildAndJvmMenu() async {
-    const heapOptions = <String>['2G', '4G', '6G', '8G', '10G', '12G', '16G'];
-    const presetLabels = <String, String>{
+  // ─── Build & tuning ──────────────────────────────────────────────────
+
+  Future<void> _buildAndTuningMenu() async {
+    const List<String> heapOptions = <String>[
+      '2G',
+      '4G',
+      '6G',
+      '8G',
+      '10G',
+      '12G',
+      '16G',
+    ];
+    const Map<String, String> presetLabels = <String, String>{
       'Aikar (recommended)': 'aikar',
       'Vanilla (minimal flags)': 'vanilla',
       'Conservative (lower pause pressure)': 'conservative',
     };
 
     while (true) {
-      await _showHeader();
-      final pluginConsumer = _isPluginConsumerSelected();
-      final dropinCommand = pluginConsumer ? 'plugins' : 'mods';
-      final dropinLabel = pluginConsumer ? 'Plugins' : 'Mods';
-      final settings = await _runtimeSettings();
-      UserPrompt.row('Heap size:', settings.heap ?? '4G');
-      UserPrompt.row('Flag profile:', settings.profile ?? 'aikar');
-      UserPrompt.info('Build cache, dropin sync, and JVM tuning in one menu.');
-      final options = <String>[
-        'Sync Repos (all)',
-        'Build Server Jar / Installer',
-        'Show Build Cache',
-        'Sync $dropinLabel to All Valid Targets',
-        'Show $dropinLabel Source',
-        'Set Heap Size',
-        'Set JVM Flag Profile',
-        'Reset JVM to Recommended (4G + Aikar)',
+      final bool plugins = _isPluginConsumer();
+      final String dropinCommand = plugins ? 'plugins' : 'mods';
+      final String dropinLabel = plugins ? 'plugins' : 'mods';
+      final _RuntimeSettings settings = await _runtimeSettings();
+      final String heap = settings.heap ?? '4G';
+      final String profile = settings.profile ?? 'aikar';
+
+      final List<MenuEntry<_BuildAct>> entries = <MenuEntry<_BuildAct>>[
+        const MenuEntry<_BuildAct>.separator('build'),
+        const MenuEntry<_BuildAct>(
+          'Build server jar',
+          value: _BuildAct.build,
+          shortcut: 'b',
+          detail: 'pick platform and version',
+        ),
+        const MenuEntry<_BuildAct>(
+          'Show build cache',
+          value: _BuildAct.cache,
+        ),
+        const MenuEntry<_BuildAct>(
+          'Sync upstream repos',
+          value: _BuildAct.repos,
+        ),
+        const MenuEntry<_BuildAct>.separator('dropins'),
+        MenuEntry<_BuildAct>(
+          'Sync $dropinLabel to instances',
+          value: _BuildAct.sync,
+        ),
+        MenuEntry<_BuildAct>(
+          'Show $dropinLabel source',
+          value: _BuildAct.source,
+        ),
+        const MenuEntry<_BuildAct>.separator('jvm'),
+        MenuEntry<_BuildAct>(
+          'Heap size',
+          value: _BuildAct.heap,
+          detail: heap,
+        ),
+        MenuEntry<_BuildAct>(
+          'Flag profile',
+          value: _BuildAct.flags,
+          detail: profile,
+        ),
+        const MenuEntry<_BuildAct>(
+          'Reset JVM defaults',
+          value: _BuildAct.resetJvm,
+          detail: '4G + aikar',
+        ),
+        const MenuEntry<_BuildAct>.separator(),
+        const MenuEntry<_BuildAct>('Back', value: _BuildAct.back),
       ];
-      late final int choice;
+
+      _BuildAct action;
       try {
-        choice = await UserPrompt.menu('Build/JVM', options);
+        action = await menuSelect<_BuildAct>('Build & tuning', entries);
       } on PromptBackNavigation {
         return;
       }
 
-      switch (choice) {
-        case 0:
-          await passthrough.run(<String>['repos', 'sync', 'all']);
-          await UserPrompt.pressEnter();
+      switch (action) {
+        case _BuildAct.build:
+          await _runStep(_buildServerArtifact);
           break;
-        case 1:
-          await _runEscapableStep(_buildServerArtifact);
+        case _BuildAct.cache:
+          await _shellRun(<String>['build', 'list']);
+          await Ui.pause();
           break;
-        case 2:
-          await passthrough.run(<String>['build', 'list']);
-          await UserPrompt.pressEnter();
+        case _BuildAct.repos:
+          Ui.doing('Syncing upstream repos');
+          await _shellRun(<String>['repos', 'sync', 'all']);
+          await Ui.pause();
           break;
-        case 3:
-          await passthrough.run(<String>[dropinCommand, 'sync', '--all']);
-          await UserPrompt.pressEnter();
+        case _BuildAct.sync:
+          await _shellRun(<String>[dropinCommand, 'sync', '--all']);
+          await Ui.pause();
           break;
-        case 4:
-          await passthrough.run(<String>[dropinCommand, 'show-source']);
-          await UserPrompt.pressEnter();
+        case _BuildAct.source:
+          await _shellRun(<String>[dropinCommand, 'show-source']);
+          await Ui.pause();
           break;
-        case 5:
-          final currentHeap = (settings.heap ?? '4G').toUpperCase();
-          var heapIndex = heapOptions.indexWhere(
-            (candidate) => candidate.toUpperCase() == currentHeap,
-          );
-          if (heapIndex < 0) {
-            heapIndex = 1;
-          }
-          final selectedHeap = await UserPrompt.pick(
-            'Heap size (Xms/Xmx)',
-            heapOptions,
-            initialIndex: heapIndex,
-          );
-          await passthrough.run(<String>[
-            'runtime',
-            'settings',
-            'set-heap',
-            selectedHeap,
-          ]);
-          await UserPrompt.pressEnter();
+        case _BuildAct.heap:
+          await _runStep(() async {
+            int index = heapOptions.indexWhere(
+              (String candidate) =>
+                  candidate.toUpperCase() == heap.toUpperCase(),
+            );
+            if (index < 0) {
+              index = 1;
+            }
+            final String selected = await Ui.pick(
+              'Heap size (Xms/Xmx)',
+              heapOptions,
+              initialIndex: index,
+            );
+            await _shellRun(<String>[
+              'runtime',
+              'settings',
+              'set-heap',
+              selected,
+            ]);
+          });
           break;
-        case 6:
-          final labels = presetLabels.keys.toList(growable: false);
-          final currentProfile = (settings.profile ?? 'aikar').toLowerCase();
-          var presetIndex = labels.indexWhere(
-            (label) => presetLabels[label] == currentProfile,
-          );
-          if (presetIndex < 0) {
-            presetIndex = 0;
-          }
-          final selectedLabel = await UserPrompt.pick(
-            'JVM flag profile',
-            labels,
-            initialIndex: presetIndex,
-          );
-          final preset = presetLabels[selectedLabel]!;
-          await passthrough.run(<String>[
-            'runtime',
-            'settings',
-            'set-preset',
-            preset,
-          ]);
-          await UserPrompt.pressEnter();
+        case _BuildAct.flags:
+          await _runStep(() async {
+            final List<String> labels = presetLabels.keys.toList(
+              growable: false,
+            );
+            int index = labels.indexWhere(
+              (String label) => presetLabels[label] == profile.toLowerCase(),
+            );
+            if (index < 0) {
+              index = 0;
+            }
+            final String selected = await Ui.pick(
+              'JVM flag profile',
+              labels,
+              initialIndex: index,
+            );
+            await _shellRun(<String>[
+              'runtime',
+              'settings',
+              'set-preset',
+              presetLabels[selected]!,
+            ]);
+          });
           break;
-        case 7:
-          await passthrough.run(<String>['runtime', 'settings', 'reset']);
-          await UserPrompt.pressEnter();
+        case _BuildAct.resetJvm:
+          await _shellRun(<String>['runtime', 'settings', 'reset']);
           break;
+        case _BuildAct.back:
+          return;
       }
     }
   }
 
   Future<void> _buildServerArtifact() async {
-    final type = await _pickServerType();
-    final versionChoice = await _pickSupportedVersion(type);
-    final version = versionChoice.version;
-    final label = _serverTypeLabel(type);
-    final confirm = await UserPrompt.confirm(
-      'Build/download $label for Minecraft $version'
-      '${versionChoice.isLatest ? ' (latest supported)' : ''}?',
-      defaultValue: true,
+    final String type = await Ui.pick('Server platform', _serverTypes);
+    final _BuildVersionChoice versionChoice = await _pickSupportedVersion(
+      type,
     );
-    if (!confirm) {
-      return;
-    }
-
-    UserPrompt.info(
-      'Building $label for Minecraft $version'
-      '${versionChoice.isLatest ? ' (latest supported by $label)' : ''}.',
-    );
-    await passthrough.run(<String>['build', type, '--mc', version]);
-    await UserPrompt.pressEnter();
-  }
-
-  Future<String> _pickServerType() {
-    return UserPrompt.pick('Server platform', _serverTypes);
+    final String label = _serverTypeLabel(type);
+    Ui.doing('Building $label for Minecraft ${versionChoice.version}');
+    await _shellRun(<String>['build', type, '--mc', versionChoice.version]);
+    await Ui.pause();
   }
 
   Future<_BuildVersionChoice> _pickSupportedVersion(String type) async {
-    final label = _serverTypeLabel(type);
-    UserPrompt.info('Checking supported Minecraft versions for $label...');
-    final supported = await _resolveSupportedVersions(type);
-    final latest = await _resolveLatestVersion(type);
+    final String label = _serverTypeLabel(type);
+    Ui.note('Checking supported Minecraft versions for $label...');
+    final List<String> supported = await _resolveSupportedVersions(type);
+    final String latest = await _resolveLatestVersion(type);
 
-    if (supported.isEmpty) {
-      final manual = await UserPrompt.input(
+    Future<_BuildVersionChoice> manualEntry() async {
+      final String manual = await Ui.input(
         '$label Minecraft version',
         defaultValue: latest,
         validator: _looksLikeMinecraftVersion,
@@ -972,52 +764,143 @@ class InteractiveWizard {
       );
     }
 
-    final newestFirst = supported.reversed.toList(growable: false);
-    final visible = newestFirst.take(30).toList(growable: true);
+    if (supported.isEmpty) {
+      return manualEntry();
+    }
+
+    final List<String> newestFirst = supported.reversed.toList(
+      growable: false,
+    );
+    final List<String> visible = newestFirst.take(30).toList(growable: true);
     if (!visible.contains(latest)) {
       visible.insert(0, latest);
     }
 
-    final labels = <String>[];
-    final byLabel = <String, _BuildVersionChoice>{};
-    for (final version in visible) {
-      final isLatest = version == latest;
-      final option =
-          'Minecraft $version${isLatest ? ' (latest supported by $label)' : ''}';
-      labels.add(option);
-      byLabel[option] = _BuildVersionChoice(
-        version: version,
-        isLatest: isLatest,
-      );
-    }
+    final List<MenuEntry<String>> entries = <MenuEntry<String>>[
+      for (final String version in visible)
+        MenuEntry<String>(
+          'Minecraft $version',
+          value: version,
+          detail: version == latest ? 'latest supported by $label' : null,
+        ),
+      MenuEntry<String>(
+        'Enter another version',
+        value: '',
+        detail: supported.length > visible.length
+            ? '${supported.length - visible.length} older not shown'
+            : null,
+      ),
+    ];
 
-    final manualLabel = supported.length > visible.length
-        ? 'Enter another version (${supported.length - visible.length} older not shown)'
-        : 'Enter another version';
-    labels.add(manualLabel);
-
-    final selected = await UserPrompt.pick(
+    final String selected = await menuSelect<String>(
       '$label version (${supported.length} supported)',
-      labels,
+      entries,
     );
-    if (selected == manualLabel) {
-      final manual = await UserPrompt.input(
-        '$label Minecraft version',
-        defaultValue: latest,
-        validator: _looksLikeMinecraftVersion,
-        validationMessage: 'Use a version like 1.21.11 or 26.1.2.',
-      );
-      return _BuildVersionChoice(
-        version: manual.trim(),
-        isLatest: manual.trim() == latest,
-      );
+    if (selected.isEmpty) {
+      return manualEntry();
+    }
+    return _BuildVersionChoice(
+      version: selected,
+      isLatest: selected == latest,
+    );
+  }
+
+  // ─── Backend helpers ─────────────────────────────────────────────────
+
+  /// Runs a native command shielded: echo off while it runs, stale
+  /// keystrokes drained afterwards.
+  Future<int> _shellRun(List<String> args) {
+    return Ui.shielded(() => passthrough.run(args));
+  }
+
+  Future<void> _syncDropinsAllTargets() async {
+    final String command = _isPluginConsumer() ? 'plugins' : 'mods';
+    await _shellRun(<String>[command, 'sync', '--all']);
+  }
+
+  ConsumerProfile _activeConsumer() {
+    return requestedConsumer ?? consumerService.readActive();
+  }
+
+  bool _isPluginConsumer() {
+    return _activeConsumer() == ConsumerProfile.plugin;
+  }
+
+  Future<List<_InstanceRow>> _loadInstanceRows() async {
+    final CapturedResult result = await passthrough.capture(<String>[
+      'runtime',
+      'states',
+    ]);
+    if (!result.success) {
+      return const <_InstanceRow>[];
     }
 
-    return byLabel[selected]!;
+    final List<_InstanceRow> rows = <_InstanceRow>[];
+    for (final String line in result.stdout.split('\n')) {
+      final List<String> parts = line.trim().split('\t');
+      if (parts.length < 3 || parts[0].isEmpty) {
+        continue;
+      }
+      rows.add(
+        _InstanceRow(
+          name: parts[0],
+          state: RuntimeState.values.firstWhere(
+            (RuntimeState s) => s.name == parts[1],
+            orElse: () => RuntimeState.stopped,
+          ),
+          port: parts[2],
+        ),
+      );
+    }
+    return rows;
+  }
+
+  Future<_InstanceRow?> _loadInstanceRow(String name) async {
+    final List<_InstanceRow> rows = await _loadInstanceRows();
+    for (final _InstanceRow row in rows) {
+      if (row.name == name) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  Future<List<String>> _instanceNames() async {
+    final CapturedResult result = await passthrough.capture(<String>[
+      'instance',
+      'list',
+    ]);
+    if (!result.success) {
+      return const <String>[];
+    }
+    return result.stdout
+        .split('\n')
+        .map((String line) => line.replaceAll(' (active)', '').trim())
+        .where((String line) => line.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<String?> _activeInstance() async {
+    final String? line = await passthrough.captureStdoutLine(<String>[
+      'instance',
+      'current',
+    ]);
+    final String cleaned = (line ?? '').trim();
+    return cleaned.isEmpty ? null : cleaned;
+  }
+
+  Future<String?> _dropinsSource() async {
+    final String command = _isPluginConsumer() ? 'plugins' : 'mods';
+    final String? line = await passthrough.captureStdoutLine(<String>[
+      command,
+      'show-source',
+    ]);
+    final String cleaned = (line ?? '').trim();
+    return cleaned.isEmpty ? null : cleaned;
   }
 
   Future<_RuntimeSettings> _runtimeSettings() async {
-    final result = await passthrough.capture(<String>[
+    final CapturedResult result = await passthrough.capture(<String>[
       'runtime',
       'settings',
       'show',
@@ -1025,171 +908,44 @@ class InteractiveWizard {
     if (!result.success) {
       return const _RuntimeSettings();
     }
-
-    final text = '${result.stdout}\n${result.stderr}';
-    final heap = RegExp(
-      r'^heap size:\s*(.+)$',
-      multiLine: true,
-    ).firstMatch(text)?.group(1)?.trim();
-    final profile = RegExp(
-      r'^flags profile:\s*(.+)$',
-      multiLine: true,
-    ).firstMatch(text)?.group(1)?.trim();
-    final jvmArgs = RegExp(
-      r'^jvm args:\s*(.+)$',
-      multiLine: true,
-    ).firstMatch(text)?.group(1)?.trim();
-
-    return _RuntimeSettings(heap: heap, profile: profile, jvmArgs: jvmArgs);
-  }
-
-  Future<String?> _activeInstance() async {
-    final line = await passthrough.captureStdoutLine(<String>[
-      'instance',
-      'current',
-    ]);
-    return _cleanLine(line);
-  }
-
-  Future<String?> _activeInstanceWithPort() async {
-    final active = await _activeInstance();
-    if (active == null) {
-      return null;
+    final String text = '${result.stdout}\n${result.stderr}';
+    String? extract(String key) {
+      return RegExp(
+        '^$key:\\s*(.+)\$',
+        multiLine: true,
+      ).firstMatch(text)?.group(1)?.trim();
     }
-    final port = await _configuredInstancePort(active);
-    if (port == null) {
-      return active;
-    }
-    return '$active ($port)';
-  }
 
-  Future<String?> _dropinsSource() async {
-    final active = requestedConsumer ?? consumerService.readActive();
-    if (active == ConsumerProfile.plugin) {
-      return _cleanLine(
-        await passthrough.captureStdoutLine(<String>['plugins', 'show-source']),
-      );
-    }
-    return _cleanLine(
-      await passthrough.captureStdoutLine(<String>['mods', 'show-source']),
+    return _RuntimeSettings(
+      heap: extract('heap size'),
+      profile: extract('flags profile'),
     );
-  }
-
-  Future<List<String>> _runningServers() async {
-    final result = await passthrough.capture(<String>['runtime', 'list']);
-    if (!result.success) {
-      return const <String>[];
-    }
-
-    return result.stdout
-        .split('\n')
-        .map(_cleanLine)
-        .whereType<String>()
-        .where((e) => e.isNotEmpty)
-        .toList(growable: false);
-  }
-
-  Future<List<String>> _runningServersWithPorts() async {
-    final servers = await _runningServers();
-    final out = <String>[];
-    for (final s in servers) {
-      final port = await _instancePort(s);
-      if (port == null) {
-        out.add('$s(?)');
-      } else {
-        out.add('$s($port)');
-      }
-    }
-    return out;
-  }
-
-  Future<String?> _instancePort(String instance) async {
-    final configured = await _configuredInstancePort(instance);
-    if (configured != null) {
-      return configured;
-    }
-    final status = await _instanceRuntimeStatus(instance);
-    return status.port;
-  }
-
-  Future<String?> _configuredInstancePort(String instance) async {
-    final raw = await passthrough.captureStdoutLine(<String>[
-      'instance',
-      'port',
-      instance,
-    ]);
-    final port = _cleanLine(raw);
-    if (port == null) {
-      return null;
-    }
-    return int.tryParse(port) == null ? null : port;
-  }
-
-  Future<_RuntimeStatus> _instanceRuntimeStatus(String instance) async {
-    final result = await passthrough.capture(<String>[
-      'runtime',
-      'status',
-      instance,
-    ]);
-    if (!result.success) {
-      return const _RuntimeStatus();
-    }
-
-    final text = '${result.stdout}\n${result.stderr}';
-    final modeMatch = RegExp(
-      r'^mode:\s*(\S+)',
-      multiLine: true,
-    ).firstMatch(text);
-    final portMatch = RegExp(
-      r'^server port:\s*([^\s]+)',
-      multiLine: true,
-    ).firstMatch(text);
-    final rawPort = portMatch?.group(1)?.trim();
-
-    return _RuntimeStatus(
-      mode: modeMatch?.group(1)?.trim(),
-      port: rawPort == null || rawPort == 'unknown' ? null : rawPort,
-    );
-  }
-
-  Future<List<String>> _instanceNames() async {
-    final result = await passthrough.capture(<String>['instance', 'list']);
-    if (!result.success) {
-      return const <String>[];
-    }
-
-    return result.stdout
-        .split('\n')
-        .map(_cleanLine)
-        .whereType<String>()
-        .map((line) => line.replaceAll(' (active)', '').trim())
-        .where((line) => line.isNotEmpty)
-        .toList(growable: false);
   }
 
   Future<String> _resolveLatestVersion(String type) async {
-    final result = await passthrough.capture(<String>['build', 'latest', type]);
+    final CapturedResult result = await passthrough.capture(<String>[
+      'build',
+      'latest',
+      type,
+    ]);
     if (!result.success) {
       return '1.21.1';
     }
-
-    final combined = '${result.stdout}\n${result.stderr}'
+    final List<String> lines = '${result.stdout}\n${result.stderr}'
         .split('\n')
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
+        .map((String line) => line.trim())
+        .where((String line) => line.isNotEmpty)
         .toList(growable: false);
-
-    for (final line in combined.reversed) {
+    for (final String line in lines.reversed) {
       if (RegExp(r'^\d+\.\d+(\.\d+)?$').hasMatch(line)) {
         return line;
       }
     }
-
     return '1.21.1';
   }
 
   Future<List<String>> _resolveSupportedVersions(String type) async {
-    final result = await passthrough.capture(<String>[
+    final CapturedResult result = await passthrough.capture(<String>[
       'build',
       'versions',
       type,
@@ -1197,12 +953,11 @@ class InteractiveWizard {
     if (!result.success) {
       return const <String>[];
     }
-
-    final versions =
+    final List<String> versions =
         '${result.stdout}\n${result.stderr}'
             .split('\n')
             .map(
-              (line) => RegExp(
+              (String line) => RegExp(
                 r'^\s*-\s*(\d+\.\d+(?:\.\d+)?)\s*$',
               ).firstMatch(line)?.group(1),
             )
@@ -1214,12 +969,12 @@ class InteractiveWizard {
   }
 
   int _compareMinecraftVersions(String a, String b) {
-    final av = _versionParts(a);
-    final bv = _versionParts(b);
-    final length = av.length > bv.length ? av.length : bv.length;
-    for (var i = 0; i < length; i++) {
-      final left = i < av.length ? av[i] : 0;
-      final right = i < bv.length ? bv[i] : 0;
+    final List<int> av = _versionParts(a);
+    final List<int> bv = _versionParts(b);
+    final int length = av.length > bv.length ? av.length : bv.length;
+    for (int i = 0; i < length; i++) {
+      final int left = i < av.length ? av[i] : 0;
+      final int right = i < bv.length ? bv[i] : 0;
       if (left != right) {
         return left.compareTo(right);
       }
@@ -1230,12 +985,16 @@ class InteractiveWizard {
   List<int> _versionParts(String value) {
     return value
         .split('.')
-        .map((part) => int.tryParse(part) ?? 0)
+        .map((String part) => int.tryParse(part) ?? 0)
         .toList(growable: false);
   }
 
   bool _looksLikeMinecraftVersion(String input) {
     return RegExp(r'^\d+\.\d+(\.\d+)?$').hasMatch(input.trim());
+  }
+
+  bool _isValidInstanceName(String input) {
+    return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(input.trim());
   }
 
   String _serverTypeLabel(String type) {
@@ -1252,50 +1011,114 @@ class InteractiveWizard {
     };
   }
 
-  bool _isValidInstanceName(String input) {
-    return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(input.trim());
+  String _stateGlyph(RuntimeState state) {
+    return switch (state) {
+      RuntimeState.running => '●',
+      RuntimeState.starting => '◐',
+      RuntimeState.stopping => '◑',
+      RuntimeState.restarting => '↻',
+      RuntimeState.stopped => '○',
+    };
   }
 
-  String _instanceNameFromMenuLine(String line) {
-    final first = line.split(' (').first.trim();
-    return first;
+  String _stateColor(RuntimeState state) {
+    return switch (state) {
+      RuntimeState.running => Ansi.green,
+      RuntimeState.starting ||
+      RuntimeState.stopping ||
+      RuntimeState.restarting => Ansi.yellow,
+      RuntimeState.stopped => Ansi.gray,
+    };
   }
 
-  String? _instanceNameFromAction(String line, String prefix) {
-    if (!line.startsWith(prefix)) {
-      return null;
+  String _shortenPath(String path) {
+    final String? home = Platform.environment['HOME'];
+    String shortened = path;
+    if (home != null && home.isNotEmpty && shortened.startsWith(home)) {
+      shortened = '~${shortened.substring(home.length)}';
     }
-    final tail = line.substring(prefix.length).trim();
-    return _instanceNameFromMenuLine(tail);
-  }
-
-  String? _cleanLine(String? raw) {
-    if (raw == null) {
-      return null;
+    if (shortened.length > 32) {
+      shortened = '…${shortened.substring(shortened.length - 31)}';
     }
-    final cleaned = raw.trim();
-    return cleaned.isEmpty ? null : cleaned;
-  }
-
-  bool _isPluginConsumerSelected() {
-    final active = requestedConsumer ?? consumerService.readActive();
-    return active == ConsumerProfile.plugin;
+    return shortened;
   }
 }
 
-class _RuntimeStatus {
-  const _RuntimeStatus({this.mode, this.port});
+enum _Act {
+  instance,
+  create,
+  startAll,
+  stopAll,
+  consolesGrid,
+  consolesLateral,
+  buildMenu,
+  consumer,
+  refresh,
+  quit,
+}
 
-  final String? mode;
-  final String? port;
+class _DashChoice {
+  const _DashChoice(this.kind, {this.instance});
+
+  final _Act kind;
+  final String? instance;
+}
+
+enum _InstanceAct {
+  startWithConsole,
+  startBackground,
+  console,
+  restart,
+  stop,
+  activate,
+  port,
+  motd,
+  reset,
+  delete,
+  back,
+}
+
+enum _BuildAct {
+  build,
+  cache,
+  repos,
+  sync,
+  source,
+  heap,
+  flags,
+  resetJvm,
+  back,
+}
+
+class _InstanceRow {
+  const _InstanceRow({
+    required this.name,
+    required this.state,
+    required this.port,
+  });
+
+  final String name;
+  final RuntimeState state;
+  final String port;
+}
+
+class _DashboardData {
+  const _DashboardData({
+    required this.rows,
+    required this.active,
+    required this.dropins,
+  });
+
+  final List<_InstanceRow> rows;
+  final String? active;
+  final String? dropins;
 }
 
 class _RuntimeSettings {
-  const _RuntimeSettings({this.heap, this.profile, this.jvmArgs});
+  const _RuntimeSettings({this.heap, this.profile});
 
   final String? heap;
   final String? profile;
-  final String? jvmArgs;
 }
 
 class _BuildVersionChoice {

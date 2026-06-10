@@ -8,6 +8,7 @@ import '../models/consumer_profile.dart';
 import '../utils/process_runner.dart';
 import 'consumer_service.dart';
 import 'manager_context.dart';
+import 'runtime_state.dart';
 
 part 'native_command_help.dart';
 part 'native_cli_output.dart';
@@ -358,11 +359,19 @@ class NativeCommandService {
           io.write(name);
         }
         return 0;
+      case 'states':
+        for (final name in _instanceNames(profile)) {
+          final state = await _runtimeStateOf(profile, name);
+          final port = _instanceGetServerPort(profile, name);
+          final pid = _readPid(_runtimeServerPidFile(profile, name));
+          io.write('$name\t${state.name}\t$port\t${pid ?? '-'}');
+        }
+        return 0;
       case 'settings':
         return _dispatchRuntimeSettings(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args] (start supports --instance/--no-console)',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|states|list|settings> [instance|args] (start supports --instance/--no-console)',
           2,
         );
     }
@@ -1141,52 +1150,59 @@ class NativeCommandService {
     _NativeIoBuffer io,
   ) async {
     final buildsUrl =
-        'https://api.papermc.io/v2/projects/$type/versions/$mc/builds';
-    final json = await _httpGetJsonObject(buildsUrl);
-    final buildsRaw = json['builds'];
-    if (buildsRaw is! List) {
-      throw _NativeCommandException(
-        'Unexpected $type builds payload for $mc',
-        1,
-      );
-    }
+        'https://fill.papermc.io/v3/projects/$type/versions/$mc/builds';
+    final buildsRaw = await _httpGetJsonList(buildsUrl);
 
-    var bestBuild = -1;
-    String? artifactName;
+    // Prefer the highest STABLE build, falling back to the highest build of any
+    // channel when a freshly released Minecraft version only has experimental
+    // builds. Fill v3 exposes the ready-to-use download URL directly.
+    var bestStableBuild = -1;
+    String? stableDownloadUrl;
+    var bestAnyBuild = -1;
+    String? anyDownloadUrl;
     for (final raw in buildsRaw) {
       if (raw is! Map) {
         continue;
       }
-      final build = raw['build'];
+      final build = raw['id'];
       final downloads = raw['downloads'];
       if (build is! num || downloads is! Map) {
         continue;
       }
-      final app = downloads['application'];
-      if (app is! Map) {
+      final primary = downloads['server:default'];
+      if (primary is! Map) {
         continue;
       }
-      final name = app['name'];
-      if (name is! String || name.trim().isEmpty) {
+      final url = primary['url'];
+      if (url is! String || url.trim().isEmpty) {
         continue;
       }
-      if (build.toInt() > bestBuild) {
-        bestBuild = build.toInt();
-        artifactName = name.trim();
+      final buildNumber = build.toInt();
+      if (buildNumber > bestAnyBuild) {
+        bestAnyBuild = buildNumber;
+        anyDownloadUrl = url.trim();
+      }
+      final isStable =
+          raw['channel']?.toString().trim().toUpperCase() == 'STABLE';
+      if (isStable && buildNumber > bestStableBuild) {
+        bestStableBuild = buildNumber;
+        stableDownloadUrl = url.trim();
       }
     }
 
-    if (bestBuild <= 0 || artifactName == null) {
+    final bestBuild = bestStableBuild > 0 ? bestStableBuild : bestAnyBuild;
+    final downloadUrl = bestStableBuild > 0
+        ? stableDownloadUrl
+        : anyDownloadUrl;
+    if (bestBuild <= 0 || downloadUrl == null) {
       throw _NativeCommandException(
         'No downloadable $type build found for mc=$mc',
         1,
       );
     }
 
-    final downloadUrl =
-        'https://api.papermc.io/v2/projects/$type/versions/$mc/builds/$bestBuild/downloads/$artifactName';
     final output = p.join(_buildDir(profile, type), '$type-$mc-$bestBuild.jar');
-    await _downloadToFile(downloadUrl, output);
+    await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, type, output);
     io.write('[OK] Cached $type build $bestBuild for mc=$mc');
     io.write('[INFO] Jar: $output');
@@ -1219,7 +1235,7 @@ class NativeCommandService {
       _buildDir(profile, 'purpur'),
       'purpur-$mc-$latestBuild.jar',
     );
-    await _downloadToFile(downloadUrl, output);
+    await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'purpur', output);
     io.write('[OK] Cached purpur build $latestBuild for mc=$mc');
     io.write('[INFO] Jar: $output');
@@ -1276,7 +1292,7 @@ class NativeCommandService {
       _buildDir(profile, 'canvas'),
       'canvas-$channel-$buildNumber.jar',
     );
-    await _downloadToFile(downloadUrl, output);
+    await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'canvas', output);
     io.write('[OK] Cached canvas build $buildNumber for mc=$channel');
     io.write('[INFO] Jar: $output');
@@ -1326,7 +1342,7 @@ class NativeCommandService {
       _buildDir(profile, 'fabric'),
       'fabric-$mc-loader.$loader-installer.$installer.jar',
     );
-    await _downloadToFile(downloadUrl, output);
+    await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'fabric', output);
     io.write(
       '[OK] Cached fabric server launcher for mc=$mc loader=$loader installer=$installer',
@@ -1351,7 +1367,7 @@ class NativeCommandService {
       _buildDir(profile, 'forge'),
       'forge-$full-installer.jar',
     );
-    await _downloadToFile(downloadUrl, output);
+    await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'forge', output);
     io.write('[OK] Cached forge installer for mc=$mc loader=$loader');
     io.write('[INFO] Jar: $output');
@@ -1373,7 +1389,7 @@ class NativeCommandService {
       _buildDir(profile, 'neoforge'),
       'neoforge-$loader-installer.jar',
     );
-    await _downloadToFile(downloadUrl, output);
+    await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'neoforge', output);
     io.write('[OK] Cached neoforge installer for loader=$loader');
     io.write('[INFO] Jar: $output');
@@ -1398,7 +1414,7 @@ class NativeCommandService {
     final cachedBuildTools = File(buildToolsJar).existsSync();
     try {
       io.write('[INFO] Refreshing BuildTools.jar from upstream');
-      await _downloadToFile(buildToolsUrl, buildToolsJar);
+      await _downloadToFile(buildToolsUrl, buildToolsJar, io: io);
     } on _NativeCommandException catch (e) {
       if (!cachedBuildTools) {
         rethrow;
@@ -1416,15 +1432,41 @@ class NativeCommandService {
     io.write(
       '[INFO] Running BuildTools for Spigot mc=$mc (this can take a while)',
     );
-    final result = await Process.run(
+    final process = await Process.start(
       'java',
       <String>['-jar', buildToolsJar, '--rev', mc, '--compile', 'SPIGOT'],
       workingDirectory: workDir,
       runInShell: true,
     );
-    if (result.exitCode != 0) {
+    final stderrTail = <String>[];
+    void onStderrLine(String line) {
+      stderrTail.add(line);
+      if (stderrTail.length > 40) {
+        stderrTail.removeAt(0);
+      }
+      if (io.stream) {
+        stdout.writeln('  $line');
+      }
+    }
+
+    final stdoutDone = process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .forEach((line) {
+          if (io.stream) {
+            stdout.writeln('  $line');
+          }
+        });
+    final stderrDone = process.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .forEach(onStderrLine);
+    final exitCode = await process.exitCode;
+    await stdoutDone;
+    await stderrDone;
+    if (exitCode != 0) {
       throw _NativeCommandException(
-        'BuildTools failed for mc=$mc: ${result.stderr}',
+        'BuildTools failed for mc=$mc: ${stderrTail.join('\n')}',
         1,
       );
     }
@@ -1621,10 +1663,22 @@ class NativeCommandService {
     throw _NativeCommandException('Request failed for $url: $lastError', 1);
   }
 
-  Future<void> _downloadToFile(String url, String outputPath) async {
+  Future<void> _downloadToFile(
+    String url,
+    String outputPath, {
+    _NativeIoBuffer? io,
+  }) async {
     final out = File(outputPath);
     out.parent.createSync(recursive: true);
     Object? lastError;
+    final showProgress = (io?.stream ?? false) && stdout.hasTerminal;
+    final label = p.basename(outputPath);
+
+    void clearProgressLine() {
+      if (showProgress) {
+        stdout.write('\r\x1B[2K');
+      }
+    }
 
     for (var attempt = 1; attempt <= 3; attempt++) {
       final tmp = File('$outputPath.part');
@@ -1642,18 +1696,38 @@ class NativeCommandService {
           );
         }
 
+        final total = response.contentLength;
+        var received = 0;
+        var lastDraw = DateTime.fromMillisecondsSinceEpoch(0);
         final sink = tmp.openWrite(mode: FileMode.writeOnly);
-        await response.listen((chunk) => sink.add(chunk)).asFuture<void>();
+        await for (final List<int> chunk in response) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (showProgress) {
+            final now = DateTime.now();
+            if (now.difference(lastDraw).inMilliseconds >= 100) {
+              lastDraw = now;
+              final progress = total > 0
+                  ? '${_formatBytes(received)} / ${_formatBytes(total)} '
+                        '(${(received * 100 ~/ total)}%)'
+                  : _formatBytes(received);
+              stdout.write('\r\x1B[2K  downloading $label  $progress');
+            }
+          }
+        }
         await sink.flush();
         await sink.close();
+        clearProgressLine();
         if (out.existsSync()) {
           out.deleteSync();
         }
         tmp.renameSync(out.path);
         return;
       } on _NativeCommandException {
+        clearProgressLine();
         rethrow;
       } catch (e) {
+        clearProgressLine();
         lastError = e;
         if (attempt < 3) {
           await Future<void>.delayed(Duration(milliseconds: 200 * attempt));
@@ -1665,6 +1739,19 @@ class NativeCommandService {
       }
     }
     throw _NativeCommandException('Download failed for $url: $lastError', 1);
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) {
+      return '$bytes B';
+    }
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
   void _registerBuiltJar(ConsumerProfile profile, String type, String jarPath) {
@@ -1898,13 +1985,21 @@ class NativeCommandService {
 
   Future<List<String>> _resolvePaperLikeMcVersions(String type) async {
     final payload = await _httpGetJsonObject(
-      'https://api.papermc.io/v2/projects/$type',
+      'https://fill.papermc.io/v3/projects/$type',
     );
     final versionsRaw = payload['versions'];
-    if (versionsRaw is! List) {
+    if (versionsRaw is! Map) {
       return const <String>[];
     }
-    return _stableSortedMcVersions(versionsRaw);
+    // Fill v3 groups patch releases under their major.minor key, e.g.
+    // {"26.1": ["26.1.2", "26.1.1"], "1.21": ["1.21.11", ...]}.
+    final flattened = <String>[];
+    for (final group in versionsRaw.values) {
+      if (group is List) {
+        flattened.addAll(group.map((value) => value?.toString() ?? ''));
+      }
+    }
+    return _stableSortedMcVersions(flattened);
   }
 
   Future<List<String>> _resolvePurpurMcVersions() async {
@@ -2434,6 +2529,7 @@ class NativeCommandService {
     }
 
     _instanceEnsureSharedPluginOps(profile, instance, io: io);
+    _instanceEnsureRestartScript(profile, instance);
 
     if (!await _tmuxInstalled()) {
       throw _NativeCommandException(
@@ -2539,6 +2635,10 @@ class NativeCommandService {
 
     await _tmuxConfigureConsoleSession(tmuxSession);
     await _tmuxSetRuntimeUiLabel(tmuxSession, 'jvm-starting');
+
+    // The relaunch happened; clear any pending-restart marker so state
+    // reporting flips from "restarting" to "starting".
+    File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
 
     io.write('[OK] Runtime started: $instance');
     io.write('[INFO] tmux session: $tmuxSession');
@@ -2829,10 +2929,9 @@ class NativeCommandService {
     io.write(
       'All Consoles ($layoutLabel): ${running.length} running server(s)',
     );
-    io.write('Navigate panes: Left/Right arrows');
-    io.write('Type directly in focused pane (interactive).');
-    io.write('Scroll: mouse wheel (or Ctrl+B then [ for copy mode)');
-    io.write('Detach: Esc (or Ctrl+B then D)');
+    io.write('Navigate panes: Left/Right arrows. Type in the focused pane.');
+    io.write('Scroll: mouse wheel. Drag-select text to copy it.');
+    io.write('Detach: Esc (or Ctrl+B then D). Servers keep running.');
 
     final attach = await Process.start(
       'tmux',
@@ -2870,8 +2969,8 @@ class NativeCommandService {
     await _tmuxConfigureConsoleSession(tmuxSession);
 
     io.write('Server Console: $instance');
-    io.write('Press Esc to detach and return (or Ctrl+B then D).');
-    io.write('Scroll: mouse wheel (or Ctrl+B then [ for copy mode).');
+    io.write('Detach: Esc (or Ctrl+B then D). The server keeps running.');
+    io.write('Scroll: mouse wheel. Drag-select text to copy it.');
 
     var temporaryEscBinding = false;
     final listKeys = await _runProcess('tmux', <String>[
@@ -2976,6 +3075,58 @@ class NativeCommandService {
       if (!ok) {
         return;
       }
+    }
+    await _tmuxConfigureClipboardIntegration();
+  }
+
+  String? _clipboardCommand;
+  bool _clipboardCommandResolved = false;
+
+  Future<String?> _resolveClipboardCommand() async {
+    if (_clipboardCommandResolved) {
+      return _clipboardCommand;
+    }
+    _clipboardCommandResolved = true;
+    const candidates = <List<String>>[
+      <String>['pbcopy'],
+      <String>['wl-copy'],
+      <String>['xclip', '-selection', 'clipboard', '-in'],
+      <String>['xsel', '--clipboard', '--input'],
+    ];
+    for (final candidate in candidates) {
+      final result = await _runProcess('sh', <String>[
+        '-c',
+        'command -v ${candidate.first}',
+      ]);
+      if (result.exitCode == 0) {
+        _clipboardCommand = candidate.join(' ');
+        return _clipboardCommand;
+      }
+    }
+    return null;
+  }
+
+  /// Makes mouse drag-select copy straight to the system clipboard, so
+  /// click-and-drag in a console behaves like a normal terminal.
+  Future<void> _tmuxConfigureClipboardIntegration() async {
+    await _runProcess('tmux', <String>[
+      'set-option',
+      '-s',
+      'set-clipboard',
+      'on',
+    ]);
+    final clipboard = await _resolveClipboardCommand();
+    final copyAction = clipboard == null
+        ? <String>['send-keys', '-X', 'copy-selection-and-cancel']
+        : <String>['send-keys', '-X', 'copy-pipe-and-cancel', clipboard];
+    for (final table in <String>['copy-mode', 'copy-mode-vi']) {
+      await _runProcess('tmux', <String>[
+        'bind-key',
+        '-T',
+        table,
+        'MouseDragEnd1Pane',
+        ...copyAction,
+      ]);
     }
   }
 
@@ -3164,6 +3315,8 @@ class NativeCommandService {
         ? 'background'
         : 'stopped';
 
+    final state = await _runtimeStateOf(profile, instance);
+    io.write('state:        ${state.name}');
     io.write('mode:         $mode');
     io.write('tmux session: ${tmuxRunning ? tmuxSession : 'none'}');
     io.write('server port:  ${_instanceGetServerPort(profile, instance)}');
@@ -3202,6 +3355,80 @@ class NativeCommandService {
     }
 
     return false;
+  }
+
+  bool _runtimeRestartPending(ConsumerProfile profile, String instance) {
+    final file = File(_runtimeRestartPendingFile(profile, instance));
+    if (!file.existsSync()) {
+      return false;
+    }
+    final fresh = runtimeRestartMarkerFresh(
+      file.lastModifiedSync(),
+      DateTime.now(),
+    );
+    if (!fresh) {
+      file.deleteSyncSafe();
+    }
+    return fresh;
+  }
+
+  String _runtimeLogTail(
+    ConsumerProfile profile,
+    String instance, {
+    int maxBytes = 65536,
+  }) {
+    final file = File(_runtimeLogFile(profile, instance));
+    if (!file.existsSync()) {
+      return '';
+    }
+    final RandomAccessFile raf = file.openSync();
+    try {
+      final int length = raf.lengthSync();
+      final int start = length > maxBytes ? length - maxBytes : 0;
+      raf.setPositionSync(start);
+      final List<int> bytes = raf.readSync(length - start);
+      return utf8.decode(bytes, allowMalformed: true);
+    } catch (_) {
+      return '';
+    } finally {
+      raf.closeSync();
+    }
+  }
+
+  Future<RuntimeState> _runtimeStateOf(
+    ConsumerProfile profile,
+    String instance,
+  ) async {
+    final restartPending = _runtimeRestartPending(profile, instance);
+    final session = _tmuxSessionName(profile, instance);
+    if (await _tmuxSessionExists(session)) {
+      if (await _tmuxSessionHasLivePane(session)) {
+        final fromLog = classifyRuntimeLogTail(
+          _runtimeLogTail(profile, instance),
+        );
+        if (fromLog == RuntimeState.running) {
+          // Restart completed; any leftover marker is stale.
+          File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
+          return RuntimeState.running;
+        }
+        if (restartPending) {
+          return RuntimeState.restarting;
+        }
+        return fromLog;
+      }
+      await _runProcess('tmux', <String>['kill-session', '-t', session]);
+    }
+
+    final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
+    if (serverPid != null && await _pidRunning(serverPid)) {
+      return RuntimeState.running;
+    }
+    final consolePid = _readPid(_runtimeConsolePidFile(profile, instance));
+    if (consolePid != null && await _pidRunning(consolePid)) {
+      return RuntimeState.running;
+    }
+
+    return restartPending ? RuntimeState.restarting : RuntimeState.stopped;
   }
 
   Future<bool> _tmuxInstalled() async {
@@ -4190,6 +4417,107 @@ class NativeCommandService {
     }
   }
 
+  void _instanceEnsureRestartScript(ConsumerProfile profile, String instance) {
+    final instanceDir = _instanceDir(profile, instance);
+    final instanceDirectory = Directory(instanceDir);
+    if (!instanceDirectory.existsSync()) {
+      throw _NativeCommandException('Instance not found: $instance', 2);
+    }
+
+    final scriptName = 'multiplexor-restart.sh';
+    final scriptPath = p.join(instanceDir, scriptName);
+    final restartLog = _runtimeRestartLogFile(profile, instance);
+    Directory(p.dirname(restartLog)).createSync(recursive: true);
+
+    final restartCommand = _selfInvocationCommand(
+      profile: profile,
+      args: <String>['runtime', 'start', instance, '--no-console'],
+    );
+    final restartPendingFile = _runtimeRestartPendingFile(profile, instance);
+    final waitScript = <String>[
+      'printf "%s %s\\n" "\$(date)" '
+          '${_shellQuote('Restart requested for ${profile.shortName}/$instance')}',
+      'date > ${_shellQuote(restartPendingFile)}',
+      'i=0',
+      'while command -v tmux >/dev/null 2>&1 && '
+          'tmux has-session -t ${_shellQuote(_tmuxSessionName(profile, instance))} '
+          '>/dev/null 2>&1 && [ "\$i" -lt 180 ]; do',
+      '  i=\$((i + 1))',
+      '  sleep 1',
+      'done',
+      'cd ${_shellQuote(context.rootDir)} || exit 1',
+      'exec $restartCommand',
+    ].join('\n');
+
+    final script = <String>[
+      '#!/bin/sh',
+      '# Generated by Multiplexor. Used by Minecraft /restart.',
+      'LOG=${_shellQuote(restartLog)}',
+      'if command -v nohup >/dev/null 2>&1; then',
+      '  nohup sh -c ${_shellQuote(waitScript)} '
+          '>> "\$LOG" 2>&1 < /dev/null &',
+      'else',
+      '  sh -c ${_shellQuote(waitScript)} >> "\$LOG" 2>&1 < /dev/null &',
+      'fi',
+      'exit 0',
+      '',
+    ].join('\n');
+
+    File(scriptPath).writeAsStringSync(script);
+    final chmod = Process.runSync('chmod', <String>['755', scriptPath]);
+    if (chmod.exitCode != 0) {
+      throw _NativeCommandException(
+        'Failed to make restart script executable: ${chmod.stderr}',
+        1,
+      );
+    }
+
+    final spigotConfig = File(p.join(instanceDir, 'spigot.yml'));
+    if (_isPluginConsumer(profile) || spigotConfig.existsSync()) {
+      _instanceConfigureSpigotRestartScript(spigotConfig, './$scriptName');
+    }
+  }
+
+  void _instanceConfigureSpigotRestartScript(
+    File spigotConfig,
+    String restartScript,
+  ) {
+    final restartConfigLine = '  restart-script: $restartScript';
+    if (!spigotConfig.existsSync()) {
+      spigotConfig.writeAsStringSync('settings:\n$restartConfigLine\n');
+      return;
+    }
+
+    final lines = spigotConfig.readAsLinesSync();
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (!RegExp(r'^\s*restart-script\s*:').hasMatch(line)) {
+        continue;
+      }
+      final indent = RegExp(r'^(\s*)').firstMatch(line)?.group(1) ?? '';
+      lines[i] = '${indent}restart-script: $restartScript';
+      spigotConfig.writeAsStringSync('${lines.join('\n')}\n');
+      return;
+    }
+
+    for (var i = 0; i < lines.length; i++) {
+      if (!RegExp(r'^settings\s*:\s*(?:#.*)?$').hasMatch(lines[i])) {
+        continue;
+      }
+      lines.insert(i + 1, restartConfigLine);
+      spigotConfig.writeAsStringSync('${lines.join('\n')}\n');
+      return;
+    }
+
+    final output = <String>[
+      ...lines,
+      if (lines.isNotEmpty && lines.last.trim().isNotEmpty) '',
+      'settings:',
+      restartConfigLine,
+    ];
+    spigotConfig.writeAsStringSync('${output.join('\n')}\n');
+  }
+
   void _instanceCreateBlank(
     ConsumerProfile profile,
     String name, {
@@ -4226,6 +4554,7 @@ class NativeCommandService {
       _irisPacksLinkInstance(profile, name);
     }
     _configLinkInstance(profile, name);
+    _instanceEnsureRestartScript(profile, name);
     _instanceEnsureSharedPluginOps(profile, name, io: io);
   }
 
@@ -4250,6 +4579,7 @@ class NativeCommandService {
       _irisPacksLinkInstance(profile, target);
     }
     _configLinkInstance(profile, target);
+    _instanceEnsureRestartScript(profile, target);
     _instanceEnsureSharedPluginOps(profile, target, io: io);
   }
 
@@ -4360,6 +4690,7 @@ class NativeCommandService {
     try {
       _instanceCreateBlank(profile, name, io: io);
       _restoreFactoryArtifactsFromBackup(profile, name, backupPath: backupPath);
+      _instanceEnsureRestartScript(profile, name);
       _instanceEnsureSharedPluginOps(profile, name, io: io);
       _deletePathEntity(backupPath, recursive: true);
     } catch (e) {
@@ -4916,6 +5247,14 @@ class NativeCommandService {
 
   String _runtimeLogFile(ConsumerProfile profile, String instance) {
     return p.join(_runtimeDir(profile), '$instance.log');
+  }
+
+  String _runtimeRestartLogFile(ConsumerProfile profile, String instance) {
+    return p.join(_runtimeDir(profile), '$instance.restart.log');
+  }
+
+  String _runtimeRestartPendingFile(ConsumerProfile profile, String instance) {
+    return p.join(_runtimeDir(profile), '$instance.restart-pending');
   }
 
   String _pluginsWatchPidFile(ConsumerProfile profile, {required bool mods}) {

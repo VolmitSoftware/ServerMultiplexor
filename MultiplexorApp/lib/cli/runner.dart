@@ -277,6 +277,9 @@ Future<int> _runRuntime(List<String> rest) async {
     case 'list':
       await handleRuntimeList();
       return 0;
+    case 'states':
+      await handleRuntimeStates();
+      return 0;
     case 'settings':
       final action = parsed.positionalOrNull(0) ?? 'show';
       final value = parsed.option('value') ?? parsed.positionalOrNull(1);
@@ -302,7 +305,7 @@ Future<int> _runRuntime(List<String> rest) async {
       }
     default:
       stderr.writeln(
-        'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|list|settings> [instance|args] (start supports --instance/--no-console)',
+        'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|states|list|settings> [instance|args] (start supports --instance/--no-console)',
       );
       return 2;
   }

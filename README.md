@@ -74,6 +74,7 @@ Use `--auto-build` when you want `server create` to refresh from the upstream so
 ./start.sh runtime consoles-lateral
 ./start.sh runtime stop [instance]
 ./start.sh runtime status [instance]
+./start.sh runtime states
 ./start.sh runtime list
 ```
 
@@ -82,14 +83,17 @@ Notes:
 - `runtime start` auto-opens console by default.
 - Use `--no-console` for background/bulk starts.
 - `runtime console` auto-targets the server when exactly one is running.
+- In a console, the mouse wheel scrolls and drag-selecting text copies it to the system clipboard. `Esc` detaches and the server keeps running.
+- `runtime states` prints one line per instance: `name<TAB>state<TAB>port<TAB>pid`, where state is `stopped`, `starting`, `running`, `stopping`, or `restarting`.
+- `runtime start`, `server create`, `instance clone`, and `instance reset` maintain a per-instance `multiplexor-restart.sh` and wire `spigot.yml` so Paper/Spigot/Purpur `/restart` starts the instance back through Multiplexor instead of exiting permanently. While that script waits, the instance reports `restarting`.
 
-Wizard IA:
+Wizard:
 
-- Main sections: `Run`, `Instances`, `Build/JVM`, `Exit`.
-- `Run -> Start one stopped instance` auto-opens that console.
-- `Run -> Open console` skips picker when exactly one server is running.
-- `Run -> Start all stopped instances` starts in background and opens console view once at the end.
-- `Build/JVM -> Build Server Jar / Installer` lets you pick a platform and one of its supported Minecraft versions, with the upstream latest clearly labeled.
+- One dashboard lists every instance with a live state badge, port, and `active` marker.
+- Selecting an instance opens a single state-aware action menu: console/restart/stop while up; start/factory reset/delete while stopped; activate/port/MOTD always.
+- Global actions have single-key shortcuts: `n` new instance, `s` start all, `k` stop all, `g` all consoles, `b` build & tuning, `c` switch consumer, `r` refresh, `q` quit.
+- Menus take keyboard and mouse: arrows or wheel to move, Enter or click to activate, Esc to go back.
+- Keys pressed while a build/start/sync is running are swallowed and discarded, never executed.
 
 Instance reset:
 
