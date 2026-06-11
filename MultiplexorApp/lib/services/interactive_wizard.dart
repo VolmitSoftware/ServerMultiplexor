@@ -410,7 +410,6 @@ class InteractiveWizard {
       case _InstanceAct.reset:
         final bool confirmed = await Ui.confirm(
           'Factory reset $name? Worlds, config, and dropins are wiped.',
-          defaultValue: false,
         );
         if (confirmed) {
           await _shellRun(<String>['instance', 'reset', name]);
@@ -420,7 +419,6 @@ class InteractiveWizard {
       case _InstanceAct.delete:
         final bool confirmed = await Ui.confirm(
           'Delete instance $name permanently?',
-          defaultValue: false,
         );
         if (confirmed) {
           await _shellRun(<String>['instance', 'delete', name]);
@@ -500,7 +498,6 @@ class InteractiveWizard {
 
     final bool refresh = await Ui.confirm(
       'Refresh ${_serverTypeLabel(type)} $version from upstream first?',
-      defaultValue: true,
     );
 
     Ui.doing('Creating ${_serverTypeLabel(type)} $version server "$name"');
@@ -531,7 +528,6 @@ class InteractiveWizard {
 
     final bool activate = await Ui.confirm(
       'Make $name the active instance?',
-      defaultValue: true,
     );
     if (activate) {
       await _shellRun(<String>['instance', 'activate', name]);

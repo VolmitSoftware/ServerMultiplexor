@@ -1248,7 +1248,7 @@ class NativeCommandService {
     _NativeIoBuffer io,
   ) async {
     final payload = await _httpGetJsonObject(
-      'https://canvasmc.io/api/v2/builds/all?minecraft_version=$mc',
+      'https://canvasmc.io/api/v2/builds/all?project=canvas&channel=$mc&experimental=true',
     );
     final builds = payload['builds'];
     if (builds is! List || builds.isEmpty) {
@@ -1262,6 +1262,12 @@ class NativeCommandService {
         continue;
       }
       final candidate = Map<String, dynamic>.from(raw);
+      // Failed Jenkins builds are listed without artifacts, so they have no
+      // download URL and must be skipped.
+      final candidateUrl = candidate['downloadUrl']?.toString().trim() ?? '';
+      if (candidateUrl.isEmpty) {
+        continue;
+      }
       final experimental = candidate['isExperimental'] == true;
       if (!experimental) {
         selectedStable = _newerCanvasBuild(selectedStable, candidate);
@@ -1276,13 +1282,7 @@ class NativeCommandService {
       );
     }
 
-    final downloadUrl = selected['downloadUrl']?.toString().trim();
-    if (downloadUrl == null || downloadUrl.isEmpty) {
-      throw _NativeCommandException(
-        'Canvas API returned empty download URL',
-        1,
-      );
-    }
+    final downloadUrl = selected['downloadUrl'].toString().trim();
     final buildNumber = selected['buildNumber']?.toString().trim() ?? 'unknown';
     final channel =
         selected['channelVersion']?.toString().trim().isNotEmpty == true
@@ -2015,7 +2015,7 @@ class NativeCommandService {
 
   Future<List<String>> _resolveCanvasMcVersions() async {
     final payload = await _httpGetJsonObject(
-      'https://canvasmc.io/api/v2/builds/all',
+      'https://canvasmc.io/api/v2/builds/all?project=canvas&experimental=true',
     );
     final buildsRaw = payload['builds'];
     if (buildsRaw is! List) {
@@ -2027,10 +2027,7 @@ class NativeCommandService {
       if (raw is! Map) {
         continue;
       }
-      final candidate =
-          raw['channelVersion']?.toString().trim() ??
-          raw['minecraftVersion']?.toString().trim() ??
-          '';
+      final candidate = raw['channelVersion']?.toString().trim() ?? '';
       if (_isStableMcVersion(candidate)) {
         versions.add(candidate);
       }
@@ -3669,6 +3666,9 @@ class NativeCommandService {
       return <String>[
         '-Xms$heap',
         '-Xmx$heap',
+        // Enables the Vector API for servers that use SIMD optimizations
+        // (e.g. Pufferfish-derived forks); ignored when nothing uses it.
+        '--add-modules=jdk.incubator.vector',
         ...flags,
         '@$argsFile',
         'nogui',
@@ -3678,6 +3678,7 @@ class NativeCommandService {
     return <String>[
       '-Xms$heap',
       '-Xmx$heap',
+      '--add-modules=jdk.incubator.vector',
       ...flags,
       '-jar',
       launch.path,
