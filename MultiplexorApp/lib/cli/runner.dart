@@ -381,8 +381,22 @@ Future<int> _runMods(List<String> rest) async {
         mods: true,
       );
       return 0;
+    case 'watch-status':
+      await handlePluginsWatchStatus(mods: true);
+      return 0;
+    case 'watch-start':
+      await handlePluginsWatchStart(mods: true);
+      return 0;
+    case 'watch-stop':
+      await handlePluginsWatchStop(mods: true);
+      return 0;
+    case 'watch-daemon':
+      await handlePluginsWatchDaemon(mods: true);
+      return 0;
     default:
-      stderr.writeln('Usage: mods <show-source|sync>');
+      stderr.writeln(
+        'Usage: mods <show-source|sync|watch-status|watch-start|watch-stop>',
+      );
       return 2;
   }
 }

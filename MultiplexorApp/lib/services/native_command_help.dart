@@ -94,6 +94,9 @@ void _printHelp(_NativeIoBuffer io) {
   _writeHelpGroup(io, 'mods', <String>[
     'show-source',
     'sync [instance|--all] [--clean]',
+    'watch-status',
+    'watch-start',
+    'watch-stop',
   ]);
   _writeHelpGroup(io, 'config', <String>[
     'status [instance]',

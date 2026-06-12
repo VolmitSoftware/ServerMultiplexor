@@ -450,6 +450,19 @@ class NativeCommandService {
     final rest = args.isEmpty ? const <String>[] : args.sublist(1);
     final profile = _activeConsumer;
 
+    if (mods && _isPluginConsumer(profile)) {
+      throw _NativeCommandException(
+        'The plugin consumer uses plugin drop-ins. Use: plugins <show-source|sync|watch-start|watch-stop|watch-status>',
+        2,
+      );
+    }
+    if (!mods && !_isPluginConsumer(profile)) {
+      throw _NativeCommandException(
+        'The ${profile.shortName} consumer uses mod drop-ins. Use: mods <show-source|sync|watch-start|watch-stop|watch-status>',
+        2,
+      );
+    }
+
     switch (sub) {
       case 'show-source':
         io.write(_dropinsSource(profile, mods: mods));
@@ -541,40 +554,18 @@ class NativeCommandService {
         io.write('[OK] Iris packs linked: $target');
         return 0;
       case 'watch-start':
-        if (mods) {
-          throw _NativeCommandException(
-            'watch-start is only available for plugins',
-            2,
-          );
-        }
         return _pluginsWatchStart(profile, io, mods: mods);
       case 'watch-stop':
-        if (mods) {
-          throw _NativeCommandException(
-            'watch-stop is only available for plugins',
-            2,
-          );
-        }
         return _pluginsWatchStop(profile, io, mods: mods);
       case 'watch-status':
-        if (mods) {
-          throw _NativeCommandException(
-            'watch-status is only available for plugins',
-            2,
-          );
-        }
         return _pluginsWatchStatus(profile, io, mods: mods);
       case 'watch-daemon':
-        if (mods) {
-          throw _NativeCommandException(
-            'watch-daemon is only available for plugins',
-            2,
-          );
-        }
         return _pluginsWatchDaemon(profile, io, mods: mods);
       default:
         throw _NativeCommandException(
-          'Usage: plugins <show-source|sync|iris-packs-path|iris-packs-link|watch-start|watch-stop|watch-status>',
+          mods
+              ? 'Usage: mods <show-source|sync|watch-start|watch-stop|watch-status>'
+              : 'Usage: plugins <show-source|sync|iris-packs-path|iris-packs-link|watch-start|watch-stop|watch-status>',
           2,
         );
     }
@@ -694,9 +685,21 @@ class NativeCommandService {
     String target,
     _NativeIoBuffer io,
   ) async {
+    if (target == 'all' && !_isPluginConsumer(profile)) {
+      io.write(
+        '[INFO] ${profile.shortName} resolves versions from upstream metadata APIs at build time.',
+      );
+      io.write('[INFO] No upstream repos to sync for this consumer.');
+      return;
+    }
+
     final types = switch (target) {
       'all' => const <String>['paper', 'purpur', 'folia', 'canvas'],
       'paper' || 'purpur' || 'folia' || 'canvas' => <String>[target],
+      'forge' || 'fabric' || 'neoforge' => throw _NativeCommandException(
+        '$target resolves versions from upstream metadata APIs; there is no repo to sync. Use: build $target [--mc <version>]',
+        2,
+      ),
       _ => throw _NativeCommandException(
         'Usage: repos sync [all|paper|purpur|folia|canvas]',
         2,
@@ -2671,19 +2674,19 @@ class NativeCommandService {
     ConsumerProfile profile,
     _NativeIoBuffer io,
   ) async {
-    if (!_isPluginConsumer(profile)) {
-      return;
-    }
+    final bool mods = !_isPluginConsumer(profile);
 
-    final session = _pluginsWatchSessionName(profile, mods: false);
+    final session = _pluginsWatchSessionName(profile, mods: mods);
     if (await _tmuxSessionExists(session)) {
       return;
     }
 
     try {
-      await _pluginsWatchStart(profile, io, mods: false);
+      await _pluginsWatchStart(profile, io, mods: mods);
     } catch (e) {
-      io.error('[WARN] Could not auto-start plugins watcher: $e');
+      io.error(
+        '[WARN] Could not auto-start ${mods ? 'mods' : 'plugins'} watcher: $e',
+      );
     }
   }
 
@@ -4541,8 +4544,10 @@ class NativeCommandService {
     }
     final dir = Directory(instancePath);
 
-    Directory(p.join(dir.path, 'plugins')).createSync(recursive: true);
-    Directory(p.join(dir.path, 'mods')).createSync(recursive: true);
+    final String dropinSubdir = _isPluginConsumer(profile)
+        ? 'plugins'
+        : 'mods';
+    Directory(p.join(dir.path, dropinSubdir)).createSync(recursive: true);
     Directory(p.join(dir.path, 'logs')).createSync(recursive: true);
 
     final properties = File(p.join(dir.path, 'server.properties'));

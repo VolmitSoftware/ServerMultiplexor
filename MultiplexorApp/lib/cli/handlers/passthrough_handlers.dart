@@ -296,14 +296,14 @@ Future<void> handlePluginsIrisLink(
   await _runAndExit(cmd);
 }
 
-Future<void> handlePluginsWatchStatus() async =>
-    _runAndExit(<String>['plugins', 'watch-status']);
-Future<void> handlePluginsWatchStart() async =>
-    _runAndExit(<String>['plugins', 'watch-start']);
-Future<void> handlePluginsWatchStop() async =>
-    _runAndExit(<String>['plugins', 'watch-stop']);
-Future<void> handlePluginsWatchDaemon() async =>
-    _runAndExit(<String>['plugins', 'watch-daemon']);
+Future<void> handlePluginsWatchStatus({bool mods = false}) async =>
+    _runAndExit(<String>[mods ? 'mods' : 'plugins', 'watch-status']);
+Future<void> handlePluginsWatchStart({bool mods = false}) async =>
+    _runAndExit(<String>[mods ? 'mods' : 'plugins', 'watch-start']);
+Future<void> handlePluginsWatchStop({bool mods = false}) async =>
+    _runAndExit(<String>[mods ? 'mods' : 'plugins', 'watch-stop']);
+Future<void> handlePluginsWatchDaemon({bool mods = false}) async =>
+    _runAndExit(<String>[mods ? 'mods' : 'plugins', 'watch-daemon']);
 
 Future<void> handleConfigLink(
   Map<String, dynamic> args,
