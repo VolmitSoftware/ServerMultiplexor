@@ -71,7 +71,7 @@ Future<void> handleServerCreate(
 ) async {
   final name = _arg(args, 'name');
   if (name == null) {
-    stderr.writeln('Usage: server create <name> [--type ...]');
+    stderr.writeln('Usage: server create <name> [--type ...] [--isolated]');
     exit(2);
   }
 
@@ -81,6 +81,7 @@ Future<void> handleServerCreate(
   final installer = _arg(args, 'installer');
   final jar = _arg(args, 'jar');
   final autoBuild = _flag(flags, 'auto-build');
+  final isolated = _flag(flags, 'isolated');
 
   final cmd = <String>['server', 'create', name];
   if (type != null) {
@@ -100,6 +101,9 @@ Future<void> handleServerCreate(
   }
   if (autoBuild) {
     cmd.add('--auto-build');
+  }
+  if (isolated) {
+    cmd.add('--isolated');
   }
 
   await _runAndExit(cmd);
@@ -167,6 +171,64 @@ Future<void> handleInstancePath(Map<String, dynamic> args) async {
   await _runAndExit(cmd);
 }
 
+Future<void> handleInstanceOpen(Map<String, dynamic> args) async {
+  final name = _arg(args, 'name');
+  final cmd = <String>['instance', 'open'];
+  if (name != null) {
+    cmd.add(name);
+  }
+  await _runAndExit(cmd);
+}
+
+Future<void> handleInstanceUpdate(
+  Map<String, dynamic> args,
+  Map<String, dynamic> flags,
+) async {
+  final name = _arg(args, 'name');
+  if (name == null) {
+    stderr.writeln(
+      'Usage: instance update <name> [--mc <version>] [--jar <path>] [--auto-build]',
+    );
+    exit(2);
+  }
+  final type = _arg(args, 'type');
+  final mc = _arg(args, 'mc');
+  final jar = _arg(args, 'jar');
+  final loader = _arg(args, 'loader');
+  final autoBuild = _flag(flags, 'auto-build');
+
+  final cmd = <String>['instance', 'update', name];
+  if (type != null) {
+    cmd.addAll(<String>['--type', type]);
+  }
+  if (mc != null) {
+    cmd.addAll(<String>['--mc', mc]);
+  }
+  if (jar != null) {
+    cmd.addAll(<String>['--jar', jar]);
+  }
+  if (loader != null) {
+    cmd.addAll(<String>['--loader', loader]);
+  }
+  if (autoBuild) {
+    cmd.add('--auto-build');
+  }
+  await _runAndExit(cmd);
+}
+
+Future<void> handleInstanceIsolated(Map<String, dynamic> args) async {
+  final name = _arg(args, 'name');
+  final value = _arg(args, 'value');
+  final cmd = <String>['instance', 'isolated'];
+  if (name != null) {
+    cmd.add(name);
+  }
+  if (value != null) {
+    cmd.add(value);
+  }
+  await _runAndExit(cmd);
+}
+
 Future<void> handleInstancePort(Map<String, dynamic> args) async {
   final instance = _arg(args, 'instance');
   final port = _arg(args, 'port');
@@ -223,6 +285,19 @@ Future<void> handleRuntimeStop(Map<String, dynamic> args) async {
   final cmd = <String>['runtime', 'stop'];
   if (instance != null) {
     cmd.add(instance);
+  }
+  await _runAndExit(cmd);
+}
+
+Future<void> handleRuntimeRestart(Map<String, dynamic> args) async {
+  final instance = _arg(args, 'instance');
+  final noConsole = _flag(args, 'no-console');
+  final cmd = <String>['runtime', 'restart'];
+  if (instance != null) {
+    cmd.add(instance);
+  }
+  if (noConsole) {
+    cmd.add('--no-console');
   }
   await _runAndExit(cmd);
 }

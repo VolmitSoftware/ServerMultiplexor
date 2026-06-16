@@ -188,6 +188,12 @@ class NativeCommandService {
         }
         io.write(_instanceDir(profile, name));
         return 0;
+      case 'open':
+        return _dispatchInstanceOpen(profile, rest, io);
+      case 'update':
+        return _dispatchInstanceUpdate(profile, rest, io);
+      case 'isolated':
+        return _dispatchInstanceIsolated(profile, rest, io);
       case 'port':
         return _dispatchInstancePort(profile, rest, io);
       case 'motd-style':
@@ -200,10 +206,215 @@ class NativeCommandService {
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: instance <list|create|clone|delete|reset|activate|path|port|motd-style|current|delete-all>',
+          'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|port|motd-style|current|delete-all>',
           2,
         );
     }
+  }
+
+  Future<int> _dispatchInstanceOpen(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    final name = args.isNotEmpty ? args.first : _currentInstance(profile);
+    if (name == null || name.isEmpty) {
+      throw _NativeCommandException('No active instance set', 2);
+    }
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+    final dir = _instanceDir(profile, name);
+    final opener = _folderOpenerCommand();
+    if (opener == null) {
+      throw _NativeCommandException(
+        'No file-manager opener found for this platform',
+        1,
+      );
+    }
+    final result = await Process.run(opener.executable, <String>[
+      ...opener.prefixArgs,
+      dir,
+    ]);
+    // Windows explorer.exe returns 1 even on success; treat that as fine.
+    final ok = result.exitCode == 0 || Platform.isWindows;
+    if (!ok) {
+      throw _NativeCommandException(
+        'Failed to open folder ($dir): ${result.stderr}',
+        result.exitCode == 0 ? 1 : result.exitCode,
+      );
+    }
+    io.write('[OK] Opened: $dir');
+    return 0;
+  }
+
+  Future<int> _dispatchInstanceIsolated(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    if (args.isEmpty) {
+      final current = _currentInstance(profile);
+      if (current == null) {
+        throw _NativeCommandException('No active instance set', 2);
+      }
+      io.write(_instanceIsolated(profile, current) ? 'true' : 'false');
+      return 0;
+    }
+    final name = args.first;
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+
+    if (args.length == 1) {
+      io.write(_instanceIsolated(profile, name) ? 'true' : 'false');
+      return 0;
+    }
+
+    final raw = args[1].trim().toLowerCase();
+    final bool? requested = raw == 'true'
+        ? true
+        : raw == 'false'
+        ? false
+        : null;
+    if (requested == null) {
+      throw _NativeCommandException(
+        'Usage: instance isolated [name] [true|false]',
+        2,
+      );
+    }
+
+    final source = Map<String, String>.from(_serverSource(profile, name));
+    if (requested) {
+      source['isolated'] = 'true';
+    } else {
+      source.remove('isolated');
+    }
+    _writeServerSource(_instanceDir(profile, name), fields: source);
+    if (requested) {
+      io.write('[OK] $name is now isolated (dropins + iris + shared ops off)');
+    } else {
+      // Rewire shared state for de-isolated plugin consumers.
+      if (_isPluginConsumer(profile)) {
+        _irisPacksLinkInstance(profile, name);
+      }
+      _instanceEnsureSharedPluginOps(profile, name);
+      io.write('[OK] $name is no longer isolated');
+    }
+    return 0;
+  }
+
+  Future<int> _dispatchInstanceUpdate(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    if (args.isEmpty) {
+      throw _NativeCommandException(
+        'Usage: instance update <name> [--mc <version>] [--jar <path>] [--auto-build]',
+        2,
+      );
+    }
+    final name = args.first;
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+
+    final options = _parseOptions(args.sublist(1));
+    final source = _serverSource(profile, name);
+    final launch = source['launch'] ?? 'jar';
+    if (launch != 'jar') {
+      throw _NativeCommandException(
+        'instance update only supports jar-launch servers; $name uses launch=$launch. Clone + delete is the safer path.',
+        2,
+      );
+    }
+    final type = (options['type'] ?? source['type'] ?? 'purpur').toLowerCase();
+    final jarOverride = options['jar'];
+
+    if (await _runtimeRunning(profile, name)) {
+      io.write('[INFO] Stopping $name before update');
+      await _runtimeStop(profile, name, io);
+    }
+
+    String resolvedJarPath;
+    String? mcLabel;
+    if (jarOverride != null && jarOverride.isNotEmpty) {
+      final file = File(jarOverride);
+      if (!file.existsSync()) {
+        throw _NativeCommandException('Jar not found: $jarOverride', 2);
+      }
+      resolvedJarPath = file.absolute.path;
+      try {
+        resolvedJarPath = file.resolveSymbolicLinksSync();
+      } catch (_) {}
+    } else {
+      final requestedMc = options['mc'];
+      final mc = requestedMc?.trim().isNotEmpty == true
+          ? requestedMc!
+          : await _resolveLatestMcVersion(type);
+      mcLabel = mc;
+      final autoBuild = options['auto-build'] == 'true';
+      String? jarPath = _findCachedJar(
+        profile,
+        type: type,
+        mc: mc,
+        allowLatestFallback: requestedMc == null,
+      );
+      if (autoBuild || jarPath == null) {
+        io.write('[INFO] Refreshing $type for mc=$mc from upstream sources');
+        jarPath = await _buildTarget(
+          profile,
+          type,
+          _serverCreateBuildOptions(options, mc),
+          io,
+        );
+      }
+      resolvedJarPath = jarPath;
+    }
+
+    final installerBased =
+        (type == 'forge' || type == 'neoforge') &&
+        _looksLikeInstallerJar(resolvedJarPath);
+    if (installerBased) {
+      throw _NativeCommandException(
+        'instance update only supports jar-launch updates; $resolvedJarPath looks like an installer. Recreate the instance from the installer instead.',
+        2,
+      );
+    }
+
+    final instanceDir = _instanceDir(profile, name);
+    final serverJar = p.join(instanceDir, 'server.jar');
+    _replaceWithSymlink(serverJar, resolvedJarPath);
+
+    final preservedIsolated = source['isolated']?.toLowerCase() == 'true';
+    _writeServerSource(
+      instanceDir,
+      fields: <String, String>{
+        'type': type,
+        'launch': 'jar',
+        'jar': resolvedJarPath,
+        if (preservedIsolated) 'isolated': 'true',
+      },
+    );
+    io.write(
+      '[OK] $name updated to $type${mcLabel != null ? ' mc=$mcLabel' : ''}',
+    );
+    io.write('[INFO] server.jar -> $resolvedJarPath');
+    return 0;
+  }
+
+  _FolderOpener? _folderOpenerCommand() {
+    if (Platform.isMacOS) {
+      return const _FolderOpener('open');
+    }
+    if (Platform.isLinux) {
+      return const _FolderOpener('xdg-open');
+    }
+    if (Platform.isWindows) {
+      return const _FolderOpener('explorer', prefixArgs: <String>[]);
+    }
+    return null;
   }
 
   Future<int> _dispatchInstancePort(
@@ -279,11 +490,19 @@ class NativeCommandService {
     final type = (options['type'] ?? 'purpur').toLowerCase();
     final jar = options['jar'];
     final profile = _activeConsumer;
+    final isolated = options['isolated'] == 'true';
 
     if (jar != null && jar.isNotEmpty) {
-      _serverCreateFromJar(profile, name, type: type, jarPath: jar, io: io);
+      _serverCreateFromJar(
+        profile,
+        name,
+        type: type,
+        jarPath: jar,
+        isolated: isolated,
+        io: io,
+      );
       io.write(
-        '[OK] Server instance created: $name ($type, port ${_instanceGetServerPort(profile, name)})',
+        '[OK] Server instance created: $name ($type, port ${_instanceGetServerPort(profile, name)}${isolated ? ', isolated' : ''})',
       );
       return 0;
     }
@@ -316,9 +535,16 @@ class NativeCommandService {
       );
     }
 
-    _serverCreateFromJar(profile, name, type: type, jarPath: jarPath, io: io);
+    _serverCreateFromJar(
+      profile,
+      name,
+      type: type,
+      jarPath: jarPath,
+      isolated: isolated,
+      io: io,
+    );
     io.write(
-      '[OK] Server instance created: $name ($type mc=$mc, port ${_instanceGetServerPort(profile, name)})',
+      '[OK] Server instance created: $name ($type mc=$mc, port ${_instanceGetServerPort(profile, name)}${isolated ? ', isolated' : ''})',
     );
     return 0;
   }
@@ -351,6 +577,21 @@ class NativeCommandService {
       case 'stop':
         await _runtimeStop(profile, rest.isNotEmpty ? rest.first : null, io);
         return 0;
+      case 'restart':
+        final restartParsed = _parseRuntimeTargetArgs(
+          rest,
+          allowNoConsole: true,
+        );
+        final target = restartParsed.instance ?? _currentInstance(profile);
+        if (target == null || target.isEmpty) {
+          throw _NativeCommandException('No active instance set', 2);
+        }
+        await _runtimeStop(profile, target, io);
+        await _runtimeStart(profile, target, io);
+        if (!restartParsed.noConsole) {
+          await _runtimeConsole(profile, target, io);
+        }
+        return 0;
       case 'status':
         await _runtimeStatus(profile, rest.isNotEmpty ? rest.first : null, io);
         return 0;
@@ -371,7 +612,7 @@ class NativeCommandService {
         return _dispatchRuntimeSettings(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|states|list|settings> [instance|args] (start supports --instance/--no-console)',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|states|list|settings> [instance|args] (start/restart support --instance/--no-console)',
           2,
         );
     }
@@ -490,6 +731,10 @@ class NativeCommandService {
 
         if (all) {
           for (final instance in _instanceNames(profile)) {
+            if (_instanceIsolated(profile, instance)) {
+              io.write('[SKIP] $instance is isolated');
+              continue;
+            }
             final report = _pluginsSyncInstance(
               profile,
               instance,
@@ -510,6 +755,10 @@ class NativeCommandService {
         target ??= _currentInstance(profile);
         if (target == null || target.isEmpty) {
           throw _NativeCommandException('No active instance set', 2);
+        }
+        if (_instanceIsolated(profile, target)) {
+          io.write('[SKIP] $target is isolated; nothing to sync');
+          return 0;
         }
         final report = _pluginsSyncInstance(
           profile,
@@ -541,6 +790,10 @@ class NativeCommandService {
         }
         if (rest.isNotEmpty && rest.first == '--all') {
           for (final instance in _instanceNames(profile)) {
+            if (_instanceIsolated(profile, instance)) {
+              io.write('[SKIP] Iris packs: $instance is isolated');
+              continue;
+            }
             _irisPacksLinkInstance(profile, instance);
             io.write('[OK] Iris packs linked: $instance');
           }
@@ -549,6 +802,12 @@ class NativeCommandService {
         final target = rest.isNotEmpty ? rest.first : _currentInstance(profile);
         if (target == null || target.isEmpty) {
           throw _NativeCommandException('No active instance set', 2);
+        }
+        if (_instanceIsolated(profile, target)) {
+          throw _NativeCommandException(
+            '$target is isolated; cannot link shared Iris packs',
+            2,
+          );
         }
         _irisPacksLinkInstance(profile, target);
         io.write('[OK] Iris packs linked: $target');
@@ -2286,8 +2545,8 @@ class NativeCommandService {
       }
 
       final key = arg.substring(2);
-      if (key == 'auto-build') {
-        options['auto-build'] = 'true';
+      if (key == 'auto-build' || key == 'isolated') {
+        options[key] = 'true';
         continue;
       }
 
@@ -2378,6 +2637,7 @@ class NativeCommandService {
     String name, {
     required String type,
     required String jarPath,
+    bool isolated = false,
     _NativeIoBuffer? io,
   }) {
     if (name.trim().isEmpty) {
@@ -2393,7 +2653,7 @@ class NativeCommandService {
       resolvedJarPath = jarFile.resolveSymbolicLinksSync();
     } catch (_) {}
 
-    _instanceCreateBlank(profile, name, io: io);
+    _instanceCreateBlank(profile, name, isolated: isolated, io: io);
 
     final normalizedType = type.toLowerCase().trim();
     final installerBased =
@@ -2405,6 +2665,7 @@ class NativeCommandService {
         name,
         normalizedType,
         resolvedJarPath,
+        isolated: isolated,
       );
       _instanceApplyStyledMotd(profile, name, force: true);
       return;
@@ -2414,8 +2675,14 @@ class NativeCommandService {
     final serverJar = p.join(instanceDir, 'server.jar');
     _replaceWithSymlink(serverJar, resolvedJarPath);
 
-    File(p.join(instanceDir, '.server-source')).writeAsStringSync(
-      ['type=$normalizedType', 'launch=jar', 'jar=$resolvedJarPath'].join('\n'),
+    _writeServerSource(
+      instanceDir,
+      fields: <String, String>{
+        'type': normalizedType,
+        'launch': 'jar',
+        'jar': resolvedJarPath,
+        if (isolated) 'isolated': 'true',
+      },
     );
     _instanceApplyStyledMotd(profile, name, force: true);
   }
@@ -2439,8 +2706,9 @@ class NativeCommandService {
     ConsumerProfile profile,
     String instance,
     String type,
-    String installerJarPath,
-  ) {
+    String installerJarPath, {
+    bool isolated = false,
+  }) {
     final instanceDir = _instanceDir(profile, instance);
     final localInstaller = p.join(instanceDir, 'installer.jar');
     _replaceWithSymlink(localInstaller, File(installerJarPath).absolute.path);
@@ -2466,13 +2734,15 @@ class NativeCommandService {
       );
     }
 
-    File(p.join(instanceDir, '.server-source')).writeAsStringSync(
-      [
-        'type=$type',
-        'launch=argsfile',
-        'args_file_rel=$argsRel',
-        'installer=${File(installerJarPath).absolute.path}',
-      ].join('\n'),
+    _writeServerSource(
+      instanceDir,
+      fields: <String, String>{
+        'type': type,
+        'launch': 'argsfile',
+        'args_file_rel': argsRel,
+        'installer': File(installerJarPath).absolute.path,
+        if (isolated) 'isolated': 'true',
+      },
     );
   }
 
@@ -2528,7 +2798,10 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
-    _instanceEnsureSharedPluginOps(profile, instance, io: io);
+    final bool isolatedInstance = _instanceIsolated(profile, instance);
+    if (!isolatedInstance) {
+      _instanceEnsureSharedPluginOps(profile, instance, io: io);
+    }
     _instanceEnsureRestartScript(profile, instance);
 
     if (!await _tmuxInstalled()) {
@@ -4034,6 +4307,14 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
+    // Isolated instances opt out of dropin sync entirely.
+    if (_instanceIsolated(profile, instance)) {
+      return const _DropinSyncReport(
+        copiedJars: <String>[],
+        failedJars: <String>[],
+      );
+    }
+
     final source = _dropinsSource(profile, mods: sourceModsOverride);
     final sourceDir = Directory(source);
     sourceDir.createSync(recursive: true);
@@ -4093,6 +4374,13 @@ class NativeCommandService {
   }) {
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
+    }
+
+    if (_instanceIsolated(profile, instance)) {
+      return const _DropinSyncReport(
+        copiedJars: <String>[],
+        failedJars: <String>[],
+      );
     }
 
     final sourceFile = File(sourceJarPath);
@@ -4285,6 +4573,24 @@ class NativeCommandService {
       out[line.substring(0, idx)] = line.substring(idx + 1);
     }
     return out;
+  }
+
+  bool _instanceIsolated(ConsumerProfile profile, String instance) {
+    final source = _serverSource(profile, instance);
+    return source['isolated']?.toLowerCase().trim() == 'true';
+  }
+
+  void _writeServerSource(
+    String instanceDir, {
+    required Map<String, String> fields,
+  }) {
+    final ordered = <String>[];
+    for (final entry in fields.entries) {
+      ordered.add('${entry.key}=${entry.value}');
+    }
+    File(p.join(instanceDir, '.server-source')).writeAsStringSync(
+      ordered.join('\n'),
+    );
   }
 
   String _pluginSharedOpsFile(ConsumerProfile profile) {
@@ -4525,6 +4831,7 @@ class NativeCommandService {
   void _instanceCreateBlank(
     ConsumerProfile profile,
     String name, {
+    bool isolated = false,
     _NativeIoBuffer? io,
   }) {
     if (name.trim().isEmpty) {
@@ -4556,12 +4863,17 @@ class NativeCommandService {
     File(p.join(dir.path, 'eula.txt')).writeAsStringSync('eula=true\n');
     _instanceApplyStyledMotd(profile, name, force: true);
 
-    if (_isPluginConsumer(profile)) {
+    // Isolated instances skip every shared-state hook: no Iris pack symlink,
+    // no shared ops merge. Per-instance config still localizes (it's not
+    // shared across instances).
+    if (!isolated && _isPluginConsumer(profile)) {
       _irisPacksLinkInstance(profile, name);
     }
     _configLinkInstance(profile, name);
     _instanceEnsureRestartScript(profile, name);
-    _instanceEnsureSharedPluginOps(profile, name, io: io);
+    if (!isolated) {
+      _instanceEnsureSharedPluginOps(profile, name, io: io);
+    }
   }
 
   void _instanceClone(
@@ -4581,12 +4893,15 @@ class NativeCommandService {
       Directory(_instanceDir(profile, source)),
       Directory(_instanceDir(profile, target)),
     );
-    if (_isPluginConsumer(profile)) {
+    final bool isolated = _instanceIsolated(profile, target);
+    if (!isolated && _isPluginConsumer(profile)) {
       _irisPacksLinkInstance(profile, target);
     }
     _configLinkInstance(profile, target);
     _instanceEnsureRestartScript(profile, target);
-    _instanceEnsureSharedPluginOps(profile, target, io: io);
+    if (!isolated) {
+      _instanceEnsureSharedPluginOps(profile, target, io: io);
+    }
   }
 
   void _instanceDelete(ConsumerProfile profile, String name) {
@@ -4681,6 +4996,7 @@ class NativeCommandService {
       await _runtimeStop(profile, name, io);
     }
 
+    final bool wasIsolated = _instanceIsolated(profile, name);
     final instancePath = _instanceDir(profile, name);
     final backupPath =
         '$instancePath.reset-backup.${DateTime.now().millisecondsSinceEpoch}';
@@ -4694,10 +5010,12 @@ class NativeCommandService {
     }
 
     try {
-      _instanceCreateBlank(profile, name, io: io);
+      _instanceCreateBlank(profile, name, isolated: wasIsolated, io: io);
       _restoreFactoryArtifactsFromBackup(profile, name, backupPath: backupPath);
       _instanceEnsureRestartScript(profile, name);
-      _instanceEnsureSharedPluginOps(profile, name, io: io);
+      if (!wasIsolated) {
+        _instanceEnsureSharedPluginOps(profile, name, io: io);
+      }
       _deletePathEntity(backupPath, recursive: true);
     } catch (e) {
       try {
@@ -5413,6 +5731,13 @@ class _DropinSyncReport {
 
   final List<String> copiedJars;
   final List<String> failedJars;
+}
+
+class _FolderOpener {
+  const _FolderOpener(this.executable, {this.prefixArgs = const <String>[]});
+
+  final String executable;
+  final List<String> prefixArgs;
 }
 
 class _Version implements Comparable<_Version> {

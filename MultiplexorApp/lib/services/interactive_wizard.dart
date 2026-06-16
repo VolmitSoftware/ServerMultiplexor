@@ -266,6 +266,7 @@ class InteractiveWizard {
     final bool isActive = name == active;
     final bool isStopped = row.state == RuntimeState.stopped;
     final bool isRunning = row.state == RuntimeState.running;
+    final bool isolated = await Ui.shielded(() => _isolated(name));
 
     final List<MenuEntry<_InstanceAct>> entries = <MenuEntry<_InstanceAct>>[];
     if (isStopped) {
@@ -325,6 +326,33 @@ class InteractiveWizard {
         value: _InstanceAct.motd,
       ),
     );
+    entries.add(
+      const MenuEntry<_InstanceAct>(
+        'Open folder',
+        value: _InstanceAct.openFolder,
+        shortcut: 'f',
+        detail: 'opens the instance directory',
+      ),
+    );
+    if (isStopped) {
+      entries.add(
+        const MenuEntry<_InstanceAct>(
+          'Update game version',
+          value: _InstanceAct.update,
+          shortcut: 'u',
+          detail: 'pick a new MC version (risky)',
+        ),
+      );
+    }
+    entries.add(
+      MenuEntry<_InstanceAct>(
+        isolated ? 'Mark as shared' : 'Mark as isolated',
+        value: _InstanceAct.toggleIsolated,
+        detail: isolated
+            ? 'rewire dropins, iris, shared ops'
+            : 'unsubscribe from dropins, iris, shared ops',
+      ),
+    );
     if (isStopped) {
       entries.add(
         const MenuEntry<_InstanceAct>(
@@ -348,7 +376,8 @@ class InteractiveWizard {
 
     final String badge =
         '${_stateGlyph(row.state)} ${row.state.name} on :${row.port}'
-        '${isActive ? ' · active' : ''}';
+        '${isActive ? ' · active' : ''}'
+        '${isolated ? ' · isolated' : ''}';
     if (!isRunning && !isStopped) {
       Ui.note('Server is ${row.state.name}; the dashboard updates on refresh.');
     }
@@ -406,6 +435,15 @@ class InteractiveWizard {
       case _InstanceAct.motd:
         await _shellRun(<String>['instance', 'motd-style', name]);
         await Ui.pause();
+        return;
+      case _InstanceAct.openFolder:
+        await _shellRun(<String>['instance', 'open', name]);
+        return;
+      case _InstanceAct.update:
+        await _updateInstance(name);
+        return;
+      case _InstanceAct.toggleIsolated:
+        await _toggleIsolated(name, currentlyIsolated: isolated);
         return;
       case _InstanceAct.reset:
         final bool confirmed = await Ui.confirm(
@@ -500,6 +538,13 @@ class InteractiveWizard {
       'Refresh ${_serverTypeLabel(type)} $version from upstream first?',
     );
 
+    // Confirms default YES — phrase as "subscribe?" so accepting keeps the
+    // existing shared-dropin behavior. Decline to make the server isolated.
+    final bool subscribe = await Ui.confirm(
+      'Subscribe $name to plugin/mod dropins and shared ops?',
+    );
+    final bool isolated = !subscribe;
+
     Ui.doing('Creating ${_serverTypeLabel(type)} $version server "$name"');
     final int code = await _shellRun(<String>[
       'server',
@@ -510,13 +555,16 @@ class InteractiveWizard {
       '--mc',
       version.trim(),
       if (refresh) '--auto-build',
+      if (isolated) '--isolated',
     ]);
     if (code != 0) {
       await Ui.pause();
       return;
     }
 
-    await _syncDropinsAllTargets();
+    if (!isolated) {
+      await _syncDropinsAllTargets();
+    }
 
     final List<String> all = await _instanceNames();
     if (all.length == 1 && all.first == name) {
@@ -532,6 +580,92 @@ class InteractiveWizard {
     if (activate) {
       await _shellRun(<String>['instance', 'activate', name]);
     }
+  }
+
+  Future<bool> _isolated(String name) async {
+    final String? raw = await passthrough.captureStdoutLine(<String>[
+      'instance',
+      'isolated',
+      name,
+    ]);
+    return (raw ?? '').trim().toLowerCase() == 'true';
+  }
+
+  Future<void> _toggleIsolated(
+    String name, {
+    required bool currentlyIsolated,
+  }) async {
+    final String target = currentlyIsolated ? 'false' : 'true';
+    final String prompt = currentlyIsolated
+        ? 'Re-subscribe $name to dropins, iris, and shared ops?'
+        : 'Isolate $name? It will stop receiving dropins, iris packs, and shared ops.';
+    final bool confirmed = await Ui.confirm(prompt);
+    if (!confirmed) {
+      return;
+    }
+    await _shellRun(<String>['instance', 'isolated', name, target]);
+    if (target == 'false') {
+      await _syncDropinsAllTargets();
+    }
+    await Ui.pause();
+  }
+
+  Future<void> _updateInstance(String name) async {
+    final String? pathRaw = await passthrough.captureStdoutLine(<String>[
+      'instance',
+      'path',
+      name,
+    ]);
+    if (pathRaw == null || pathRaw.trim().isEmpty) {
+      Ui.error('Could not resolve instance path for $name');
+      await Ui.pause();
+      return;
+    }
+    final File sourceFile = File('${pathRaw.trim()}/.server-source');
+    String? type;
+    if (sourceFile.existsSync()) {
+      for (final String line in sourceFile.readAsLinesSync()) {
+        if (line.startsWith('type=')) {
+          type = line.substring('type='.length).trim();
+          break;
+        }
+      }
+    }
+    type ??= 'purpur';
+    final String currentType = type;
+
+    final bool confirmedRisk = await Ui.confirm(
+      'Update $name to a new $currentType version? '
+      'Worlds may corrupt and dropins may stop loading.',
+    );
+    if (!confirmedRisk) {
+      return;
+    }
+
+    final _BuildVersionChoice choice = await _pickSupportedVersion(currentType);
+    final bool refresh = await Ui.confirm(
+      'Refresh ${_serverTypeLabel(currentType)} ${choice.version} from upstream first?',
+    );
+
+    Ui.doing(
+      'Updating $name -> ${_serverTypeLabel(currentType)} ${choice.version}',
+    );
+    final int code = await _shellRun(<String>[
+      'instance',
+      'update',
+      name,
+      '--type',
+      currentType,
+      '--mc',
+      choice.version.trim(),
+      if (refresh) '--auto-build',
+    ]);
+    if (code == 0) {
+      Ui.success(
+        '$name now points at ${_serverTypeLabel(currentType)} ${choice.version}.',
+      );
+    }
+    await Ui.pause();
   }
 
   Future<void> _setInstancePort(String name) async {
@@ -1069,6 +1203,9 @@ enum _InstanceAct {
   activate,
   port,
   motd,
+  openFolder,
+  update,
+  toggleIsolated,
   reset,
   delete,
   back,

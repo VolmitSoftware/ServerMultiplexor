@@ -167,11 +167,14 @@ Future<int> _runServer(List<String> rest) async {
           'installer': parsed.option('installer'),
           'jar': parsed.option('jar'),
         },
-        <String, dynamic>{'auto-build': parsed.flag('auto-build')},
+        <String, dynamic>{
+          'auto-build': parsed.flag('auto-build'),
+          'isolated': parsed.flag('isolated'),
+        },
       );
       return 0;
     default:
-      stderr.writeln('Usage: server create <name> [--type ...]');
+      stderr.writeln('Usage: server create <name> [--type ...] [--isolated]');
       return 2;
   }
 }
@@ -218,6 +221,29 @@ Future<int> _runInstance(List<String> rest) async {
         'name': parsed.option('name') ?? parsed.positionalOrNull(0),
       });
       return 0;
+    case 'open':
+      await handleInstanceOpen(<String, dynamic>{
+        'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+      });
+      return 0;
+    case 'update':
+      await handleInstanceUpdate(
+        <String, dynamic>{
+          'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+          'type': parsed.option('type'),
+          'mc': parsed.option('mc'),
+          'jar': parsed.option('jar'),
+          'loader': parsed.option('loader'),
+        },
+        <String, dynamic>{'auto-build': parsed.flag('auto-build')},
+      );
+      return 0;
+    case 'isolated':
+      await handleInstanceIsolated(<String, dynamic>{
+        'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+        'value': parsed.option('value') ?? parsed.positionalOrNull(1),
+      });
+      return 0;
     case 'port':
       await handleInstancePort(<String, dynamic>{
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
@@ -234,7 +260,7 @@ Future<int> _runInstance(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: instance <list|create|clone|delete|reset|activate|path|port|motd-style|current|delete-all>',
+        'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|port|motd-style|current|delete-all>',
       );
       return 2;
   }
@@ -267,6 +293,12 @@ Future<int> _runRuntime(List<String> rest) async {
     case 'stop':
       await handleRuntimeStop(<String, dynamic>{
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
+      });
+      return 0;
+    case 'restart':
+      await handleRuntimeRestart(<String, dynamic>{
+        'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
+        'no-console': parsed.flag('no-console'),
       });
       return 0;
     case 'status':
@@ -305,7 +337,7 @@ Future<int> _runRuntime(List<String> rest) async {
       }
     default:
       stderr.writeln(
-        'Usage: runtime <console|consoles|consoles-lateral|start|stop|status|states|list|settings> [instance|args] (start supports --instance/--no-console)',
+        'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|states|list|settings> [instance|args] (start/restart support --instance/--no-console)',
       );
       return 2;
   }
@@ -429,7 +461,13 @@ _ParsedTokens _parse(List<String> tokens) {
   final options = <String, String>{};
   final flags = <String, bool>{};
   final positional = <String>[];
-  const booleanFlags = <String>{'all', 'auto-build', 'clean', 'no-console'};
+  const booleanFlags = <String>{
+    'all',
+    'auto-build',
+    'clean',
+    'isolated',
+    'no-console',
+  };
 
   for (var i = 0; i < tokens.length; i++) {
     final t = tokens[i];

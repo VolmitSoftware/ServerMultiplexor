@@ -51,14 +51,17 @@ void _printHelp(_NativeIoBuffer io) {
     'clone <source> <target>',
     'activate <name>',
     'path [name]',
+    'open [name]',
+    'update <name> [--mc <version>] [--jar <path>] [--auto-build]',
+    'isolated [name] [true|false]',
     'port [instance] [port]',
     'reset <name>',
     'delete <name>',
     'delete-all',
   ]);
   _writeHelpGroup(io, 'server', <String>[
-    'create <name> --type <type> [--mc <version>] [--auto-build]',
-    'create <name> --jar <path> [--type label]',
+    'create <name> --type <type> [--mc <version>] [--auto-build] [--isolated]',
+    'create <name> --jar <path> [--type label] [--isolated]',
   ]);
   _writeHelpGroup(io, 'runtime', <String>[
     'start [instance] [--instance <name>] [--no-console]',
@@ -66,6 +69,7 @@ void _printHelp(_NativeIoBuffer io) {
     'consoles',
     'consoles-lateral',
     'stop [instance]',
+    'restart [instance] [--no-console]',
     'status [instance]',
     'states',
     'list',
