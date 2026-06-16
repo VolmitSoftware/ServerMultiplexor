@@ -65,7 +65,8 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `instance motd-style [name]` | Apply the styled MOTD template (alias: `motd-style`). |
 | `instance reset <name>` | Wipe worlds/config/plugins/mods/logs back to baseline. Keeps the launch artifacts and the isolated flag. |
 | `instance delete <name>` | Delete the instance entirely (kills any running process first). |
-| `instance delete-all` | Delete every instance in the active profile. Asks for `DELETE` confirmation. |
+| `instance delete-all [--force]` | Delete every instance in the active profile. Asks for `DELETE` confirmation unless `--force`. |
+| `instance delete-all --everywhere [--force]` | Wipe every instance across plugin/forge/fabric/neoforge in one call. Asks for `WIPE EVERYTHING` confirmation unless `--force`. |
 
 ### server — first-time jar wiring
 
@@ -73,6 +74,7 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 |---------|--------------|
 | `server create <name> --type <type> [--mc <v>] [--auto-build] [--isolated]` | Create + wire `server.jar` from the build cache (or refresh upstream first if `--auto-build`). `--isolated` opts the instance out of shared dropins/iris/ops. |
 | `server create <name> --jar <path> [--type label] [--isolated]` | Create + wire an explicit jar. |
+| `server create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]` | Spin up one instance per type in a single call. Each instance is named after its type (or `<prefix>-<type>` if `--prefix` is set) and routed to the correct consumer (plugin types → plugin profile, modded types → their own). Skips collisions and resolution failures without aborting the batch. |
 
 `<type>` is one of: `paper`, `purpur`, `folia`, `canvas`, `spigot`, `forge`, `fabric`, `neoforge`. For `forge` / `neoforge`, an installer jar triggers args-file launch mode automatically.
 
@@ -145,6 +147,12 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 # Create an isolated test server (won't pick up your dropins)
 ./start.sh server create vanilla-test --type purpur --isolated
+
+# Spin up one of every plugin flavor at the same MC version
+./start.sh server create-many --types paper,purpur,canvas,spigot --mc 1.21.11 --auto-build
+
+# Wipe every instance across every consumer (asks for WIPE EVERYTHING confirmation)
+./start.sh instance delete-all --everywhere
 
 # Update an existing server to a new MC version (worlds may not survive)
 ./start.sh runtime stop lobby

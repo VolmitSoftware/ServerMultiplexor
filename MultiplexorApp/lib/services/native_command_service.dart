@@ -201,15 +201,65 @@ class NativeCommandService {
         io.write('[OK] Styled MOTD updated');
         return 0;
       case 'delete-all':
-        _instanceDeleteAll(profile, interactive: io.stream);
-        io.write('[OK] Deleted all instances');
-        return 0;
+        return _dispatchInstanceDeleteAll(profile, rest, io);
       default:
         throw _NativeCommandException(
           'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|port|motd-style|current|delete-all>',
           2,
         );
     }
+  }
+
+  Future<int> _dispatchInstanceDeleteAll(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    final everywhere = args.contains('--everywhere');
+    final force = args.contains('--force');
+    final extras = args
+        .where((a) => a != '--everywhere' && a != '--force')
+        .toList();
+    if (extras.isNotEmpty) {
+      throw _NativeCommandException(
+        'Usage: instance delete-all [--everywhere] [--force]',
+        2,
+      );
+    }
+
+    if (!everywhere) {
+      _instanceDeleteAll(profile, interactive: io.stream && !force);
+      io.write('[OK] Deleted all instances');
+      return 0;
+    }
+
+    // One confirmation gate for the cross-consumer wipe.
+    if (io.stream && !force) {
+      stdout.write(
+        'Type WIPE EVERYTHING to delete EVERY instance across plugin/forge/fabric/neoforge: ',
+      );
+      final answer = stdin.readLineSync()?.trim() ?? '';
+      if (answer != 'WIPE EVERYTHING') {
+        throw _NativeCommandException('Wipe cancelled', 1);
+      }
+    }
+
+    final profiles = <ConsumerProfile>[
+      ConsumerProfile.plugin,
+      ConsumerProfile.forge,
+      ConsumerProfile.fabric,
+      ConsumerProfile.neoforge,
+    ];
+    for (final p in profiles) {
+      try {
+        _instanceDeleteAll(p, interactive: false);
+        io.write('[OK] Deleted all instances in ${p.shortName}');
+      } catch (e) {
+        io.error('[WARN] Failed wiping ${p.shortName}: $e');
+      }
+    }
+    io.write('[OK] Wipe complete across all consumers');
+    return 0;
   }
 
   Future<int> _dispatchInstanceOpen(
@@ -469,9 +519,18 @@ class NativeCommandService {
   }
 
   Future<int> _dispatchServer(List<String> args, _NativeIoBuffer io) async {
-    if (args.isEmpty || args.first != 'create') {
+    if (args.isEmpty) {
       throw _NativeCommandException(
-        'Usage: server create <name> [--type ...] [--jar ...] [--auto-build]',
+        'Usage: server <create|create-many> ...',
+        2,
+      );
+    }
+    if (args.first == 'create-many') {
+      return _dispatchServerCreateMany(args.sublist(1), io);
+    }
+    if (args.first != 'create') {
+      throw _NativeCommandException(
+        'Usage: server <create|create-many> ...',
         2,
       );
     }
@@ -547,6 +606,86 @@ class NativeCommandService {
       '[OK] Server instance created: $name ($type mc=$mc, port ${_instanceGetServerPort(profile, name)}${isolated ? ', isolated' : ''})',
     );
     return 0;
+  }
+
+  Future<int> _dispatchServerCreateMany(
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    final options = _parseOptions(args);
+    final typesRaw = options['types'];
+    if (typesRaw == null || typesRaw.trim().isEmpty) {
+      throw _NativeCommandException(
+        'Usage: server create-many --types <a,b,c> [--prefix N] [--mc v] [--auto-build] [--isolated]',
+        2,
+      );
+    }
+    final types = typesRaw
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .where((s) => s.isNotEmpty)
+        .toList(growable: false);
+    if (types.isEmpty) {
+      throw _NativeCommandException('--types list is empty', 2);
+    }
+
+    final prefix = options['prefix']?.trim() ?? '';
+    final mcOverride = options['mc']?.trim();
+    final autoBuild = options['auto-build'] == 'true';
+    final isolated = options['isolated'] == 'true';
+
+    int succeeded = 0;
+    int skipped = 0;
+    for (final type in types) {
+      final String name = prefix.isEmpty ? type : '$prefix-$type';
+      try {
+        final profile = _consumerForServerType(type);
+        if (_instanceExists(profile, name)) {
+          io.write('[SKIP] $name already exists in ${profile.shortName}');
+          skipped++;
+          continue;
+        }
+        final mc = mcOverride != null && mcOverride.isNotEmpty
+            ? mcOverride
+            : await _resolveLatestMcVersion(type);
+
+        var jarPath = _findCachedJar(
+          profile,
+          type: type,
+          mc: mc,
+          allowLatestFallback: mcOverride == null,
+        );
+        if (autoBuild || jarPath == null) {
+          io.write('[INFO] Refreshing $type for mc=$mc from upstream sources');
+          jarPath = await _buildTarget(
+            profile,
+            type,
+            _serverCreateBuildOptions(<String, String>{'mc': mc}, mc),
+            io,
+          );
+        }
+        _serverCreateFromJar(
+          profile,
+          name,
+          type: type,
+          jarPath: jarPath,
+          isolated: isolated,
+          io: io,
+        );
+        io.write(
+          '[OK] Created $name ($type mc=$mc, port ${_instanceGetServerPort(profile, name)}, ${profile.shortName}${isolated ? ', isolated' : ''})',
+        );
+        succeeded++;
+      } on _NativeCommandException catch (e) {
+        io.error('[WARN] $type failed: ${e.message}');
+        skipped++;
+      } catch (e) {
+        io.error('[WARN] $type failed: $e');
+        skipped++;
+      }
+    }
+    io.write('[OK] create-many done: $succeeded created, $skipped skipped');
+    return succeeded > 0 ? 0 : 1;
   }
 
   Future<int> _dispatchRuntime(List<String> args, _NativeIoBuffer io) async {
@@ -5281,6 +5420,28 @@ class NativeCommandService {
 
   bool _isPluginConsumer(ConsumerProfile profile) {
     return profile == ConsumerProfile.plugin;
+  }
+
+  ConsumerProfile _consumerForServerType(String type) {
+    switch (type.toLowerCase().trim()) {
+      case 'forge':
+        return ConsumerProfile.forge;
+      case 'fabric':
+        return ConsumerProfile.fabric;
+      case 'neoforge':
+        return ConsumerProfile.neoforge;
+      case 'paper':
+      case 'purpur':
+      case 'folia':
+      case 'canvas':
+      case 'spigot':
+        return ConsumerProfile.plugin;
+      default:
+        throw _NativeCommandException(
+          'Unknown server type for routing: $type',
+          2,
+        );
+    }
   }
 
   String _repoUrl(String type) {

@@ -187,10 +187,25 @@ class InteractiveWizard {
 
     entries.add(
       MenuEntry<_DashChoice>(
+        'Create many',
+        value: const _DashChoice(_Act.createMany),
+        shortcut: 'm',
+        detail: 'one server per type, all at once',
+      ),
+    );
+    entries.add(
+      MenuEntry<_DashChoice>(
         'Build & tuning',
         value: const _DashChoice(_Act.buildMenu),
         shortcut: 'b',
         detail: 'jars, repos, sync, JVM',
+      ),
+    );
+    entries.add(
+      MenuEntry<_DashChoice>(
+        'Wipe everything',
+        value: const _DashChoice(_Act.wipeEverything),
+        detail: 'delete all instances across all consumers',
       ),
     );
     entries.add(
@@ -231,11 +246,17 @@ class InteractiveWizard {
       case _Act.create:
         await _createInstance();
         return;
+      case _Act.createMany:
+        await _createMany();
+        return;
       case _Act.startAll:
         await _startAllStopped(rows);
         return;
       case _Act.stopAll:
         await _stopAllRunning(rows);
+        return;
+      case _Act.wipeEverything:
+        await _wipeEverything();
         return;
       case _Act.consolesGrid:
         await _shellRun(<String>['runtime', 'consoles']);
@@ -580,6 +601,89 @@ class InteractiveWizard {
     if (activate) {
       await _shellRun(<String>['instance', 'activate', name]);
     }
+  }
+
+  Future<void> _createMany() async {
+    Ui.note(
+      'Pick the server types to spin up, comma-separated. Available: ${_serverTypes.join(', ')}.',
+    );
+    final String raw = await Ui.input(
+      'Types',
+      defaultValue: 'paper,purpur,canvas,spigot',
+      validator: (String input) => input.trim().isNotEmpty,
+      validationMessage: 'Enter at least one type.',
+    );
+    final List<String> types = raw
+        .split(',')
+        .map((String t) => t.trim().toLowerCase())
+        .where((String t) => _serverTypes.contains(t))
+        .toList(growable: false);
+    if (types.isEmpty) {
+      Ui.error('No valid types selected.');
+      await Ui.pause();
+      return;
+    }
+
+    final String prefix = await Ui.input(
+      'Name prefix (blank for type-only names like "paper", "purpur")',
+      defaultValue: '',
+    );
+    final String mc = await Ui.input(
+      'Shared Minecraft version (blank to resolve latest per type)',
+      defaultValue: '',
+    );
+    final bool refresh = await Ui.confirm(
+      'Refresh each type from upstream before creating?',
+    );
+    final bool subscribe = await Ui.confirm(
+      'Subscribe new servers to plugin/mod dropins and shared ops?',
+    );
+    final bool isolated = !subscribe;
+
+    Ui.doing('Creating ${types.length} server(s)');
+    await _shellRun(<String>[
+      'server',
+      'create-many',
+      '--types',
+      types.join(','),
+      if (prefix.trim().isNotEmpty) ...<String>['--prefix', prefix.trim()],
+      if (mc.trim().isNotEmpty) ...<String>['--mc', mc.trim()],
+      if (refresh) '--auto-build',
+      if (isolated) '--isolated',
+    ]);
+    if (!isolated) {
+      await _syncDropinsAllTargets();
+    }
+    await Ui.pause();
+  }
+
+  Future<void> _wipeEverything() async {
+    Ui.warn(
+      'This deletes EVERY instance across plugin/forge/fabric/neoforge consumers.',
+    );
+    final bool confirmed = await Ui.confirm(
+      'Wipe every instance in every consumer profile?',
+    );
+    if (!confirmed) {
+      return;
+    }
+    final String typed = await Ui.input(
+      'Type WIPE EVERYTHING to confirm',
+      defaultValue: '',
+    );
+    if (typed.trim() != 'WIPE EVERYTHING') {
+      Ui.note('Wipe cancelled.');
+      await Ui.pause();
+      return;
+    }
+    Ui.doing('Wiping all consumers');
+    await _shellRun(<String>[
+      'instance',
+      'delete-all',
+      '--everywhere',
+      '--force',
+    ]);
+    await Ui.pause();
   }
 
   Future<bool> _isolated(String name) async {
@@ -1177,8 +1281,10 @@ class InteractiveWizard {
 enum _Act {
   instance,
   create,
+  createMany,
   startAll,
   stopAll,
+  wipeEverything,
   consolesGrid,
   consolesLateral,
   buildMenu,

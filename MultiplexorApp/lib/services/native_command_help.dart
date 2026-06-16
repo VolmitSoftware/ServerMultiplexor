@@ -57,11 +57,12 @@ void _printHelp(_NativeIoBuffer io) {
     'port [instance] [port]',
     'reset <name>',
     'delete <name>',
-    'delete-all',
+    'delete-all [--everywhere] [--force]',
   ]);
   _writeHelpGroup(io, 'server', <String>[
     'create <name> --type <type> [--mc <version>] [--auto-build] [--isolated]',
     'create <name> --jar <path> [--type label] [--isolated]',
+    'create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]',
   ]);
   _writeHelpGroup(io, 'runtime', <String>[
     'start [instance] [--instance <name>] [--no-console]',

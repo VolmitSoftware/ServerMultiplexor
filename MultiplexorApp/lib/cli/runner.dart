@@ -173,8 +173,23 @@ Future<int> _runServer(List<String> rest) async {
         },
       );
       return 0;
+    case 'create-many':
+      await handleServerCreateMany(
+        <String, dynamic>{
+          'types': parsed.option('types') ?? parsed.positionalOrNull(0),
+          'prefix': parsed.option('prefix'),
+          'mc': parsed.option('mc'),
+        },
+        <String, dynamic>{
+          'auto-build': parsed.flag('auto-build'),
+          'isolated': parsed.flag('isolated'),
+        },
+      );
+      return 0;
     default:
-      stderr.writeln('Usage: server create <name> [--type ...] [--isolated]');
+      stderr.writeln(
+        'Usage: server <create|create-many> ... (create-many: --types paper,purpur,...)',
+      );
       return 2;
   }
 }
@@ -256,7 +271,10 @@ Future<int> _runInstance(List<String> rest) async {
       });
       return 0;
     case 'delete-all':
-      await handleInstanceDeleteAll();
+      await handleInstanceDeleteAll(<String, dynamic>{
+        'everywhere': parsed.flag('everywhere'),
+        'force': parsed.flag('force'),
+      });
       return 0;
     default:
       stderr.writeln(
@@ -465,6 +483,8 @@ _ParsedTokens _parse(List<String> tokens) {
     'all',
     'auto-build',
     'clean',
+    'everywhere',
+    'force',
     'isolated',
     'no-console',
   };

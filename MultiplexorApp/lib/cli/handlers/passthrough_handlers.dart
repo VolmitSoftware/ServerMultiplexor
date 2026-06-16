@@ -113,8 +113,46 @@ Future<void> handleInstanceList() async =>
     _runAndExit(<String>['instance', 'list']);
 Future<void> handleInstanceCurrent() async =>
     _runAndExit(<String>['instance', 'current']);
-Future<void> handleInstanceDeleteAll() async =>
-    _runAndExit(<String>['instance', 'delete-all']);
+
+Future<void> handleInstanceDeleteAll([Map<String, dynamic>? args]) async {
+  final cmd = <String>['instance', 'delete-all'];
+  if (args != null && _flag(args, 'everywhere')) {
+    cmd.add('--everywhere');
+  }
+  if (args != null && _flag(args, 'force')) {
+    cmd.add('--force');
+  }
+  await _runAndExit(cmd);
+}
+
+Future<void> handleServerCreateMany(
+  Map<String, dynamic> args,
+  Map<String, dynamic> flags,
+) async {
+  final types = _arg(args, 'types');
+  if (types == null) {
+    stderr.writeln(
+      'Usage: server create-many --types <a,b,c> [--prefix N] [--mc v] [--auto-build] [--isolated]',
+    );
+    exit(2);
+  }
+  final cmd = <String>['server', 'create-many', '--types', types];
+  final prefix = _arg(args, 'prefix');
+  final mc = _arg(args, 'mc');
+  if (prefix != null) {
+    cmd.addAll(<String>['--prefix', prefix]);
+  }
+  if (mc != null) {
+    cmd.addAll(<String>['--mc', mc]);
+  }
+  if (_flag(flags, 'auto-build')) {
+    cmd.add('--auto-build');
+  }
+  if (_flag(flags, 'isolated')) {
+    cmd.add('--isolated');
+  }
+  await _runAndExit(cmd);
+}
 
 Future<void> handleInstanceDelete(Map<String, dynamic> args) async {
   final name = _arg(args, 'name');
