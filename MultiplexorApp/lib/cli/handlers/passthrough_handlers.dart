@@ -355,6 +355,9 @@ Future<void> handleRuntimeList() async =>
 Future<void> handleRuntimeStates() async =>
     _runAndExit(<String>['runtime', 'states']);
 
+// `set-wrap` and `set-log-format` follow the same shape as `set-heap` and
+// `set-preset` — they take an optional value passed via --value or as a
+// positional arg by the runner.
 Future<void> handleRuntimeSettings(String action, {String? value}) async {
   final cmd = <String>['runtime', 'settings', action];
   if (value != null && value.trim().isNotEmpty) {

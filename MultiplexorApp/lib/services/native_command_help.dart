@@ -74,7 +74,7 @@ void _printHelp(_NativeIoBuffer io) {
     'status [instance]',
     'states',
     'list',
-    'settings <show|presets|set-heap|set-preset|reset>',
+    'settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
   ]);
   _writeHelpGroup(io, 'build', <String>[
     '<paper|purpur|folia|canvas|spigot|forge|fabric|neoforge> [--mc <version>]',

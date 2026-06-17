@@ -341,6 +341,8 @@ Future<int> _runRuntime(List<String> rest) async {
           return 0;
         case 'set-heap':
         case 'set-preset':
+        case 'set-wrap':
+        case 'set-log-format':
           if (value == null || value.trim().isEmpty) {
             stderr.writeln('Usage: runtime settings $action <value>');
             return 2;
@@ -349,7 +351,7 @@ Future<int> _runRuntime(List<String> rest) async {
           return 0;
         default:
           stderr.writeln(
-            'Usage: runtime settings <show|presets|set-heap|set-preset|reset>',
+            'Usage: runtime settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
           );
           return 2;
       }

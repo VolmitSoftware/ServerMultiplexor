@@ -97,6 +97,8 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `runtime settings presets` | List available JVM presets (`aikar`, `vanilla`, `conservative`). |
 | `runtime settings set-heap <2G\|4G\|...>` | Set JVM `-Xmx`. |
 | `runtime settings set-preset <name>` | Apply a JVM preset's flags. |
+| `runtime settings set-wrap <on\|off>` | Toggle tmux console line wrap. Default `off` (long server lines clip at the pane edge instead of wrapping). Takes effect on next `runtime start`. **The `logs/latest.log` file is unaffected** — wrapping is purely a terminal-renderer concern. |
+| `runtime settings set-log-format <minimal\|default>` | Toggle the console log pattern. Default `minimal` — strips the `[HH:mm:ss INFO]` prefix from the console only. `default` restores the server's bundled Log4j pattern. **The `logs/latest.log` file always keeps the full timestamped pattern.** Takes effect on next `runtime start`. |
 | `runtime settings reset` | Restore default runtime settings. |
 
 Paper/Spigot/Purpur `/restart` is wired to a per-instance `multiplexor-restart.sh`, so `/restart` re-enters Multiplexor instead of exiting permanently. While that script waits, the instance reports `restarting`.

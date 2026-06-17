@@ -771,6 +771,10 @@ class NativeCommandService {
         io.write('heap size:      ${settings.heap}');
         io.write('flags profile:  ${settings.profile}');
         io.write('jvm args:       ${settings.jvmArgs}');
+        io.write(
+          'console wrap:   ${settings.noLineWrap ? 'off (long lines clip)' : 'on (default terminal wrap)'}',
+        );
+        io.write('console log:    ${settings.consoleLogFormat}');
         io.write('settings file:  ${_runtimeSettingsFile(profile)}');
         return 0;
       case 'presets':
@@ -808,6 +812,50 @@ class NativeCommandService {
         _runtimeSettingsSave(profile, settings);
         io.write('[OK] JVM flag preset set to: ${settings.profile}');
         return 0;
+      case 'set-wrap':
+        if (rest.isEmpty) {
+          throw _NativeCommandException(
+            'Usage: runtime settings set-wrap <on|off>',
+            2,
+          );
+        }
+        final raw = rest.first.toLowerCase();
+        final wrapOn = raw == 'on' || raw == 'true' || raw == 'yes';
+        final wrapOff = raw == 'off' || raw == 'false' || raw == 'no';
+        if (!wrapOn && !wrapOff) {
+          throw _NativeCommandException(
+            'Usage: runtime settings set-wrap <on|off>',
+            2,
+          );
+        }
+        settings = settings.copyWith(noLineWrap: !wrapOn);
+        _runtimeSettingsSave(profile, settings);
+        io.write(
+          '[OK] Console line wrap ${wrapOn ? 'on' : 'off'} '
+          '(takes effect on next runtime start)',
+        );
+        return 0;
+      case 'set-log-format':
+        if (rest.isEmpty) {
+          throw _NativeCommandException(
+            'Usage: runtime settings set-log-format <minimal|default>',
+            2,
+          );
+        }
+        final fmt = rest.first.toLowerCase();
+        if (fmt != 'minimal' && fmt != 'default') {
+          throw _NativeCommandException(
+            'Usage: runtime settings set-log-format <minimal|default>',
+            2,
+          );
+        }
+        settings = settings.copyWith(consoleLogFormat: fmt);
+        _runtimeSettingsSave(profile, settings);
+        io.write(
+          '[OK] Console log format set to: $fmt '
+          '(log file always keeps full format; takes effect on next runtime start)',
+        );
+        return 0;
       case 'reset':
         settings = const _RuntimeSettingsData();
         _runtimeSettingsSave(profile, settings);
@@ -815,7 +863,7 @@ class NativeCommandService {
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: runtime settings <show|presets|set-heap|set-preset|reset>',
+          'Usage: runtime settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
           2,
         );
     }
@@ -2995,20 +3043,33 @@ class NativeCommandService {
       ..writeAsStringSync('');
     final settings = _runtimeSettingsLoad(profile);
     final launchWorkingDir = _runtimeLaunchWorkingDir(profile, instance);
+    String? log4jPath;
+    if (settings.consoleLogFormat == 'minimal') {
+      log4jPath = _ensureMinimalLog4jConfig(profile, instance);
+    }
     final javaCommandParts = <String>[
       'java',
       ..._javaArgsForLaunch(
         launch,
         settings,
         workingDirectory: launchWorkingDir,
+        log4jConfigPath: log4jPath,
       ),
     ];
     final javaCommand = javaCommandParts.map(_shellQuote).join(' ');
     final serverPidFile = _runtimeServerPidFile(profile, instance);
 
+    // DECAWM-off prevents tmux's pane from wrapping long server lines. The
+    // log file is unaffected since this only touches the terminal renderer.
+    final String wrapPrefix = settings.noLineWrap
+        ? r'printf '
+              "'\\033[?7l'"
+              ' && '
+        : '';
     final runScript =
         'cd ${_shellQuote(launchWorkingDir)} && '
         'printf "%s\\n" "\$\$" > ${_shellQuote(serverPidFile)} && '
+        '$wrapPrefix'
         'exec $javaCommand';
     final tmuxSession = _tmuxSessionName(profile, instance);
 
@@ -3921,6 +3982,8 @@ class NativeCommandService {
     var heap = _RuntimeSettingsData.defaults.heap;
     var jvmArgs = _RuntimeSettingsData.defaults.jvmArgs;
     var runtimeProfile = _RuntimeSettingsData.defaults.profile;
+    var noLineWrap = _RuntimeSettingsData.defaults.noLineWrap;
+    var consoleLogFormat = _RuntimeSettingsData.defaults.consoleLogFormat;
     final file = File(_runtimeSettingsFile(profile));
     var loadedFromFile = false;
 
@@ -3948,6 +4011,15 @@ class NativeCommandService {
           case 'JVM_PROFILE':
             if (value.isNotEmpty) {
               runtimeProfile = value.toLowerCase();
+            }
+            break;
+          case 'NO_LINE_WRAP':
+            noLineWrap = _parseBoolSetting(value, defaultValue: noLineWrap);
+            break;
+          case 'CONSOLE_LOG_FORMAT':
+            final lower = value.toLowerCase();
+            if (lower == 'minimal' || lower == 'default') {
+              consoleLogFormat = lower;
             }
             break;
           default:
@@ -3989,6 +4061,8 @@ class NativeCommandService {
       heap: heap,
       jvmArgs: jvmArgs,
       profile: runtimeProfile,
+      noLineWrap: noLineWrap,
+      consoleLogFormat: consoleLogFormat,
     );
     if (shouldRewriteNormalizedSettings) {
       _runtimeSettingsSave(profile, settings);
@@ -4004,8 +4078,32 @@ class NativeCommandService {
     file.createSync(recursive: true);
     final normalizedArgs = _runtimeSettingsNormalizeJvmArgs(settings.jvmArgs);
     file.writeAsStringSync(
-      '${['# Multiplexor runtime settings (${profile.shortName})', 'HEAP_SIZE=${settings.heap}', 'JVM_PROFILE=${settings.profile}', 'JVM_ARGS=$normalizedArgs'].join('\n')}\n',
+      '${[
+        '# Multiplexor runtime settings (${profile.shortName})',
+        'HEAP_SIZE=${settings.heap}',
+        'JVM_PROFILE=${settings.profile}',
+        'JVM_ARGS=$normalizedArgs',
+        'NO_LINE_WRAP=${settings.noLineWrap ? 'true' : 'false'}',
+        'CONSOLE_LOG_FORMAT=${settings.consoleLogFormat}',
+      ].join('\n')}\n',
     );
+  }
+
+  bool _parseBoolSetting(String value, {required bool defaultValue}) {
+    final normalized = value.trim().toLowerCase();
+    if (normalized == 'true' ||
+        normalized == 'on' ||
+        normalized == '1' ||
+        normalized == 'yes') {
+      return true;
+    }
+    if (normalized == 'false' ||
+        normalized == 'off' ||
+        normalized == '0' ||
+        normalized == 'no') {
+      return false;
+    }
+    return defaultValue;
   }
 
   bool _runtimeHeapLooksValid(String heap) {
@@ -4023,6 +4121,51 @@ class NativeCommandService {
     return 'custom';
   }
 
+  /// Writes (if missing) a per-instance log4j2 config that strips the
+  /// `[time level]: ` prefix from the console while keeping a full file
+  /// appender targeting `logs/latest.log` — so `cat logs/latest.log` still
+  /// shows timestamps and levels. Returns the absolute path to the config.
+  String _ensureMinimalLog4jConfig(ConsumerProfile profile, String instance) {
+    final dir = _instanceDir(profile, instance);
+    final path = p.join(dir, '.multiplexor-log4j2.xml');
+    final body = '''
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN" monitorInterval="30">
+    <Appenders>
+        <Console name="MinimalConsole" target="SYSTEM_OUT">
+            <PatternLayout>
+                <Pattern>%msg%n%xEx</Pattern>
+            </PatternLayout>
+        </Console>
+        <RollingRandomAccessFile name="File"
+                                 fileName="logs/latest.log"
+                                 filePattern="logs/%d{yyyy-MM-dd}-%i.log.gz">
+            <PatternLayout>
+                <Pattern>[%d{HH:mm:ss}] [%t/%level]: [%logger] %msg%n</Pattern>
+            </PatternLayout>
+            <Policies>
+                <TimeBasedTriggeringPolicy />
+                <OnStartupTriggeringPolicy />
+            </Policies>
+        </RollingRandomAccessFile>
+    </Appenders>
+    <Loggers>
+        <Root level="info">
+            <AppenderRef ref="MinimalConsole"/>
+            <AppenderRef ref="File"/>
+        </Root>
+    </Loggers>
+</Configuration>
+''';
+    final file = File(path);
+    if (!file.existsSync() || file.readAsStringSync() != body) {
+      file
+        ..createSync(recursive: true)
+        ..writeAsStringSync(body);
+    }
+    return path;
+  }
+
   String _runtimeSettingsNormalizeJvmArgs(String args) {
     final tokens = args
         .trim()
@@ -4037,6 +4180,7 @@ class NativeCommandService {
     _LaunchTarget launch,
     _RuntimeSettingsData settings, {
     String? workingDirectory,
+    String? log4jConfigPath,
   }) {
     final heap = settings.heap;
     final jvmArgsRaw = settings.jvmArgs;
@@ -4046,6 +4190,11 @@ class NativeCommandService {
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList(growable: false);
+
+    final List<String> extraJvm = <String>[
+      if (log4jConfigPath != null && log4jConfigPath.isNotEmpty)
+        '-Dlog4j.configurationFile=$log4jConfigPath',
+    ];
 
     if (launch.kind == _LaunchKind.argsFile) {
       var argsFile = launch.path;
@@ -4084,6 +4233,7 @@ class NativeCommandService {
         // Enables the Vector API for servers that use SIMD optimizations
         // (e.g. Pufferfish-derived forks); ignored when nothing uses it.
         '--add-modules=jdk.incubator.vector',
+        ...extraJvm,
         ...flags,
         '@$argsFile',
         'nogui',
@@ -4094,6 +4244,7 @@ class NativeCommandService {
       '-Xms$heap',
       '-Xmx$heap',
       '--add-modules=jdk.incubator.vector',
+      ...extraJvm,
       ...flags,
       '-jar',
       launch.path,
@@ -5859,6 +6010,8 @@ class _RuntimeSettingsData {
         '-XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 '
         '-XX:+UseStringDeduplication -Dfile.encoding=UTF-8',
     this.profile = 'aikar',
+    this.noLineWrap = true,
+    this.consoleLogFormat = 'minimal',
   });
 
   static const _RuntimeSettingsData defaults = _RuntimeSettingsData();
@@ -5867,15 +6020,27 @@ class _RuntimeSettingsData {
   final String jvmArgs;
   final String profile;
 
+  /// When true, the tmux launch script disables DECAWM so long server lines
+  /// clip at the pane edge instead of wrapping. The log file is unaffected.
+  final bool noLineWrap;
+
+  /// 'minimal' strips the [time level]: prefix from the console only.
+  /// 'default' uses the server's bundled log4j2 config.
+  final String consoleLogFormat;
+
   _RuntimeSettingsData copyWith({
     String? heap,
     String? jvmArgs,
     String? profile,
+    bool? noLineWrap,
+    String? consoleLogFormat,
   }) {
     return _RuntimeSettingsData(
       heap: heap ?? this.heap,
       jvmArgs: jvmArgs ?? this.jvmArgs,
       profile: profile ?? this.profile,
+      noLineWrap: noLineWrap ?? this.noLineWrap,
+      consoleLogFormat: consoleLogFormat ?? this.consoleLogFormat,
     );
   }
 }

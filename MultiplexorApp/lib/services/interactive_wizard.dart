@@ -430,16 +430,15 @@ class InteractiveWizard {
         return;
       case _InstanceAct.restart:
         Ui.doing('Restarting $name');
-        await _shellRun(<String>['runtime', 'stop', name]);
+        // runtime restart stops, starts, and attaches the console; if start
+        // fails the user gets a chance to read the error instead of being
+        // bounced straight back to the dashboard.
         final int code = await _shellRun(<String>[
           'runtime',
-          'start',
+          'restart',
           name,
-          '--no-console',
         ]);
-        if (code == 0) {
-          Ui.success('$name is starting back up.');
-        } else {
+        if (code != 0) {
           await Ui.pause();
         }
         return;
