@@ -5,10 +5,13 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../models/consumer_profile.dart';
+import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
+import '../utils/terminal/ansi.dart';
 import 'consumer_service.dart';
 import 'manager_context.dart';
 import 'runtime_state.dart';
+import 'server_ping.dart';
 
 part 'native_command_help.dart';
 part 'native_cli_output.dart';
@@ -734,6 +737,9 @@ class NativeCommandService {
       case 'status':
         await _runtimeStatus(profile, rest.isNotEmpty ? rest.first : null, io);
         return 0;
+      case 'stats':
+        await _runtimeStats(profile, rest.isNotEmpty ? rest.first : null, io);
+        return 0;
       case 'list':
         for (final name in await _runtimeListRunning(profile)) {
           io.write(name);
@@ -751,7 +757,7 @@ class NativeCommandService {
         return _dispatchRuntimeSettings(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|states|list|settings> [instance|args] (start/restart support --instance/--no-console)',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|list|settings> [instance|args] (start/restart support --instance/--no-console)',
           2,
         );
     }
@@ -3798,6 +3804,209 @@ class NativeCommandService {
     io.write('log:          ${_runtimeLogFile(profile, instance)}');
   }
 
+  /// Shows live stats (player counts, version, uptime) for running servers.
+  ///
+  /// With no [inputInstance], scans every consumer for running instances so
+  /// the user sees all live servers at once. Player counts come from a Server
+  /// List Ping against each server's `server-port`, which needs neither query
+  /// nor rcon enabled. Uptime is derived from the tmux session start time.
+  Future<void> _runtimeStats(
+    ConsumerProfile profile,
+    String? inputInstance,
+    _NativeIoBuffer io,
+  ) async {
+    final targets = <(ConsumerProfile, String)>[];
+    if (inputInstance != null && inputInstance.trim().isNotEmpty) {
+      final instance = inputInstance.trim();
+      if (!_instanceExists(profile, instance)) {
+        throw _NativeCommandException('Instance not found: $instance', 2);
+      }
+      targets.add((profile, instance));
+    } else {
+      for (final candidate in ConsumerProfile.values) {
+        for (final name in _instanceNames(candidate)) {
+          if (await _runtimeRunning(candidate, name)) {
+            targets.add((candidate, name));
+          }
+        }
+      }
+    }
+
+    if (targets.isEmpty) {
+      io.write('[INFO] No running servers.');
+      return;
+    }
+
+    final rows = await Future.wait(
+      targets.map((target) async {
+        final (consumer, instance) = target;
+        final state = await _runtimeStateOf(consumer, instance);
+        final port = _instanceGetServerPort(consumer, instance);
+        final host = _instanceGetServerIp(consumer, instance);
+        final uptime = await _runtimeUptime(consumer, instance);
+        // Ping any server that is not stopped/stopping; the ping itself is the
+        // ground truth for whether it is accepting players.
+        final ping =
+            (state != RuntimeState.stopped && state != RuntimeState.stopping)
+            ? await pingMinecraftServer(host, port)
+            : null;
+        return (
+          instance: instance,
+          consumer: consumer.shortName,
+          state: state,
+          port: port,
+          uptime: uptime,
+          ping: ping,
+        );
+      }),
+    );
+
+    final useColor =
+        io.stream &&
+        stdout.hasTerminal &&
+        !Platform.environment.containsKey('NO_COLOR');
+
+    io.write('[OK] ${rows.length} server(s) running');
+    io.write('');
+
+    const headers = <String>[
+      'SERVER',
+      'CONSUMER',
+      'STATE',
+      'PLAYERS',
+      'UPTIME',
+      'PORT',
+      'VERSION',
+    ];
+    final cells = rows
+        .map(
+          (r) => <String>[
+            r.instance,
+            r.consumer,
+            r.state.name,
+            _statsPlayersCell(r.ping, r.state),
+            r.uptime != null ? formatCompactDuration(r.uptime!) : '-',
+            '${r.port}',
+            r.ping?.versionName ?? '-',
+          ],
+        )
+        .toList(growable: false);
+
+    final widths = List<int>.generate(headers.length, (col) {
+      var width = headers[col].length;
+      for (final row in cells) {
+        if (row[col].length > width) {
+          width = row[col].length;
+        }
+      }
+      return width;
+    });
+
+    final headerLine = <String>[
+      for (var col = 0; col < headers.length; col++)
+        headers[col].padRight(widths[col]),
+    ].join('  ').trimRight();
+    io.write(useColor ? '${Ansi.bold}$headerLine${Ansi.reset}' : headerLine);
+
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      final parts = <String>[];
+      for (var col = 0; col < headers.length; col++) {
+        final padded = cells[i][col].padRight(widths[col]);
+        parts.add(
+          useColor ? _statsColorCell(col, padded, row.state, row.ping) : padded,
+        );
+      }
+      io.write(parts.join('  ').trimRight());
+    }
+
+    final withPlayers = rows
+        .where((r) => (r.ping?.sample.isNotEmpty ?? false))
+        .toList(growable: false);
+    if (withPlayers.isNotEmpty) {
+      io.write('');
+      io.write('Players online:');
+      for (final r in withPlayers) {
+        io.write('  ${r.instance}  ${r.ping!.sample.join(', ')}');
+      }
+    }
+  }
+
+  String _statsPlayersCell(MinecraftPingResult? ping, RuntimeState state) {
+    if (ping != null) {
+      return '${ping.online}/${ping.max}';
+    }
+    return state == RuntimeState.running ? '?' : '-';
+  }
+
+  String _statsColorCell(
+    int col,
+    String padded,
+    RuntimeState state,
+    MinecraftPingResult? ping,
+  ) {
+    // STATE column.
+    if (col == 2) {
+      final code = switch (state) {
+        RuntimeState.running => Ansi.green,
+        RuntimeState.starting ||
+        RuntimeState.stopping ||
+        RuntimeState.restarting => Ansi.yellow,
+        RuntimeState.stopped => Ansi.gray,
+      };
+      return '$code$padded${Ansi.reset}';
+    }
+    // PLAYERS column.
+    if (col == 3) {
+      if (ping == null) {
+        return '${Ansi.gray}$padded${Ansi.reset}';
+      }
+      if (ping.online > 0) {
+        return '${Ansi.green}$padded${Ansi.reset}';
+      }
+    }
+    return padded;
+  }
+
+  /// Best-effort uptime for a running instance: the tmux session start time,
+  /// falling back to the server PID file mtime. Returns null when neither is
+  /// available.
+  Future<Duration?> _runtimeUptime(
+    ConsumerProfile profile,
+    String instance,
+  ) async {
+    final session = _tmuxSessionName(profile, instance);
+    if (await _tmuxSessionExists(session)) {
+      final result = await _runProcess('tmux', <String>[
+        'display-message',
+        '-p',
+        '-t',
+        session,
+        '-F',
+        '#{session_created}',
+      ]);
+      if (result.exitCode == 0) {
+        final epoch = int.tryParse((result.stdout ?? '').toString().trim());
+        if (epoch != null && epoch > 0) {
+          final created = DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
+          final delta = DateTime.now().difference(created);
+          if (!delta.isNegative) {
+            return delta;
+          }
+        }
+      }
+    }
+
+    final pidFile = File(_runtimeServerPidFile(profile, instance));
+    if (pidFile.existsSync()) {
+      final delta = DateTime.now().difference(pidFile.lastModifiedSync());
+      if (!delta.isNegative) {
+        return delta;
+      }
+    }
+    return null;
+  }
+
   Future<List<String>> _runtimeListRunning(ConsumerProfile profile) async {
     final running = <String>[];
     for (final name in _instanceNames(profile)) {
@@ -3868,6 +4077,32 @@ class NativeCommandService {
     }
   }
 
+  /// Whether the startup "Done" marker appears in the head of the log, where
+  /// it lives even after it has scrolled out of the tail window read by
+  /// [classifyRuntimeLogTail]. Used as a fallback so long-running or busy
+  /// servers are not stuck reporting "starting".
+  bool _runtimeLogHasReadyMarker(
+    ConsumerProfile profile,
+    String instance, {
+    int maxBytes = 131072,
+  }) {
+    final file = File(_runtimeLogFile(profile, instance));
+    if (!file.existsSync()) {
+      return false;
+    }
+    final RandomAccessFile raf = file.openSync();
+    try {
+      final int length = raf.lengthSync();
+      final int count = length > maxBytes ? maxBytes : length;
+      final List<int> bytes = raf.readSync(count);
+      return logContainsReadyMarker(utf8.decode(bytes, allowMalformed: true));
+    } catch (_) {
+      return false;
+    } finally {
+      raf.closeSync();
+    }
+  }
+
   Future<RuntimeState> _runtimeStateOf(
     ConsumerProfile profile,
     String instance,
@@ -3881,6 +4116,14 @@ class NativeCommandService {
         );
         if (fromLog == RuntimeState.running) {
           // Restart completed; any leftover marker is stale.
+          File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
+          return RuntimeState.running;
+        }
+        // The "Done" marker can scroll out of the tail window on a busy or
+        // long-running server, leaving the tail with no markers. The pane is
+        // live, so if the marker is anywhere in the log head, it is running.
+        if (fromLog == RuntimeState.starting &&
+            _runtimeLogHasReadyMarker(profile, instance)) {
           File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
           return RuntimeState.running;
         }
@@ -5504,6 +5747,22 @@ class NativeCommandService {
       }
     }
     return 25565;
+  }
+
+  String _instanceGetServerIp(ConsumerProfile profile, String instance) {
+    _ensureLocalServerProperties(profile, instance);
+    final file = File(_instanceServerProperties(profile, instance));
+    for (final raw in file.readAsLinesSync()) {
+      final line = raw.trim();
+      if (!line.startsWith('server-ip=')) {
+        continue;
+      }
+      final value = line.substring('server-ip='.length).trim();
+      if (value.isNotEmpty) {
+        return value;
+      }
+    }
+    return '127.0.0.1';
   }
 
   void _instanceSetServerPort(

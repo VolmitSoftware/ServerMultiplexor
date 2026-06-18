@@ -72,6 +72,7 @@ void _printHelp(_NativeIoBuffer io) {
     'stop [instance]',
     'restart [instance] [--no-console]',
     'status [instance]',
+    'stats [instance]',
     'states',
     'list',
     'settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',

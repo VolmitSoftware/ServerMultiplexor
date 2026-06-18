@@ -91,6 +91,7 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `runtime consoles` | Open every running console in a tmux grid. |
 | `runtime consoles-lateral` | Open every running console side-by-side. |
 | `runtime status [instance]` | Print the runtime state of one instance. |
+| `runtime stats [instance]` | Show live stats for running servers: player count (`online/max`), state, uptime, port, and version, plus the names of online players. With no instance, scans every consumer for running servers; with an instance, reports that one. Player counts come from a Server List Ping, so neither `enable-query` nor `enable-rcon` is required. |
 | `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`. |
 | `runtime list` | Print running instance names. |
 | `runtime settings show` | Print the active heap, JVM preset, and flags. |
@@ -160,6 +161,9 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 ./start.sh runtime stop lobby
 ./start.sh instance update lobby --mc 1.21.11 --auto-build
 ./start.sh runtime start lobby
+
+# See live player counts and uptime for every running server
+./start.sh runtime stats
 
 # Watch dropins and sync them into every non-isolated instance live
 ./start.sh plugins watch-start

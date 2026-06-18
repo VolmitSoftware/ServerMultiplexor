@@ -59,6 +59,35 @@ void main() {
       const String log = '[12:00:05 INFO]: <player> are we done (yet)?';
       expect(classifyRuntimeLogTail(log), RuntimeState.starting);
     });
+
+    test('matches a Done marker with no log-line prefix', () {
+      // Some console-log formats strip the "[time INFO]: " prefix, so the
+      // ready line arrives as a bare "Done (Xs)!". This is the format that
+      // left long-running servers stuck on "starting"/"restarting".
+      const String log = 'Done (10.004s)! For help, type "help"';
+      expect(classifyRuntimeLogTail(log), RuntimeState.running);
+    });
+
+    test('does not treat "Done preparing level" as the ready marker', () {
+      const String log = 'Done preparing level "world" (0.473s)';
+      expect(classifyRuntimeLogTail(log), RuntimeState.starting);
+    });
+  });
+
+  group('logContainsReadyMarker', () {
+    test('detects the ready marker with and without a prefix', () {
+      expect(logContainsReadyMarker('Done (10.004s)! For help'), isTrue);
+      expect(
+        logContainsReadyMarker('[Server thread/INFO]: Done (8.1s)!'),
+        isTrue,
+      );
+    });
+
+    test('rejects chat and intermediate lines', () {
+      expect(logContainsReadyMarker('<player> are we done (yet)?'), isFalse);
+      expect(logContainsReadyMarker('Done preparing level "world"'), isFalse);
+      expect(logContainsReadyMarker(''), isFalse);
+    });
   });
 
   group('runtimeRestartMarkerFresh', () {

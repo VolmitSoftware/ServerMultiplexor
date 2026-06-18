@@ -349,6 +349,15 @@ Future<void> handleRuntimeStatus(Map<String, dynamic> args) async {
   await _runAndExit(cmd);
 }
 
+Future<void> handleRuntimeStats(Map<String, dynamic> args) async {
+  final instance = _arg(args, 'instance');
+  final cmd = <String>['runtime', 'stats'];
+  if (instance != null) {
+    cmd.add(instance);
+  }
+  await _runAndExit(cmd);
+}
+
 Future<void> handleRuntimeList() async =>
     _runAndExit(<String>['runtime', 'list']);
 
