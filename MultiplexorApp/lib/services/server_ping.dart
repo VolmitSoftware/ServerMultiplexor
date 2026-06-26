@@ -219,7 +219,10 @@ Map<String, dynamic>? parseStatusResponse(List<int> body) {
   }
   try {
     final decoded = json.decode(
-      utf8.decode(body.sublist(start, start + jsonLength), allowMalformed: true),
+      utf8.decode(
+        body.sublist(start, start + jsonLength),
+        allowMalformed: true,
+      ),
     );
     return decoded is Map<String, dynamic> ? decoded : null;
   } catch (_) {

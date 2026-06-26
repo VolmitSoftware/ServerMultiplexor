@@ -29,10 +29,7 @@ void main() {
 
     test('renders days and hours past a day', () {
       expect(formatCompactDuration(const Duration(hours: 48)), '2d');
-      expect(
-        formatCompactDuration(const Duration(days: 2, hours: 3)),
-        '2d 3h',
-      );
+      expect(formatCompactDuration(const Duration(days: 2, hours: 3)), '2d 3h');
     });
   });
 }

@@ -44,9 +44,7 @@ class Ui {
   }
 
   static void keyValue(String key, String value) {
-    stdout.writeln(
-      '   ${Ansi.style(key.padRight(14), Ansi.gray)} $value',
-    );
+    stdout.writeln('   ${Ansi.style(key.padRight(14), Ansi.gray)} $value');
   }
 
   static void blank() => stdout.writeln('');
@@ -60,7 +58,9 @@ class Ui {
   }
 
   static void warn(String message) {
-    stdout.writeln(' ${Ansi.style('!', '${Ansi.yellow}${Ansi.bold}')} $message');
+    stdout.writeln(
+      ' ${Ansi.style('!', '${Ansi.yellow}${Ansi.bold}')} $message',
+    );
   }
 
   static void error(String message) {
@@ -73,7 +73,9 @@ class Ui {
 
   /// Announces a long-running step before streamed command output.
   static void doing(String message) {
-    stdout.writeln(' ${Ansi.style('▸', Ansi.cyan)} ${Ansi.style(message, Ansi.bold)}');
+    stdout.writeln(
+      ' ${Ansi.style('▸', Ansi.cyan)} ${Ansi.style(message, Ansi.bold)}',
+    );
   }
 
   /// Runs background work with keyboard echo off, then discards any
@@ -210,6 +212,67 @@ class Ui {
         return value;
       }
       warn(validationMessage ?? 'Invalid input');
+    }
+  }
+
+  /// Masked line input for secrets like PINs. Renders one '*' per character.
+  /// Enter submits, Backspace deletes the last character, Escape backs out.
+  static Future<String> secret(String prompt) async {
+    if (!hasTerminal) {
+      stdout.write('$prompt: ');
+      try {
+        return (stdin.readLineSync() ?? '').trim();
+      } catch (_) {
+        throw PromptInputUnavailable(
+          'stdin is not readable while waiting for "$prompt"',
+        );
+      }
+    }
+
+    final TermIo io = TermIo.instance;
+    io.drainInput();
+    stdout.write(_inputPrompt(prompt));
+    io.setRawMode(true);
+    io.hideCursor();
+    final StringBuffer buffer = StringBuffer();
+    try {
+      while (true) {
+        final TermEvent event = io.readEvent();
+        switch (event.kind) {
+          case TermEventKind.enter:
+            stdout.writeln('');
+            return buffer.toString();
+          case TermEventKind.escape:
+            stdout.writeln('');
+            throw const PromptBackNavigation();
+          case TermEventKind.ctrlC:
+            io.restoreTerminal();
+            stdout.writeln();
+            exit(130);
+          case TermEventKind.backspace:
+            if (buffer.isNotEmpty) {
+              final String current = buffer.toString();
+              buffer
+                ..clear()
+                ..write(current.substring(0, current.length - 1));
+              stdout.write('\b \b');
+            }
+            break;
+          case TermEventKind.char:
+            buffer.write(event.char);
+            stdout.write('*');
+            break;
+          default:
+            break;
+        }
+      }
+    } on TermInputUnavailable {
+      throw PromptInputUnavailable(
+        'stdin is not readable while waiting for "$prompt"',
+      );
+    } finally {
+      io.showCursor();
+      io.setRawMode(false);
     }
   }
 

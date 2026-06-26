@@ -54,6 +54,9 @@ void _printHelp(_NativeIoBuffer io) {
     'open [name]',
     'update <name> [--mc <version>] [--jar <path>] [--auto-build]',
     'isolated [name] [true|false]',
+    'lock <name> [--pin <digits>]',
+    'unlock <name> [--pin <digits>]',
+    'locked [name]',
     'port [instance] [port]',
     'reset <name>',
     'delete <name>',
@@ -74,6 +77,7 @@ void _printHelp(_NativeIoBuffer io) {
     'status [instance]',
     'stats [instance]',
     'states',
+    'metrics',
     'list',
     'settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
   ]);

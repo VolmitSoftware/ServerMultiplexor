@@ -1,11 +1,5 @@
 /// Lifecycle states for a managed server instance.
-enum RuntimeState {
-  stopped,
-  starting,
-  running,
-  stopping,
-  restarting,
-}
+enum RuntimeState { stopped, starting, running, stopping, restarting }
 
 /// How long a restart-pending marker is trusted before it is considered
 /// stale. The generated restart script gives up after 180s, so anything

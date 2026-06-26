@@ -10,7 +10,10 @@ class PassthroughService {
     NativeCommandService? native,
   }) : _native =
            native ??
-           NativeCommandService(context: context, consumerService: consumerService);
+           NativeCommandService(
+             context: context,
+             consumerService: consumerService,
+           );
 
   final ManagerContext context;
   final ConsumerService consumerService;

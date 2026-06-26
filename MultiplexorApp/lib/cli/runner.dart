@@ -259,6 +259,23 @@ Future<int> _runInstance(List<String> rest) async {
         'value': parsed.option('value') ?? parsed.positionalOrNull(1),
       });
       return 0;
+    case 'lock':
+      await handleInstanceLock(<String, dynamic>{
+        'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+        'pin': parsed.option('pin'),
+      });
+      return 0;
+    case 'unlock':
+      await handleInstanceUnlock(<String, dynamic>{
+        'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+        'pin': parsed.option('pin'),
+      });
+      return 0;
+    case 'locked':
+      await handleInstanceLocked(<String, dynamic>{
+        'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+      });
+      return 0;
     case 'port':
       await handleInstancePort(<String, dynamic>{
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
@@ -278,7 +295,7 @@ Future<int> _runInstance(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|port|motd-style|current|delete-all>',
+        'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
       );
       return 2;
   }
@@ -335,6 +352,9 @@ Future<int> _runRuntime(List<String> rest) async {
     case 'states':
       await handleRuntimeStates();
       return 0;
+    case 'metrics':
+      await handleRuntimeMetrics();
+      return 0;
     case 'settings':
       final action = parsed.positionalOrNull(0) ?? 'show';
       final value = parsed.option('value') ?? parsed.positionalOrNull(1);
@@ -362,7 +382,7 @@ Future<int> _runRuntime(List<String> rest) async {
       }
     default:
       stderr.writeln(
-        'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|list|settings> [instance|args] (start/restart support --instance/--no-console)',
+        'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (start/restart support --instance/--no-console)',
       );
       return 2;
   }

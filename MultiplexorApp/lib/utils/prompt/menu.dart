@@ -66,6 +66,8 @@ Future<T> menuSelect<T>(
   List<MenuEntry<T>> entries, {
   int initialIndex = 0,
   String? hint,
+  Future<List<MenuEntry<T>>> Function()? onTick,
+  Duration tickInterval = const Duration(seconds: 1),
 }) async {
   final List<int> selectable = <int>[
     for (int i = 0; i < entries.length; i++)
@@ -84,13 +86,17 @@ Future<T> menuSelect<T>(
       ? initialIndex
       : selectable.first;
 
-  final int labelWidth = entries
+  // Mutable so a live refresh (onTick) can recompute alignment when badge
+  // contents grow or shrink between ticks.
+  int labelWidth = entries
       .where((MenuEntry<T> e) => e.selectable)
-      .fold(0, (int w, MenuEntry<T> e) => e.label.length > w ? e.label.length : w);
-  final int badgeWidth = entries.fold(
+      .fold(
+        0,
+        (int w, MenuEntry<T> e) => e.label.length > w ? e.label.length : w,
+      );
+  int badgeWidth = entries.fold(
     0,
-    (int w, MenuEntry<T> e) =>
-        (e.badge?.length ?? 0) > w ? e.badge!.length : w,
+    (int w, MenuEntry<T> e) => (e.badge?.length ?? 0) > w ? e.badge!.length : w,
   );
 
   String renderEntry(int index) {
@@ -158,8 +164,7 @@ Future<T> menuSelect<T>(
 
   void moveSelection(int delta) {
     final int position = selectable.indexOf(selected);
-    final int next =
-        (position + delta + selectable.length) % selectable.length;
+    final int next = (position + delta + selectable.length) % selectable.length;
     selected = selectable[next];
   }
 
@@ -205,13 +210,45 @@ Future<T> menuSelect<T>(
     }
 
     while (true) {
-      TermEvent event;
+      TermEvent? event;
       try {
-        event = io.readEvent();
+        event = onTick == null
+            ? io.readEvent()
+            : io.readEventTimeout(tickInterval);
       } on TermInputUnavailable {
         throw PromptInputUnavailable(
           'stdin is not readable while waiting for "$title"',
         );
+      }
+
+      if (event == null) {
+        // Timed out with no input: refresh the entries and redraw in place.
+        // The refresh must preserve the row count so the repaint cursor math
+        // stays correct; a structural change is picked up on the next full
+        // reload instead.
+        List<MenuEntry<T>>? refreshed;
+        try {
+          refreshed = await onTick!();
+        } catch (_) {
+          refreshed = null;
+        }
+        if (refreshed != null && refreshed.length == entries.length) {
+          entries = refreshed;
+          labelWidth = entries
+              .where((MenuEntry<T> e) => e.selectable)
+              .fold(
+                0,
+                (int w, MenuEntry<T> e) =>
+                    e.label.length > w ? e.label.length : w,
+              );
+          badgeWidth = entries.fold(
+            0,
+            (int w, MenuEntry<T> e) =>
+                (e.badge?.length ?? 0) > w ? e.badge!.length : w,
+          );
+          draw(repaint: true);
+        }
+        continue;
       }
 
       switch (event.kind) {

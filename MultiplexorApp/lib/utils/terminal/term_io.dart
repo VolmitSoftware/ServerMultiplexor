@@ -88,6 +88,40 @@ class TermIo {
     }
   }
 
+  /// Like [readEvent], but returns null if no event arrives within [timeout]
+  /// instead of blocking forever. Powers periodic refresh loops (e.g. the live
+  /// dashboard) that must redraw on a timer while still handling keystrokes.
+  /// Requires raw mode.
+  TermEvent? readEventTimeout(Duration timeout) {
+    if (_queue.isNotEmpty) {
+      return _queue.removeAt(0);
+    }
+    final DateTime deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      int byte;
+      try {
+        byte = stdin.readByteSync();
+      } on StdinException {
+        throw const TermInputUnavailable();
+      } on OSError {
+        throw const TermInputUnavailable();
+      }
+      if (byte < 0) {
+        // VTIME=1 silence tick: resolve a pending bare-ESC, else keep waiting.
+        final TermEvent? resolved = _parser.timeout();
+        if (resolved != null) {
+          return resolved;
+        }
+        continue;
+      }
+      _queue.addAll(_parser.add(byte));
+      if (_queue.isNotEmpty) {
+        return _queue.removeAt(0);
+      }
+    }
+    return null;
+  }
+
   /// Discards all pending input. Call after background work so keystrokes
   /// typed while the app was busy cannot trigger menu actions.
   void drainInput() {
@@ -199,8 +233,7 @@ class TermIo {
     });
   }
 
-  int get terminalColumns =>
-      stdout.hasTerminal ? stdout.terminalColumns : 100;
+  int get terminalColumns => stdout.hasTerminal ? stdout.terminalColumns : 100;
 }
 
 class TermInputUnavailable implements Exception {

@@ -267,6 +267,41 @@ Future<void> handleInstanceIsolated(Map<String, dynamic> args) async {
   await _runAndExit(cmd);
 }
 
+Future<void> handleInstanceLock(Map<String, dynamic> args) async {
+  final name = _arg(args, 'name');
+  final pin = _arg(args, 'pin');
+  final cmd = <String>['instance', 'lock'];
+  if (name != null) {
+    cmd.add(name);
+  }
+  if (pin != null) {
+    cmd.addAll(<String>['--pin', pin]);
+  }
+  await _runAndExit(cmd);
+}
+
+Future<void> handleInstanceUnlock(Map<String, dynamic> args) async {
+  final name = _arg(args, 'name');
+  final pin = _arg(args, 'pin');
+  final cmd = <String>['instance', 'unlock'];
+  if (name != null) {
+    cmd.add(name);
+  }
+  if (pin != null) {
+    cmd.addAll(<String>['--pin', pin]);
+  }
+  await _runAndExit(cmd);
+}
+
+Future<void> handleInstanceLocked(Map<String, dynamic> args) async {
+  final name = _arg(args, 'name');
+  final cmd = <String>['instance', 'locked'];
+  if (name != null) {
+    cmd.add(name);
+  }
+  await _runAndExit(cmd);
+}
+
 Future<void> handleInstancePort(Map<String, dynamic> args) async {
   final instance = _arg(args, 'instance');
   final port = _arg(args, 'port');
@@ -363,6 +398,9 @@ Future<void> handleRuntimeList() async =>
 
 Future<void> handleRuntimeStates() async =>
     _runAndExit(<String>['runtime', 'states']);
+
+Future<void> handleRuntimeMetrics() async =>
+    _runAndExit(<String>['runtime', 'metrics']);
 
 // `set-wrap` and `set-log-format` follow the same shape as `set-heap` and
 // `set-preset` — they take an optional value passed via --value or as a

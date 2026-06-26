@@ -106,15 +106,16 @@ class InteractiveWizard {
     Ui.blank();
   }
 
-  Future<_DashChoice> _dashboardMenu(_DashboardData data) async {
-    final List<_InstanceRow> rows = data.rows;
+  List<MenuEntry<_DashChoice>> _buildDashEntries(
+    List<_InstanceRow> rows,
+    String? active,
+  ) {
     final List<_InstanceRow> running = rows
         .where((_InstanceRow r) => r.state != RuntimeState.stopped)
         .toList(growable: false);
     final List<_InstanceRow> stopped = rows
         .where((_InstanceRow r) => r.state == RuntimeState.stopped)
         .toList(growable: false);
-    final String? active = data.active;
 
     final List<MenuEntry<_DashChoice>> entries = <MenuEntry<_DashChoice>>[];
 
@@ -129,14 +130,29 @@ class InteractiveWizard {
     } else {
       entries.add(const MenuEntry<_DashChoice>.separator('servers'));
       for (final _InstanceRow row in rows) {
+        final List<String> bits = <String>[':${row.port}'];
+        if (row.players != null) {
+          bits.add('${row.players}/${row.maxPlayers ?? '?'}');
+        }
+        if (row.tps != null) {
+          bits.add('${row.tps!.toStringAsFixed(1)} tps');
+        }
+        if (row.version != null && row.version!.isNotEmpty) {
+          bits.add(row.version!);
+        }
+        if (row.locked) {
+          bits.add('locked');
+        }
+        final String activeMark = row.name == active
+            ? '  ${Ansi.style('active', Ansi.cyan)}'
+            : '';
         entries.add(
           MenuEntry<_DashChoice>(
             row.name,
             value: _DashChoice(_Act.instance, instance: row.name),
             badge: '${_stateGlyph(row.state)} ${row.state.name}',
             badgeColor: _stateColor(row.state),
-            detail:
-                ':${row.port}${row.name == active ? '  ${Ansi.style('active', Ansi.cyan)}' : ''}',
+            detail: '${bits.join(' · ')}$activeMark',
           ),
         );
       }
@@ -231,10 +247,20 @@ class InteractiveWizard {
       ),
     );
 
+    return entries;
+  }
+
+  Future<_DashChoice> _dashboardMenu(_DashboardData data) async {
     return menuSelect<_DashChoice>(
       'Dashboard',
-      entries,
-      initialIndex: rows.isEmpty ? 0 : 1,
+      _buildDashEntries(data.rows, data.active),
+      initialIndex: data.rows.isEmpty ? 0 : 1,
+      // Live refresh: re-poll players/TPS/version and redraw in place ~1s.
+      onTick: () async {
+        final List<_InstanceRow> rows = await _loadInstanceMetricRows();
+        final String? active = await _activeInstance();
+        return _buildDashEntries(rows, active);
+      },
     );
   }
 
@@ -288,6 +314,7 @@ class InteractiveWizard {
     final bool isStopped = row.state == RuntimeState.stopped;
     final bool isRunning = row.state == RuntimeState.running;
     final bool isolated = await Ui.shielded(() => _isolated(name));
+    final bool locked = await Ui.shielded(() => _locked(name));
 
     final List<MenuEntry<_InstanceAct>> entries = <MenuEntry<_InstanceAct>>[];
     if (isStopped) {
@@ -374,7 +401,20 @@ class InteractiveWizard {
             : 'unsubscribe from dropins, iris, shared ops',
       ),
     );
-    if (isStopped) {
+    entries.add(
+      locked
+          ? const MenuEntry<_InstanceAct>(
+              'Unlock (PIN)',
+              value: _InstanceAct.unlock,
+              detail: 're-enable delete and factory reset',
+            )
+          : const MenuEntry<_InstanceAct>(
+              'Lock (set PIN)',
+              value: _InstanceAct.lock,
+              detail: 'block delete and factory reset',
+            ),
+    );
+    if (isStopped && !locked) {
       entries.add(
         const MenuEntry<_InstanceAct>(
           'Factory reset',
@@ -398,7 +438,8 @@ class InteractiveWizard {
     final String badge =
         '${_stateGlyph(row.state)} ${row.state.name} on :${row.port}'
         '${isActive ? ' · active' : ''}'
-        '${isolated ? ' · isolated' : ''}';
+        '${isolated ? ' · isolated' : ''}'
+        '${locked ? ' · locked' : ''}';
     if (!isRunning && !isStopped) {
       Ui.note('Server is ${row.state.name}; the dashboard updates on refresh.');
     }
@@ -433,11 +474,7 @@ class InteractiveWizard {
         // runtime restart stops, starts, and attaches the console; if start
         // fails the user gets a chance to read the error instead of being
         // bounced straight back to the dashboard.
-        final int code = await _shellRun(<String>[
-          'runtime',
-          'restart',
-          name,
-        ]);
+        final int code = await _shellRun(<String>['runtime', 'restart', name]);
         if (code != 0) {
           await Ui.pause();
         }
@@ -464,6 +501,12 @@ class InteractiveWizard {
         return;
       case _InstanceAct.toggleIsolated:
         await _toggleIsolated(name, currentlyIsolated: isolated);
+        return;
+      case _InstanceAct.lock:
+        await _lockInstance(name);
+        return;
+      case _InstanceAct.unlock:
+        await _unlockInstance(name);
         return;
       case _InstanceAct.reset:
         final bool confirmed = await Ui.confirm(
@@ -542,9 +585,7 @@ class InteractiveWizard {
 
   Future<void> _createInstance() async {
     final String type = await Ui.pick('Server platform', _serverTypes);
-    final _BuildVersionChoice versionChoice = await _pickSupportedVersion(
-      type,
-    );
+    final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String version = versionChoice.version;
 
     final String name = await Ui.input(
@@ -594,9 +635,7 @@ class InteractiveWizard {
       return;
     }
 
-    final bool activate = await Ui.confirm(
-      'Make $name the active instance?',
-    );
+    final bool activate = await Ui.confirm('Make $name the active instance?');
     if (activate) {
       await _shellRun(<String>['instance', 'activate', name]);
     }
@@ -692,6 +731,48 @@ class InteractiveWizard {
       name,
     ]);
     return (raw ?? '').trim().toLowerCase() == 'true';
+  }
+
+  Future<bool> _locked(String name) async {
+    final String? raw = await passthrough.captureStdoutLine(<String>[
+      'instance',
+      'locked',
+      name,
+    ]);
+    return (raw ?? '').trim().toLowerCase() == 'true';
+  }
+
+  Future<void> _lockInstance(String name) async {
+    Ui.info(
+      'Lock $name so it cannot be deleted or factory reset without a PIN.',
+    );
+    String pin;
+    String confirm;
+    try {
+      pin = await Ui.secret('Set a PIN (4-12 digits)');
+      confirm = await Ui.secret('Confirm PIN');
+    } on PromptBackNavigation {
+      return;
+    }
+    if (pin != confirm) {
+      Ui.error('PINs do not match.');
+      await Ui.pause();
+      return;
+    }
+    // The service validates length/digits and reports any problem.
+    await _shellRun(<String>['instance', 'lock', name, '--pin', pin]);
+    await Ui.pause();
+  }
+
+  Future<void> _unlockInstance(String name) async {
+    String pin;
+    try {
+      pin = await Ui.secret('Enter PIN to unlock $name');
+    } on PromptBackNavigation {
+      return;
+    }
+    await _shellRun(<String>['instance', 'unlock', name, '--pin', pin]);
+    await Ui.pause();
   }
 
   Future<void> _toggleIsolated(
@@ -847,10 +928,7 @@ class InteractiveWizard {
           shortcut: 'b',
           detail: 'pick platform and version',
         ),
-        const MenuEntry<_BuildAct>(
-          'Show build cache',
-          value: _BuildAct.cache,
-        ),
+        const MenuEntry<_BuildAct>('Show build cache', value: _BuildAct.cache),
         const MenuEntry<_BuildAct>(
           'Sync upstream repos',
           value: _BuildAct.repos,
@@ -865,11 +943,7 @@ class InteractiveWizard {
           value: _BuildAct.source,
         ),
         const MenuEntry<_BuildAct>.separator('jvm'),
-        MenuEntry<_BuildAct>(
-          'Heap size',
-          value: _BuildAct.heap,
-          detail: heap,
-        ),
+        MenuEntry<_BuildAct>('Heap size', value: _BuildAct.heap, detail: heap),
         MenuEntry<_BuildAct>(
           'Flag profile',
           value: _BuildAct.flags,
@@ -969,9 +1043,7 @@ class InteractiveWizard {
 
   Future<void> _buildServerArtifact() async {
     final String type = await Ui.pick('Server platform', _serverTypes);
-    final _BuildVersionChoice versionChoice = await _pickSupportedVersion(
-      type,
-    );
+    final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String label = _serverTypeLabel(type);
     Ui.doing('Building $label for Minecraft ${versionChoice.version}');
     await _shellRun(<String>['build', type, '--mc', versionChoice.version]);
@@ -1001,9 +1073,7 @@ class InteractiveWizard {
       return manualEntry();
     }
 
-    final List<String> newestFirst = supported.reversed.toList(
-      growable: false,
-    );
+    final List<String> newestFirst = supported.reversed.toList(growable: false);
     final List<String> visible = newestFirst.take(30).toList(growable: true);
     if (!visible.contains(latest)) {
       visible.insert(0, latest);
@@ -1032,10 +1102,7 @@ class InteractiveWizard {
     if (selected.isEmpty) {
       return manualEntry();
     }
-    return _BuildVersionChoice(
-      version: selected,
-      isLatest: selected == latest,
-    );
+    return _BuildVersionChoice(version: selected, isLatest: selected == latest);
   }
 
   // ─── Backend helpers ─────────────────────────────────────────────────
@@ -1082,6 +1149,45 @@ class InteractiveWizard {
             orElse: () => RuntimeState.stopped,
           ),
           port: parts[2],
+          locked: parts.length > 4 && parts[4] == 'locked',
+        ),
+      );
+    }
+    return rows;
+  }
+
+  /// Loads rows with live metrics (players, TPS, version) via `runtime metrics`.
+  /// Slower than [_loadInstanceRows] because it pings each running server, so
+  /// it drives the dashboard's periodic refresh rather than the first paint.
+  Future<List<_InstanceRow>> _loadInstanceMetricRows() async {
+    final CapturedResult result = await passthrough.capture(<String>[
+      'runtime',
+      'metrics',
+    ]);
+    if (!result.success) {
+      return const <_InstanceRow>[];
+    }
+
+    final List<_InstanceRow> rows = <_InstanceRow>[];
+    for (final String line in result.stdout.split('\n')) {
+      // name, state, port, locked, players, max, version, tps
+      final List<String> parts = line.trim().split('\t');
+      if (parts.length < 8 || parts[0].isEmpty) {
+        continue;
+      }
+      rows.add(
+        _InstanceRow(
+          name: parts[0],
+          state: RuntimeState.values.firstWhere(
+            (RuntimeState s) => s.name == parts[1],
+            orElse: () => RuntimeState.stopped,
+          ),
+          port: parts[2],
+          locked: parts[3] == 'locked',
+          players: int.tryParse(parts[4]),
+          maxPlayers: int.tryParse(parts[5]),
+          version: parts[6] == '-' ? null : parts[6],
+          tps: double.tryParse(parts[7]),
         ),
       );
     }
@@ -1311,6 +1417,8 @@ enum _InstanceAct {
   openFolder,
   update,
   toggleIsolated,
+  lock,
+  unlock,
   reset,
   delete,
   back,
@@ -1333,11 +1441,24 @@ class _InstanceRow {
     required this.name,
     required this.state,
     required this.port,
+    this.locked = false,
+    this.players,
+    this.maxPlayers,
+    this.version,
+    this.tps,
   });
 
   final String name;
   final RuntimeState state;
   final String port;
+  final bool locked;
+
+  /// Live metrics, populated by the metrics sweep (`runtime metrics`). Null on
+  /// the fast state-only load and for servers that are not currently pingable.
+  final int? players;
+  final int? maxPlayers;
+  final String? version;
+  final double? tps;
 }
 
 class _DashboardData {

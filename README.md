@@ -21,14 +21,14 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 
 ## Interactive Wizard
 
-`./start.sh` with no args opens a dashboard listing every instance with a live state badge, port, and `active` / `isolated` markers. Pick an instance to get a state-aware action menu (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation always). Keyboard and mouse both work — arrows/wheel to move, Enter or click to activate, Esc to go back. Keys pressed while a build or sync runs are discarded.
+`./start.sh` with no args opens a dashboard listing every instance with a live state badge, port, and `active` / `isolated` / `locked` markers. The dashboard refreshes about once a second: running servers show live player count (`online/max`), version, and — for Paper-family servers started with RCON enabled — TPS. Pick an instance to get a state-aware action menu (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation/lock-or-unlock always). Delete and factory reset are hidden while an instance is locked. Keyboard and mouse both work — arrows/wheel to move, Enter or click to activate, Esc to go back. Keys pressed while a build or sync runs are discarded.
 
 Dashboard shortcuts: `n` new instance, `s` start all, `k` stop all, `g` all consoles, `b` build & tuning, `c` switch consumer, `r` refresh, `q` quit.
 
 ## Concepts
 
 - **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. They never share state. The active profile is set with `consumer use`.
-- **Instance** — one server install inside a consumer. Lives at `consumers/<profile>/instances/<name>` (or under `~/.multiplexor/instance-store/...` if the workspace path contains `[` or `]`). Metadata is in `.server-source` (type, launch mode, jar path, isolated flag).
+- **Instance** — one server install inside a consumer. Lives at `consumers/<profile>/instances/<name>` (or under `~/.multiplexor/instance-store/...` if the workspace path contains `[` or `]`). Metadata is in `.server-source` (type, launch mode, jar path, isolated flag, and lock state + hashed PIN).
 - **Active instance** — the default target when an instance name is omitted. Set with `instance activate`.
 - **Dropins** — plugin or mod jars under `consumers/<profile>/plugin-source` (or `mod-source`). On `runtime start` and via the watcher, these jars are copied into every non-isolated instance's `plugins/` (or `mods/`) folder.
 - **Isolated instance** — opts out of all shared state: no dropin sync, no Iris pack symlink, no shared `ops.json` merge. Created with `server create --isolated` or toggled later with `instance isolated <name> true`.
@@ -61,12 +61,15 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `instance open [name]` | Open the instance folder in the host file manager. |
 | `instance update <name> [--mc <v>] [--jar <path>] [--auto-build] [--type <t>]` | Re-point `server.jar` at a new version. Stops the instance first. Preserves worlds, dropins, config, and the isolated flag. Jar-launch only — installer-based servers (Forge/NeoForge) must be recreated. |
 | `instance isolated [name] [true\|false]` | Read the flag (no value) or toggle it. Turning it off re-links shared Iris packs and merges shared ops. |
+| `instance lock <name> [--pin <digits>]` | Lock the instance so it cannot be deleted or factory-reset. Prompts for a 4–12 digit PIN (or pass `--pin`). The PIN is stored salted+hashed in `.server-source` and survives factory reset. Settings stay editable. |
+| `instance unlock <name> [--pin <digits>]` | Verify the PIN and unlock, re-enabling delete and factory reset. |
+| `instance locked [name]` | Print `true`/`false` for the lock state. |
 | `instance port [instance] [port]` | Read or set `server-port` in `server.properties`. |
 | `instance motd-style [name]` | Apply the styled MOTD template (alias: `motd-style`). |
-| `instance reset <name>` | Wipe worlds/config/plugins/mods/logs back to baseline. Keeps the launch artifacts and the isolated flag. |
-| `instance delete <name>` | Delete the instance entirely (kills any running process first). |
-| `instance delete-all [--force]` | Delete every instance in the active profile. Asks for `DELETE` confirmation unless `--force`. |
-| `instance delete-all --everywhere [--force]` | Wipe every instance across plugin/forge/fabric/neoforge in one call. Asks for `WIPE EVERYTHING` confirmation unless `--force`. |
+| `instance reset <name>` | Wipe worlds/config/plugins/mods/logs back to baseline. Keeps the launch artifacts and the isolated flag, and re-applies the styled MOTD for the server type. Refused while the instance is locked. |
+| `instance delete <name>` | Delete the instance entirely (kills any running process first). Refused while the instance is locked. |
+| `instance delete-all [--force]` | Delete every instance in the active profile. Asks for `DELETE` confirmation unless `--force`. Locked instances are skipped and left untouched. |
+| `instance delete-all --everywhere [--force]` | Wipe every instance across plugin/forge/fabric/neoforge in one call. Asks for `WIPE EVERYTHING` confirmation unless `--force`. Locked instances are skipped. |
 
 ### server — first-time jar wiring
 
@@ -92,7 +95,8 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `runtime consoles-lateral` | Open every running console side-by-side. |
 | `runtime status [instance]` | Print the runtime state of one instance. |
 | `runtime stats [instance]` | Show live stats for running servers: player count (`online/max`), state, uptime, port, and version, plus the names of online players. With no instance, scans every consumer for running servers; with an instance, reports that one. Player counts come from a Server List Ping, so neither `enable-query` nor `enable-rcon` is required. |
-| `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`. |
+| `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`. |
+| `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps`. Running servers are pinged (and RCON-queried for TPS) concurrently. Backs the wizard dashboard's live refresh. TPS is `-` unless the server is Paper-family and was started with RCON enabled. |
 | `runtime list` | Print running instance names. |
 | `runtime settings show` | Print the active heap, JVM preset, and flags. |
 | `runtime settings presets` | List available JVM presets (`aikar`, `vanilla`, `conservative`). |
@@ -164,6 +168,11 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 # See live player counts and uptime for every running server
 ./start.sh runtime stats
+
+# Lock a server so it can't be deleted or factory-reset (settings stay editable)
+./start.sh instance lock lobby --pin 4827
+# ...later, to allow destructive ops again
+./start.sh instance unlock lobby --pin 4827
 
 # Watch dropins and sync them into every non-isolated instance live
 ./start.sh plugins watch-start

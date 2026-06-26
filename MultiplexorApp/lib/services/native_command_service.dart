@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/consumer_profile.dart';
@@ -10,6 +12,7 @@ import '../utils/process_runner.dart';
 import '../utils/terminal/ansi.dart';
 import 'consumer_service.dart';
 import 'manager_context.dart';
+import 'rcon_client.dart';
 import 'runtime_state.dart';
 import 'server_ping.dart';
 
@@ -197,6 +200,12 @@ class NativeCommandService {
         return _dispatchInstanceUpdate(profile, rest, io);
       case 'isolated':
         return _dispatchInstanceIsolated(profile, rest, io);
+      case 'lock':
+        return _dispatchInstanceLock(profile, rest, io);
+      case 'unlock':
+        return _dispatchInstanceUnlock(profile, rest, io);
+      case 'locked':
+        return _dispatchInstanceLocked(profile, rest, io);
       case 'port':
         return _dispatchInstancePort(profile, rest, io);
       case 'motd-style':
@@ -207,7 +216,7 @@ class NativeCommandService {
         return _dispatchInstanceDeleteAll(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|port|motd-style|current|delete-all>',
+          'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
           2,
         );
     }
@@ -354,6 +363,161 @@ class NativeCommandService {
       _instanceEnsureSharedPluginOps(profile, name);
       io.write('[OK] $name is no longer isolated');
     }
+    return 0;
+  }
+
+  (String?, String?) _parseNameAndPin(List<String> args) {
+    String? name;
+    String? pin;
+    for (var i = 0; i < args.length; i++) {
+      final a = args[i];
+      if (a == '--pin') {
+        if (i + 1 < args.length) {
+          pin = args[++i].trim();
+        }
+      } else if (a.startsWith('--pin=')) {
+        pin = a.substring('--pin='.length).trim();
+      } else if (!a.startsWith('-') && name == null) {
+        name = a;
+      }
+    }
+    return (name, pin);
+  }
+
+  String? _validatePin(String pin) {
+    if (pin.length < 4 || pin.length > 12) {
+      return 'PIN must be 4-12 digits';
+    }
+    if (!RegExp(r'^\d+$').hasMatch(pin)) {
+      return 'PIN must contain digits only';
+    }
+    return null;
+  }
+
+  /// Reads a line with terminal echo suppressed so the PIN is not shown.
+  String _promptHidden(String message) {
+    stdout.write(message);
+    bool? previous;
+    try {
+      previous = stdin.echoMode;
+      stdin.echoMode = false;
+    } catch (_) {}
+    final line = stdin.readLineSync() ?? '';
+    try {
+      if (previous != null) {
+        stdin.echoMode = previous;
+      }
+    } catch (_) {}
+    stdout.writeln();
+    return line.trim();
+  }
+
+  String _promptPinTwice() {
+    final first = _promptHidden('Set a PIN (4-12 digits): ');
+    final err = _validatePin(first);
+    if (err != null) {
+      throw _NativeCommandException(err, 2);
+    }
+    final second = _promptHidden('Confirm PIN: ');
+    if (first != second) {
+      throw _NativeCommandException('PINs do not match', 2);
+    }
+    return first;
+  }
+
+  Future<int> _dispatchInstanceLocked(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    final name = args.isNotEmpty ? args.first : _currentInstance(profile);
+    if (name == null || name.isEmpty) {
+      throw _NativeCommandException('No active instance set', 2);
+    }
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+    io.write(_instanceLocked(profile, name) ? 'true' : 'false');
+    return 0;
+  }
+
+  Future<int> _dispatchInstanceLock(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    final (parsedName, parsedPin) = _parseNameAndPin(args);
+    final name = parsedName ?? _currentInstance(profile);
+    if (name == null || name.isEmpty) {
+      throw _NativeCommandException(
+        'Usage: instance lock <name> [--pin <digits>]',
+        2,
+      );
+    }
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+    if (_instanceLocked(profile, name)) {
+      throw _NativeCommandException('Instance "$name" is already locked', 2);
+    }
+
+    var pin = parsedPin;
+    if ((pin == null || pin.isEmpty) && io.stream) {
+      pin = _promptPinTwice();
+    }
+    if (pin == null || pin.isEmpty) {
+      throw _NativeCommandException(
+        'A PIN is required to lock. Pass --pin <digits> (4-12 digits).',
+        2,
+      );
+    }
+    final err = _validatePin(pin);
+    if (err != null) {
+      throw _NativeCommandException(err, 2);
+    }
+    _instanceLock(profile, name, pin);
+    io.write(
+      '[OK] $name is locked; delete and factory reset are blocked. '
+      'Unlock with: instance unlock $name',
+    );
+    return 0;
+  }
+
+  Future<int> _dispatchInstanceUnlock(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    final (parsedName, parsedPin) = _parseNameAndPin(args);
+    final name = parsedName ?? _currentInstance(profile);
+    if (name == null || name.isEmpty) {
+      throw _NativeCommandException(
+        'Usage: instance unlock <name> [--pin <digits>]',
+        2,
+      );
+    }
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+    if (!_instanceLocked(profile, name)) {
+      throw _NativeCommandException('Instance "$name" is not locked', 2);
+    }
+
+    var pin = parsedPin;
+    if ((pin == null || pin.isEmpty) && io.stream) {
+      pin = _promptHidden('Enter PIN to unlock $name: ');
+    }
+    if (pin == null || pin.isEmpty) {
+      throw _NativeCommandException(
+        'A PIN is required to unlock. Pass --pin <digits>.',
+        2,
+      );
+    }
+    if (!_instancePinMatches(profile, name, pin)) {
+      throw _NativeCommandException('Incorrect PIN', 2);
+    }
+    _instanceUnlock(profile, name);
+    io.write('[OK] $name is unlocked');
     return 0;
   }
 
@@ -750,14 +914,17 @@ class NativeCommandService {
           final state = await _runtimeStateOf(profile, name);
           final port = _instanceGetServerPort(profile, name);
           final pid = _readPid(_runtimeServerPidFile(profile, name));
-          io.write('$name\t${state.name}\t$port\t${pid ?? '-'}');
+          final locked = _instanceLocked(profile, name) ? 'locked' : 'unlocked';
+          io.write('$name\t${state.name}\t$port\t${pid ?? '-'}\t$locked');
         }
         return 0;
+      case 'metrics':
+        return _runtimeMetrics(profile, io);
       case 'settings':
         return _dispatchRuntimeSettings(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|list|settings> [instance|args] (start/restart support --instance/--no-console)',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (start/restart support --instance/--no-console)',
           2,
         );
     }
@@ -3031,6 +3198,7 @@ class NativeCommandService {
     }
 
     await _runtimePrepareInstancePort(profile, instance, io);
+    _ensureRconConfigured(profile, instance);
 
     final launch = _runtimeLaunchTarget(profile, instance);
     if (!File(launch.path).existsSync()) {
@@ -4321,14 +4489,7 @@ class NativeCommandService {
     file.createSync(recursive: true);
     final normalizedArgs = _runtimeSettingsNormalizeJvmArgs(settings.jvmArgs);
     file.writeAsStringSync(
-      '${[
-        '# Multiplexor runtime settings (${profile.shortName})',
-        'HEAP_SIZE=${settings.heap}',
-        'JVM_PROFILE=${settings.profile}',
-        'JVM_ARGS=$normalizedArgs',
-        'NO_LINE_WRAP=${settings.noLineWrap ? 'true' : 'false'}',
-        'CONSOLE_LOG_FORMAT=${settings.consoleLogFormat}',
-      ].join('\n')}\n',
+      '${['# Multiplexor runtime settings (${profile.shortName})', 'HEAP_SIZE=${settings.heap}', 'JVM_PROFILE=${settings.profile}', 'JVM_ARGS=$normalizedArgs', 'NO_LINE_WRAP=${settings.noLineWrap ? 'true' : 'false'}', 'CONSOLE_LOG_FORMAT=${settings.consoleLogFormat}'].join('\n')}\n',
     );
   }
 
@@ -5113,6 +5274,73 @@ class NativeCommandService {
     return source['isolated']?.toLowerCase().trim() == 'true';
   }
 
+  /// Whether [instance] is locked. A locked instance refuses destructive
+  /// operations (delete, factory reset) until unlocked with its PIN. This is a
+  /// safety guard against accidental loss, not hard security: the lock lives in
+  /// the plaintext `.server-source`, so anyone with filesystem access can edit
+  /// it out. The PIN is stored salted+hashed so it is never written in clear.
+  bool _instanceLocked(ConsumerProfile profile, String instance) {
+    final source = _serverSource(profile, instance);
+    return source['locked']?.toLowerCase().trim() == 'true';
+  }
+
+  String _hashPin(String pin, String salt) {
+    return sha256.convert(utf8.encode('$salt:$pin')).toString();
+  }
+
+  String _newPinSalt() {
+    final rng = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rng.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  bool _instancePinMatches(
+    ConsumerProfile profile,
+    String instance,
+    String pin,
+  ) {
+    final source = _serverSource(profile, instance);
+    final salt = source['pin_salt'] ?? '';
+    final hash = source['pin_hash'] ?? '';
+    if (hash.isEmpty) {
+      return false;
+    }
+    return _hashPin(pin, salt) == hash;
+  }
+
+  /// Throws if [name] is locked. [action] names the blocked verb for the
+  /// message (e.g. 'deleted', 'reset').
+  void _ensureUnlocked(
+    ConsumerProfile profile,
+    String name, {
+    required String action,
+  }) {
+    if (_instanceLocked(profile, name)) {
+      throw _NativeCommandException(
+        'Instance "$name" is locked and cannot be $action. '
+        'Unlock it first: instance unlock $name',
+        2,
+      );
+    }
+  }
+
+  void _instanceLock(ConsumerProfile profile, String name, String pin) {
+    final source = Map<String, String>.from(_serverSource(profile, name));
+    final salt = _newPinSalt();
+    source['locked'] = 'true';
+    source['pin_salt'] = salt;
+    source['pin_hash'] = _hashPin(pin, salt);
+    _writeServerSource(_instanceDir(profile, name), fields: source);
+  }
+
+  void _instanceUnlock(ConsumerProfile profile, String name) {
+    final source = Map<String, String>.from(_serverSource(profile, name));
+    source.remove('locked');
+    source.remove('pin_salt');
+    source.remove('pin_hash');
+    _writeServerSource(_instanceDir(profile, name), fields: source);
+  }
+
   void _writeServerSource(
     String instanceDir, {
     required Map<String, String> fields,
@@ -5121,9 +5349,9 @@ class NativeCommandService {
     for (final entry in fields.entries) {
       ordered.add('${entry.key}=${entry.value}');
     }
-    File(p.join(instanceDir, '.server-source')).writeAsStringSync(
-      ordered.join('\n'),
-    );
+    File(
+      p.join(instanceDir, '.server-source'),
+    ).writeAsStringSync(ordered.join('\n'));
   }
 
   String _pluginSharedOpsFile(ConsumerProfile profile) {
@@ -5384,9 +5612,7 @@ class NativeCommandService {
     }
     final dir = Directory(instancePath);
 
-    final String dropinSubdir = _isPluginConsumer(profile)
-        ? 'plugins'
-        : 'mods';
+    final String dropinSubdir = _isPluginConsumer(profile) ? 'plugins' : 'mods';
     Directory(p.join(dir.path, dropinSubdir)).createSync(recursive: true);
     Directory(p.join(dir.path, 'logs')).createSync(recursive: true);
 
@@ -5446,6 +5672,7 @@ class NativeCommandService {
     if (existingType == FileSystemEntityType.notFound) {
       throw _NativeCommandException('Instance not found: $name', 2);
     }
+    _ensureUnlocked(profile, name, action: 'deleted');
 
     final serverPid = _readPid(_runtimeServerPidFile(profile, name));
     if (serverPid != null) {
@@ -5507,13 +5734,26 @@ class NativeCommandService {
       }
     }
 
+    final active = _currentInstance(profile);
+    var activeDeleted = false;
     for (final instance in names) {
+      if (_instanceLocked(profile, instance)) {
+        stdout.writeln('[SKIP] $instance is locked; left untouched');
+        continue;
+      }
       _instanceDelete(profile, instance);
+      if (instance == active) {
+        activeDeleted = true;
+      }
     }
 
-    File(_activeInstanceFile(profile)).deleteSyncSafe();
-    File(_activeInstanceLink(profile)).deleteSyncSafe();
-    File(_rootActiveInstanceLink()).deleteSyncSafe();
+    // Only clear the active markers if the instance they point at was actually
+    // removed; a surviving locked instance keeps its active status.
+    if (active == null || activeDeleted) {
+      File(_activeInstanceFile(profile)).deleteSyncSafe();
+      File(_activeInstanceLink(profile)).deleteSyncSafe();
+      File(_rootActiveInstanceLink()).deleteSyncSafe();
+    }
   }
 
   Future<void> _instanceReset(
@@ -5524,6 +5764,7 @@ class NativeCommandService {
     if (!_instanceExists(profile, name)) {
       throw _NativeCommandException('Instance not found: $name', 2);
     }
+    _ensureUnlocked(profile, name, action: 'reset');
 
     if (await _runtimeRunning(profile, name)) {
       await _runtimeStop(profile, name, io);
@@ -5545,6 +5786,12 @@ class NativeCommandService {
     try {
       _instanceCreateBlank(profile, name, isolated: wasIsolated, io: io);
       _restoreFactoryArtifactsFromBackup(profile, name, backupPath: backupPath);
+      // Factory reset rewrites server.properties to defaults, which drops the
+      // MOTD. _instanceCreateBlank already applied a styled MOTD, but it ran
+      // before .server-source was restored, so it fell back to the 'custom'
+      // type and produced a generic gray MOTD. Now that the real server type is
+      // restored, re-apply so the MOTD matches the server (e.g. Purpur).
+      _instanceApplyStyledMotd(profile, name, force: true);
       _instanceEnsureRestartScript(profile, name);
       if (!wasIsolated) {
         _instanceEnsureSharedPluginOps(profile, name, io: io);
@@ -5763,6 +6010,185 @@ class NativeCommandService {
       }
     }
     return '127.0.0.1';
+  }
+
+  /// Reads a single `key=value` from the instance's server.properties, or null.
+  String? _instanceGetProperty(
+    ConsumerProfile profile,
+    String instance,
+    String key,
+  ) {
+    final file = File(_instanceServerProperties(profile, instance));
+    if (!file.existsSync()) {
+      return null;
+    }
+    final prefix = '$key=';
+    for (final raw in file.readAsLinesSync()) {
+      final line = raw.trim();
+      if (line.startsWith('#') || !line.startsWith(prefix)) {
+        continue;
+      }
+      return line.substring(prefix.length).trim();
+    }
+    return null;
+  }
+
+  /// Enables RCON in server.properties for Paper-family instances so the
+  /// dashboard can read live TPS. No-op for modded consumers (Forge/Fabric/
+  /// NeoForge expose no `tps` command) and for already-configured keys. Runs on
+  /// the start path; changes take effect on the next launch. A user-set
+  /// rcon.port / rcon.password is preserved.
+  void _ensureRconConfigured(ConsumerProfile profile, String instance) {
+    if (!_isPluginConsumer(profile)) {
+      return;
+    }
+    _ensureLocalServerProperties(profile, instance);
+    final file = File(_instanceServerProperties(profile, instance));
+    final lines = file.readAsLinesSync();
+
+    int indexOfKey(String key) {
+      final prefix = '$key=';
+      for (var i = 0; i < lines.length; i++) {
+        final line = lines[i].trim();
+        if (!line.startsWith('#') && line.startsWith(prefix)) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    String? valueOf(int index) {
+      if (index < 0) {
+        return null;
+      }
+      final line = lines[index].trim();
+      final eq = line.indexOf('=');
+      return eq < 0 ? '' : line.substring(eq + 1).trim();
+    }
+
+    var changed = false;
+    void setKey(String key, String value) {
+      final idx = indexOfKey(key);
+      if (idx < 0) {
+        lines.add('$key=$value');
+      } else {
+        lines[idx] = '$key=$value';
+      }
+      changed = true;
+    }
+
+    if (valueOf(indexOfKey('enable-rcon')) != 'true') {
+      setKey('enable-rcon', 'true');
+    }
+    // Keep chat clean: TPS polling should not echo to ops.
+    if (valueOf(indexOfKey('broadcast-rcon-to-ops')) != 'false') {
+      setKey('broadcast-rcon-to-ops', 'false');
+    }
+    final existingPort = valueOf(indexOfKey('rcon.port'));
+    // 25575 is the vanilla default shared by every fresh server.properties, so
+    // treat it (and empty/0) as "needs a unique port" — otherwise instances
+    // collide on the same RCON port when run together. A deliberately-set,
+    // non-default port is preserved.
+    if (existingPort == null ||
+        existingPort.isEmpty ||
+        existingPort == '0' ||
+        existingPort == '25575') {
+      final serverPort = _instanceGetServerPort(profile, instance);
+      final rconPort = serverPort + 10000 <= 65535
+          ? serverPort + 10000
+          : serverPort - 10000;
+      setKey('rcon.port', '$rconPort');
+    }
+    final existingPassword = valueOf(indexOfKey('rcon.password'));
+    if (existingPassword == null || existingPassword.isEmpty) {
+      setKey('rcon.password', _newRconPassword());
+    }
+
+    if (changed) {
+      file.writeAsStringSync('${lines.join('\n')}\n');
+    }
+  }
+
+  String _newRconPassword() {
+    final rng = Random.secure();
+    final bytes = List<int>.generate(12, (_) => rng.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  /// Queries live TPS over RCON. Null when RCON is unreachable, the server is
+  /// not Paper-family, or the response can't be parsed.
+  Future<double?> _instanceQueryTps(
+    ConsumerProfile profile,
+    String instance,
+  ) async {
+    if (!_isPluginConsumer(profile)) {
+      return null;
+    }
+    final portRaw = _instanceGetProperty(profile, instance, 'rcon.port');
+    final password = _instanceGetProperty(profile, instance, 'rcon.password');
+    final enabled = _instanceGetProperty(profile, instance, 'enable-rcon');
+    if (enabled?.toLowerCase() != 'true' ||
+        portRaw == null ||
+        password == null ||
+        password.isEmpty) {
+      return null;
+    }
+    final port = int.tryParse(portRaw);
+    if (port == null) {
+      return null;
+    }
+    final host = _instanceGetServerIp(profile, instance);
+    final response = await RconClient.command(
+      host == '0.0.0.0' ? '127.0.0.1' : host,
+      port,
+      password,
+      'tps',
+      timeout: const Duration(milliseconds: 900),
+    );
+    return parseTps(response);
+  }
+
+  /// Emits one tab-separated line per instance with live metrics for the
+  /// dashboard: name, state, port, locked, players, max, version, tps. Running
+  /// servers are pinged (and RCON-queried for TPS) concurrently with short
+  /// timeouts so the whole sweep stays within ~1s.
+  Future<int> _runtimeMetrics(
+    ConsumerProfile profile,
+    _NativeIoBuffer io,
+  ) async {
+    final names = _instanceNames(profile);
+    final lines = await Future.wait(
+      names.map((name) async {
+        final state = await _runtimeStateOf(profile, name);
+        final port = _instanceGetServerPort(profile, name);
+        final locked = _instanceLocked(profile, name) ? 'locked' : 'unlocked';
+        final live =
+            state != RuntimeState.stopped && state != RuntimeState.stopping;
+        MinecraftPingResult? ping;
+        double? tps;
+        if (live) {
+          final host = _instanceGetServerIp(profile, name);
+          final pingFuture = pingMinecraftServer(
+            host == '0.0.0.0' ? '127.0.0.1' : host,
+            port,
+            timeout: const Duration(milliseconds: 900),
+          );
+          final tpsFuture = _instanceQueryTps(profile, name);
+          ping = await pingFuture;
+          tps = await tpsFuture;
+        }
+        final players = ping != null ? '${ping.online}' : '-';
+        final max = ping != null ? '${ping.max}' : '-';
+        final version = ping?.versionName ?? '-';
+        final tpsCell = tps != null ? tps.toStringAsFixed(1) : '-';
+        return '$name\t${state.name}\t$port\t$locked\t$players\t$max'
+            '\t$version\t$tpsCell';
+      }),
+    );
+    for (final line in lines) {
+      io.write(line);
+    }
+    return 0;
   }
 
   void _instanceSetServerPort(

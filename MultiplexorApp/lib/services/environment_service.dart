@@ -22,7 +22,9 @@ class EnvironmentService {
 
     final activeFile = File(context.activeConsumerFile);
     if (!activeFile.existsSync()) {
-      consumerService.writeActive(context.requestedConsumer ?? ConsumerProfile.plugin);
+      consumerService.writeActive(
+        context.requestedConsumer ?? ConsumerProfile.plugin,
+      );
     }
 
     _writeWorkspaceConfigIfMissing();
