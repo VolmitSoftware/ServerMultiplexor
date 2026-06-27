@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
+import 'package:yaml/yaml.dart';
 
 import '../models/consumer_profile.dart';
 import '../utils/duration_format.dart';
@@ -65,6 +66,14 @@ class NativeCommandService {
         io.write('Multiplexor CLI v0.2.0');
         io.write('Minecraft server profile manager (native mode)');
         return 0;
+      case 'doctor':
+        return _dispatchDoctor(rest, io);
+      case 'backup':
+        return _dispatchBackup(rest, io);
+      case 'template':
+        return _dispatchTemplate(rest, io);
+      case 'content':
+        return _dispatchContent(rest, io);
       case 'consumer':
         return _dispatchConsumer(rest, io);
       case 'instance':
@@ -196,6 +205,8 @@ class NativeCommandService {
         return 0;
       case 'open':
         return _dispatchInstanceOpen(profile, rest, io);
+      case 'safe-update':
+        return _dispatchInstanceSafeUpdate(profile, rest, io);
       case 'update':
         return _dispatchInstanceUpdate(profile, rest, io);
       case 'isolated':
@@ -216,7 +227,7 @@ class NativeCommandService {
         return _dispatchInstanceDeleteAll(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
+          'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|safe-update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
           2,
         );
     }
@@ -604,21 +615,197 @@ class NativeCommandService {
     final serverJar = p.join(instanceDir, 'server.jar');
     _replaceWithSymlink(serverJar, resolvedJarPath);
 
+    final nextSource = Map<String, String>.from(source);
+    nextSource
+      ..['type'] = type
+      ..['launch'] = 'jar'
+      ..['jar'] = resolvedJarPath
+      ..remove('args_file_rel')
+      ..remove('installer')
+      ..remove('jar_rel');
+    if (mcLabel != null) {
+      nextSource['mc'] = mcLabel;
+    }
     final preservedIsolated = source['isolated']?.toLowerCase() == 'true';
-    _writeServerSource(
-      instanceDir,
-      fields: <String, String>{
-        'type': type,
-        'launch': 'jar',
-        'jar': resolvedJarPath,
-        if (preservedIsolated) 'isolated': 'true',
-      },
-    );
+    if (preservedIsolated) {
+      nextSource['isolated'] = 'true';
+    } else {
+      nextSource.remove('isolated');
+    }
+    _writeServerSource(instanceDir, fields: nextSource);
     io.write(
       '[OK] $name updated to $type${mcLabel != null ? ' mc=$mcLabel' : ''}',
     );
     io.write('[INFO] server.jar -> $resolvedJarPath');
     return 0;
+  }
+
+  Future<int> _dispatchInstanceSafeUpdate(
+    ConsumerProfile profile,
+    List<String> args,
+    _NativeIoBuffer io,
+  ) async {
+    final parsed = _parseFlexibleArgs(
+      args,
+      booleanFlags: const <String>{
+        'auto-build',
+        'promote',
+        'cleanup',
+        'keep-staging',
+      },
+    );
+    if (parsed.positionals.length != 1) {
+      throw _NativeCommandException(
+        'Usage: instance safe-update <name> [--mc <version>] [--type <type>] [--jar <path>] [--auto-build] [--promote] [--cleanup] [--timeout <seconds>]',
+        2,
+      );
+    }
+
+    final name = parsed.positionals.first;
+    if (!_instanceExists(profile, name)) {
+      throw _NativeCommandException('Instance not found: $name', 2);
+    }
+    _ensureUnlocked(profile, name, action: 'safe-updated');
+
+    final timeoutSeconds = int.tryParse(parsed.option('timeout') ?? '90');
+    if (timeoutSeconds == null || timeoutSeconds < 5) {
+      throw _NativeCommandException('--timeout must be at least 5 seconds', 2);
+    }
+
+    final promote = parsed.flag('promote');
+    final cleanup =
+        parsed.flag('cleanup') || (promote && !parsed.flag('keep-staging'));
+    List<String> updateArgsFor(String target) {
+      final out = <String>[target];
+      for (final key in const <String>[
+        'type',
+        'mc',
+        'jar',
+        'loader',
+        'installer',
+      ]) {
+        final value = parsed.option(key);
+        if (value != null && value.trim().isNotEmpty) {
+          out.addAll(<String>['--$key', value.trim()]);
+        }
+      }
+      if (parsed.flag('auto-build')) {
+        out.add('--auto-build');
+      }
+      return out;
+    }
+
+    final originalPort = _instanceGetServerPort(profile, name);
+    final wasRunning = await _runtimeRunning(profile, name);
+    if (wasRunning) {
+      io.write(
+        '[INFO] Stopping $name for a consistent backup and staging clone',
+      );
+      await _runtimeStop(profile, name, io);
+    }
+
+    final backupId = await _backupCreate(
+      profile,
+      name,
+      io,
+      label: parsed.option('label') ?? 'safe-update',
+      includeLogs: false,
+      reason: 'safe-update',
+    );
+
+    final stagingBase = _sanitizeSimpleName(
+      '$name-safe-update-${_timestampId()}',
+    );
+    final staging = _uniqueInstanceName(profile, stagingBase);
+    _instanceClone(profile, name, staging, io: io);
+    final stagingPort = await _findAvailableServerPort(
+      profile,
+      staging,
+      avoidPorts: <int>{originalPort},
+    );
+    _instanceSetServerPort(profile, staging, stagingPort);
+    io.write('[INFO] Staging clone: $staging (port $stagingPort)');
+    io.write('[INFO] Safety backup: $backupId');
+
+    if (wasRunning) {
+      try {
+        await _runtimeStart(profile, name, io);
+      } catch (e) {
+        io.error(
+          '[WARN] Original instance was stopped for cloning but could not be restarted: $e',
+        );
+      }
+    }
+
+    var originalTouched = false;
+    try {
+      await _dispatchInstanceUpdate(profile, updateArgsFor(staging), io);
+      await _runtimeStart(profile, staging, io);
+      final ping = await _awaitMinecraftPing(
+        profile,
+        staging,
+        timeout: Duration(seconds: timeoutSeconds),
+      );
+      if (ping == null) {
+        io.error(
+          '[WARN] Staging server did not answer Minecraft ping within ${timeoutSeconds}s',
+        );
+        io.write('[INFO] Staging instance kept for inspection: $staging');
+        io.write('[INFO] Restore point: backup restore $name $backupId');
+        return 1;
+      }
+
+      io.write(
+        '[OK] Staging smoke test passed: ${ping.versionName} '
+        '(${ping.online}/${ping.max} players)',
+      );
+
+      if (promote) {
+        io.write('[INFO] Promoting update to $name');
+        if (await _runtimeRunning(profile, name)) {
+          await _runtimeStop(profile, name, io);
+        }
+        originalTouched = true;
+        await _dispatchInstanceUpdate(profile, updateArgsFor(name), io);
+        if (wasRunning) {
+          await _runtimeStart(profile, name, io);
+        }
+        io.write('[OK] Promoted safe update to $name');
+      } else {
+        io.write(
+          '[INFO] Original instance was not changed. Promote manually with:',
+        );
+        io.write(
+          '       ./start.sh instance safe-update $name --promote${_safeUpdateOptionSummary(parsed)}',
+        );
+      }
+
+      if (cleanup) {
+        if (await _runtimeRunning(profile, staging)) {
+          await _runtimeStop(profile, staging, io);
+        }
+        _instanceDelete(profile, staging);
+        io.write('[OK] Removed staging instance: $staging');
+      } else {
+        io.write('[INFO] Staging instance kept: $staging');
+      }
+      io.write('[INFO] Restore point: backup restore $name $backupId');
+      return 0;
+    } catch (e) {
+      if (originalTouched) {
+        io.error(
+          '[WARN] Promotion failed; restoring $name from backup $backupId',
+        );
+        await _backupRestore(profile, name, backupId, io);
+        if (wasRunning) {
+          await _runtimeStart(profile, name, io);
+        }
+      }
+      if (e is _NativeCommandException) {
+        rethrow;
+      }
+      throw _NativeCommandException('Safe update failed: $e', 1);
+    }
   }
 
   _FolderOpener? _folderOpenerCommand() {
@@ -1297,6 +1484,1826 @@ class NativeCommandService {
           2,
         );
     }
+  }
+
+  Future<int> _dispatchDoctor(List<String> args, _NativeIoBuffer io) async {
+    final parsed = _parseFlexibleArgs(
+      args,
+      booleanFlags: const <String>{'fix', 'json'},
+    );
+    if (parsed.positionals.isNotEmpty) {
+      throw _NativeCommandException('Usage: doctor [--fix] [--json]', 2);
+    }
+
+    final fix = parsed.flag('fix');
+    final json = parsed.flag('json');
+    final checks = <_DoctorCheck>[];
+
+    void add(String level, String name, String detail) {
+      checks.add(_DoctorCheck(level: level, name: name, detail: detail));
+    }
+
+    Future<void> requireTool(
+      String executable,
+      List<String> versionArgs,
+    ) async {
+      try {
+        final result = await Process.run(executable, versionArgs);
+        final output = '${result.stdout}\n${result.stderr}'
+            .split('\n')
+            .map((line) => line.trim())
+            .where((line) => line.isNotEmpty)
+            .join(' ');
+        if (result.exitCode == 0) {
+          add('PASS', executable, output.isEmpty ? 'available' : output);
+        } else {
+          add('FAIL', executable, 'command exited ${result.exitCode}');
+        }
+      } on ProcessException catch (e) {
+        add('FAIL', executable, e.message);
+      } catch (e) {
+        add('FAIL', executable, '$e');
+      }
+    }
+
+    if (fix) {
+      for (final profile in ConsumerProfile.values) {
+        consumerService.ensureConsumerDirs(profile);
+        final active = _currentInstance(profile);
+        if (active != null && _instanceExists(profile, active)) {
+          _instanceActivate(profile, active);
+        }
+      }
+    }
+
+    final root = Directory(context.rootDir);
+    add(root.existsSync() ? 'PASS' : 'FAIL', 'workspace root', context.rootDir);
+
+    final marker = File(
+      p.join(context.rootDir, '.multiplexor', 'workspace.yaml'),
+    );
+    add(
+      marker.existsSync() ? 'PASS' : 'WARN',
+      'workspace marker',
+      marker.existsSync() ? marker.path : 'missing .multiplexor/workspace.yaml',
+    );
+
+    final stateDir = Directory(p.join(context.rootDir, '.manager-state'));
+    add(
+      stateDir.existsSync() ? 'PASS' : 'FAIL',
+      'manager state',
+      stateDir.path,
+    );
+
+    final activeProfile = _activeConsumer;
+    add('PASS', 'active consumer', activeProfile.shortName);
+    final consumerRoot = Directory(_consumerRoot(activeProfile));
+    add(
+      consumerRoot.existsSync() ? 'PASS' : 'FAIL',
+      'consumer root',
+      consumerRoot.path,
+    );
+
+    for (final profile in ConsumerProfile.values) {
+      final instances = Directory(_instancesDir(profile));
+      add(
+        instances.existsSync() ? 'PASS' : 'WARN',
+        '${profile.shortName} instances',
+        instances.path,
+      );
+      final current = _currentInstance(profile);
+      if (current != null && current.isNotEmpty) {
+        add(
+          _instanceExists(profile, current) ? 'PASS' : 'FAIL',
+          '${profile.shortName} active instance',
+          current,
+        );
+      }
+    }
+
+    await requireTool('dart', const <String>['--version']);
+    await requireTool('java', const <String>['-version']);
+    await requireTool('git', const <String>['--version']);
+    await requireTool('tmux', const <String>['-V']);
+
+    final seenPorts = <int, String>{};
+    for (final profile in ConsumerProfile.values) {
+      for (final instance in _instanceNames(profile)) {
+        final sourceFile = File(
+          p.join(_instanceDir(profile, instance), '.server-source'),
+        );
+        add(
+          sourceFile.existsSync() ? 'PASS' : 'WARN',
+          '${profile.shortName}/$instance source metadata',
+          sourceFile.existsSync() ? sourceFile.path : 'missing .server-source',
+        );
+
+        final port = _instanceGetServerPort(profile, instance);
+        final owner = seenPorts[port];
+        if (owner == null) {
+          seenPorts[port] = '${profile.shortName}/$instance';
+        } else {
+          add(
+            'WARN',
+            'duplicate configured port',
+            '$port used by $owner and ${profile.shortName}/$instance',
+          );
+        }
+
+        if (await _runtimeRunning(profile, instance) &&
+            await _runtimeSocketPortInUse(port)) {
+          add('PASS', '${profile.shortName}/$instance port', '$port is bound');
+        }
+      }
+    }
+
+    final rootActiveLink = _rootActiveInstanceLink();
+    if (_isLink(rootActiveLink)) {
+      final target = _resolveLinkTargetAbsolute(rootActiveLink);
+      add(
+        target != null && Directory(target).existsSync() ? 'PASS' : 'WARN',
+        'root active-instance link',
+        target ?? 'unresolved',
+      );
+    }
+
+    if (json) {
+      io.write(
+        jsonEncode(<String, dynamic>{
+          'root': context.rootDir,
+          'active_consumer': activeProfile.shortName,
+          'checks': checks
+              .map(
+                (check) => <String, String>{
+                  'level': check.level,
+                  'name': check.name,
+                  'detail': check.detail,
+                },
+              )
+              .toList(growable: false),
+        }),
+      );
+    } else {
+      io.write('Multiplexor doctor');
+      io.write('workspace: ${context.rootDir}');
+      io.write('consumer:  ${activeProfile.shortName}');
+      io.write('');
+      for (final check in checks) {
+        io.write('[${check.level}] ${check.name}: ${check.detail}');
+      }
+    }
+
+    return checks.any((check) => check.level == 'FAIL') ? 1 : 0;
+  }
+
+  Future<int> _dispatchBackup(List<String> args, _NativeIoBuffer io) async {
+    final sub = args.isEmpty ? 'list' : args.first;
+    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
+    final profile = _activeConsumer;
+
+    switch (sub) {
+      case 'create':
+        final parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'include-logs'},
+        );
+        if (parsed.positionals.length > 1) {
+          throw _NativeCommandException(
+            'Usage: backup create [instance] [--label <label>] [--include-logs]',
+            2,
+          );
+        }
+        final instance = parsed.positionals.isNotEmpty
+            ? parsed.positionals.first
+            : _currentInstance(profile);
+        if (instance == null || instance.isEmpty) {
+          throw _NativeCommandException('No active instance set', 2);
+        }
+        final id = await _backupCreate(
+          profile,
+          instance,
+          io,
+          label: parsed.option('label'),
+          includeLogs: parsed.flag('include-logs'),
+          reason: 'manual',
+        );
+        io.write('[OK] Backup created: $id');
+        return 0;
+      case 'list':
+        final parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'all'},
+        );
+        if (parsed.positionals.length > 1) {
+          throw _NativeCommandException(
+            'Usage: backup list [instance|--all]',
+            2,
+          );
+        }
+        final target = parsed.flag('all')
+            ? null
+            : (parsed.positionals.isNotEmpty ? parsed.positionals.first : null);
+        _backupList(profile, target, io);
+        return 0;
+      case 'restore':
+        final parsed = _parseFlexibleArgs(rest);
+        String? instance;
+        String? id;
+        if (parsed.positionals.length == 1) {
+          id = parsed.positionals[0];
+          instance = parsed.option('instance') ?? _currentInstance(profile);
+        } else if (parsed.positionals.length == 2) {
+          instance = parsed.positionals[0];
+          id = parsed.positionals[1];
+        }
+        if (instance == null || id == null) {
+          throw _NativeCommandException(
+            'Usage: backup restore [instance] <backup-id>',
+            2,
+          );
+        }
+        await _backupRestore(profile, instance, id, io);
+        io.write('[OK] Restored $instance from backup $id');
+        return 0;
+      case 'delete':
+        final parsed = _parseFlexibleArgs(rest);
+        final (instance, id) = _backupResolveInstanceAndId(parsed);
+        final backup = _findBackup(profile, id, instance: instance);
+        _deletePathEntity(backup.path, recursive: true);
+        io.write('[OK] Deleted backup: ${backup.instance}/${backup.id}');
+        return 0;
+      case 'verify':
+        final parsed = _parseFlexibleArgs(rest);
+        final (instance, id) = _backupResolveInstanceAndId(parsed);
+        final backup = _findBackup(profile, id, instance: instance);
+        _backupVerify(backup);
+        io.write('[OK] Backup verified: ${backup.instance}/${backup.id}');
+        return 0;
+      case 'prune':
+        final parsed = _parseFlexibleArgs(rest);
+        final keepRaw = parsed.option('keep') ?? '10';
+        final keep = int.tryParse(keepRaw);
+        if (keep == null || keep < 0) {
+          throw _NativeCommandException(
+            '--keep must be a non-negative integer',
+            2,
+          );
+        }
+        final instance = parsed.positionals.isEmpty
+            ? null
+            : parsed.positionals.first;
+        final deleted = _backupPrune(profile, keep: keep, instance: instance);
+        io.write('[OK] Pruned $deleted backup(s)');
+        return 0;
+      default:
+        throw _NativeCommandException(
+          'Usage: backup <create|list|restore|delete|prune|verify> ...',
+          2,
+        );
+    }
+  }
+
+  Future<int> _dispatchTemplate(List<String> args, _NativeIoBuffer io) async {
+    final sub = args.isEmpty ? 'list' : args.first;
+    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
+    final profile = _activeConsumer;
+
+    switch (sub) {
+      case 'list':
+        final dir = Directory(_templatesDir());
+        if (!dir.existsSync()) {
+          io.write('(none)');
+          return 0;
+        }
+        final names =
+            dir
+                .listSync()
+                .whereType<File>()
+                .where((file) => file.path.endsWith('.yaml'))
+                .map((file) => p.basenameWithoutExtension(file.path))
+                .toList(growable: false)
+              ..sort();
+        if (names.isEmpty) {
+          io.write('(none)');
+        } else {
+          for (final name in names) {
+            io.write(name);
+          }
+        }
+        return 0;
+      case 'init':
+        final parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'isolated'},
+        );
+        if (parsed.positionals.length != 1) {
+          throw _NativeCommandException(
+            'Usage: template init <name> [--type <type>] [--mc <version>] [--heap <size>] [--preset <name>] [--isolated]',
+            2,
+          );
+        }
+        final name = _validateSimpleName(
+          parsed.positionals.first,
+          label: 'template',
+        );
+        final path = _templatePath(name);
+        if (File(path).existsSync()) {
+          throw _NativeCommandException('Template already exists: $name', 2);
+        }
+        final template = <String, dynamic>{
+          'name': name,
+          'type': parsed.option('type') ?? 'purpur',
+          if (parsed.option('mc') != null) 'mc': parsed.option('mc'),
+          if (parsed.option('heap') != null) 'heap': parsed.option('heap'),
+          if (parsed.option('preset') != null)
+            'jvm_preset': parsed.option('preset'),
+          'isolated': parsed.flag('isolated'),
+          'server_properties': <String, String>{'server-port': '25565'},
+          'dropins': <String, dynamic>{'clean': false},
+        };
+        _writeYamlMap(File(path), template);
+        io.write('[OK] Template created: $name');
+        io.write('[INFO] $path');
+        return 0;
+      case 'show':
+        final name = _requireTemplateName(rest, 'Usage: template show <name>');
+        final file = File(_templatePath(name));
+        if (!file.existsSync()) {
+          throw _NativeCommandException('Template not found: $name', 2);
+        }
+        io.write(file.readAsStringSync().trimRight());
+        return 0;
+      case 'delete':
+        final name = _requireTemplateName(
+          rest,
+          'Usage: template delete <name>',
+        );
+        final file = File(_templatePath(name));
+        if (!file.existsSync()) {
+          throw _NativeCommandException('Template not found: $name', 2);
+        }
+        file.deleteSync();
+        io.write('[OK] Template deleted: $name');
+        return 0;
+      case 'export':
+        if (rest.length != 2) {
+          throw _NativeCommandException(
+            'Usage: template export <instance> <template-name>',
+            2,
+          );
+        }
+        final instance = rest[0];
+        final name = _validateSimpleName(rest[1], label: 'template');
+        if (!_instanceExists(profile, instance)) {
+          throw _NativeCommandException('Instance not found: $instance', 2);
+        }
+        final template = _templateFromInstance(profile, instance, name);
+        final path = _templatePath(name);
+        _writeYamlMap(File(path), template);
+        io.write('[OK] Exported template: $name');
+        io.write('[INFO] $path');
+        return 0;
+      case 'apply':
+        final parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'auto-build', 'sync'},
+        );
+        if (parsed.positionals.length != 2) {
+          throw _NativeCommandException(
+            'Usage: template apply <template-name> <instance> [--auto-build] [--sync]',
+            2,
+          );
+        }
+        final name = _validateSimpleName(
+          parsed.positionals[0],
+          label: 'template',
+        );
+        final instance = parsed.positionals[1];
+        final template = _loadTemplate(name);
+        await _templateApply(profile, name, template, instance, parsed, io);
+        io.write('[OK] Template applied: $name -> $instance');
+        return 0;
+      default:
+        throw _NativeCommandException(
+          'Usage: template <list|init|show|apply|export|delete> ...',
+          2,
+        );
+    }
+  }
+
+  Future<int> _dispatchContent(List<String> args, _NativeIoBuffer io) async {
+    final sub = args.isEmpty ? 'list' : args.first;
+    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
+    final profile = _activeConsumer;
+
+    switch (sub) {
+      case 'search':
+        final parsed = _parseFlexibleArgs(rest);
+        final query = parsed.positionals.join(' ').trim();
+        if (query.isEmpty) {
+          throw _NativeCommandException('Usage: content search <query>', 2);
+        }
+        await _contentSearch(profile, query, io);
+        return 0;
+      case 'install':
+        final parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'sync'},
+        );
+        if (parsed.positionals.length != 1) {
+          throw _NativeCommandException(
+            'Usage: content install <modrinth-slug|url> [--mc <version>] [--loader <loader>] [--name <alias>] [--sync]',
+            2,
+          );
+        }
+        final input = parsed.positionals.first;
+        if (_looksLikeUrl(input) || parsed.option('source') == 'url') {
+          await _contentInstallUrl(profile, input, parsed, io);
+        } else {
+          await _contentInstallModrinth(profile, input, parsed, io);
+        }
+        if (parsed.flag('sync')) {
+          await _contentSync(profile, null, all: true, clean: false, io: io);
+        }
+        return 0;
+      case 'list':
+        _contentList(profile, io);
+        return 0;
+      case 'remove':
+        final parsed = _parseFlexibleArgs(rest);
+        if (parsed.positionals.length != 1) {
+          throw _NativeCommandException('Usage: content remove <name>', 2);
+        }
+        _contentRemove(profile, parsed.positionals.first, io);
+        return 0;
+      case 'update':
+        final parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'all', 'sync'},
+        );
+        if (parsed.positionals.length > 1) {
+          throw _NativeCommandException(
+            'Usage: content update [name|--all] [--sync]',
+            2,
+          );
+        }
+        await _contentUpdate(
+          profile,
+          parsed.flag('all') || parsed.positionals.isEmpty
+              ? null
+              : parsed.positionals.first,
+          io,
+        );
+        if (parsed.flag('sync')) {
+          await _contentSync(profile, null, all: true, clean: false, io: io);
+        }
+        return 0;
+      case 'sync':
+        final parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'all', 'clean'},
+        );
+        if (parsed.positionals.length > 1) {
+          throw _NativeCommandException(
+            'Usage: content sync [instance|--all] [--clean]',
+            2,
+          );
+        }
+        await _contentSync(
+          profile,
+          parsed.positionals.isEmpty ? null : parsed.positionals.first,
+          all: parsed.flag('all'),
+          clean: parsed.flag('clean'),
+          io: io,
+        );
+        return 0;
+      default:
+        throw _NativeCommandException(
+          'Usage: content <search|install|list|update|remove|sync> ...',
+          2,
+        );
+    }
+  }
+
+  _FlexibleArgs _parseFlexibleArgs(
+    List<String> args, {
+    Set<String> booleanFlags = const <String>{},
+  }) {
+    final options = <String, String>{};
+    final flags = <String, bool>{};
+    final positionals = <String>[];
+
+    for (var i = 0; i < args.length; i++) {
+      final token = args[i];
+      if (!token.startsWith('--')) {
+        positionals.add(token);
+        continue;
+      }
+
+      final raw = token.substring(2);
+      if (raw.contains('=')) {
+        final eq = raw.indexOf('=');
+        final key = raw.substring(0, eq);
+        final value = raw.substring(eq + 1);
+        if (booleanFlags.contains(key)) {
+          flags[key] = _parseFlagValue(value);
+        } else {
+          options[key] = value;
+        }
+        continue;
+      }
+
+      if (booleanFlags.contains(raw)) {
+        flags[raw] = true;
+        continue;
+      }
+
+      if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
+        options[raw] = args[i + 1];
+        i++;
+      } else {
+        flags[raw] = true;
+      }
+    }
+
+    return _FlexibleArgs(
+      options: options,
+      flags: flags,
+      positionals: positionals,
+    );
+  }
+
+  bool _parseFlagValue(String value) {
+    final normalized = value.trim().toLowerCase();
+    return normalized != 'false' &&
+        normalized != '0' &&
+        normalized != 'no' &&
+        normalized != 'off';
+  }
+
+  String _timestampId() {
+    final now = DateTime.now().toUtc();
+    String two(int value) => value.toString().padLeft(2, '0');
+    String three(int value) => value.toString().padLeft(3, '0');
+    return '${now.year}${two(now.month)}${two(now.day)}T'
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}'
+        '${three(now.millisecond)}Z';
+  }
+
+  String _sanitizeSimpleName(String value, {String fallback = 'item'}) {
+    final sanitized = value
+        .trim()
+        .replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '-')
+        .replaceAll(RegExp(r'-+'), '-')
+        .replaceAll(RegExp(r'^[-.]+|[-.]+$'), '');
+    return sanitized.isEmpty ? fallback : sanitized;
+  }
+
+  String _validateSimpleName(String value, {required String label}) {
+    final name = value.trim();
+    if (name.isEmpty || name != _sanitizeSimpleName(name)) {
+      throw _NativeCommandException(
+        '$label name must contain only letters, numbers, dot, underscore, or dash',
+        2,
+      );
+    }
+    return name;
+  }
+
+  String _uniqueInstanceName(ConsumerProfile profile, String base) {
+    var candidate = _sanitizeSimpleName(base, fallback: 'instance');
+    if (!_instanceExists(profile, candidate)) {
+      return candidate;
+    }
+    for (var i = 2; i < 1000; i++) {
+      final next = '$candidate-$i';
+      if (!_instanceExists(profile, next)) {
+        return next;
+      }
+    }
+    throw _NativeCommandException('Could not find a free instance name', 1);
+  }
+
+  String _safeUpdateOptionSummary(_FlexibleArgs parsed) {
+    final out = <String>[];
+    for (final key in const <String>[
+      'type',
+      'mc',
+      'jar',
+      'loader',
+      'installer',
+      'timeout',
+    ]) {
+      final value = parsed.option(key);
+      if (value != null && value.trim().isNotEmpty) {
+        out.add('--$key ${_shellQuote(value.trim())}');
+      }
+    }
+    if (parsed.flag('auto-build')) {
+      out.add('--auto-build');
+    }
+    return out.isEmpty ? '' : ' ${out.join(' ')}';
+  }
+
+  Future<int> _findAvailableServerPort(
+    ConsumerProfile profile,
+    String instance, {
+    Set<int> avoidPorts = const <int>{},
+  }) async {
+    final configured = <int>{...avoidPorts};
+    for (final candidateProfile in ConsumerProfile.values) {
+      for (final other in _instanceNames(candidateProfile)) {
+        if (candidateProfile == profile && other == instance) {
+          continue;
+        }
+        configured.add(_instanceGetServerPort(candidateProfile, other));
+      }
+    }
+
+    for (var port = 25565; port <= 65535; port++) {
+      if (configured.contains(port)) {
+        continue;
+      }
+      if (!await _runtimeSocketPortInUse(port)) {
+        return port;
+      }
+    }
+    throw _NativeCommandException('No available port found in 25565-65535', 2);
+  }
+
+  Future<MinecraftPingResult?> _awaitMinecraftPing(
+    ConsumerProfile profile,
+    String instance, {
+    required Duration timeout,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final host = _instanceGetServerIp(profile, instance);
+      final port = _instanceGetServerPort(profile, instance);
+      final ping = await pingMinecraftServer(
+        host == '0.0.0.0' ? '127.0.0.1' : host,
+        port,
+        timeout: const Duration(milliseconds: 1200),
+      );
+      if (ping != null) {
+        return ping;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    return null;
+  }
+
+  String _backupsDir(ConsumerProfile profile) {
+    return p.join(_consumerRoot(profile), 'backups');
+  }
+
+  Future<String> _backupCreate(
+    ConsumerProfile profile,
+    String instance,
+    _NativeIoBuffer io, {
+    String? label,
+    required bool includeLogs,
+    required String reason,
+  }) {
+    if (!_instanceExists(profile, instance)) {
+      throw _NativeCommandException('Instance not found: $instance', 2);
+    }
+
+    final safeLabel = label == null || label.trim().isEmpty
+        ? ''
+        : '-${_sanitizeSimpleName(label, fallback: 'backup')}';
+    final id = '${_timestampId()}$safeLabel';
+    final backupDir = p.join(_backupsDir(profile), instance, id);
+    final snapshotDir = p.join(backupDir, 'snapshot');
+    Directory(snapshotDir).createSync(recursive: true);
+
+    _copyDirectoryFilteredForBackup(
+      Directory(_instanceDir(profile, instance)),
+      Directory(snapshotDir),
+      includeLogs: includeLogs,
+    );
+
+    final manifest = <String, dynamic>{
+      'version': 1,
+      'id': id,
+      'consumer': profile.shortName,
+      'instance': instance,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+      'label': label?.trim() ?? '',
+      'reason': reason,
+      'include_logs': includeLogs,
+      'snapshot': 'snapshot',
+      'entries': _backupManifestEntries(snapshotDir),
+    };
+    File(p.join(backupDir, 'manifest.json')).writeAsStringSync(
+      '${const JsonEncoder.withIndent('  ').convert(manifest)}\n',
+    );
+    io.write('[INFO] Backup path: $backupDir');
+    return Future<String>.value(id);
+  }
+
+  void _copyDirectoryFilteredForBackup(
+    Directory src,
+    Directory dst, {
+    required bool includeLogs,
+  }) {
+    if (!src.existsSync()) {
+      return;
+    }
+    dst.createSync(recursive: true);
+    for (final entity in src.listSync(recursive: false, followLinks: false)) {
+      final base = p.basename(entity.path);
+      if (!includeLogs && base == 'logs') {
+        continue;
+      }
+      final target = p.join(dst.path, base);
+      final type = FileSystemEntity.typeSync(entity.path, followLinks: false);
+      switch (type) {
+        case FileSystemEntityType.directory:
+          _copyDirectoryFilteredForBackup(
+            Directory(entity.path),
+            Directory(target),
+            includeLogs: includeLogs,
+          );
+          break;
+        case FileSystemEntityType.file:
+          File(target).createSync(recursive: true);
+          File(entity.path).copySync(target);
+          break;
+        case FileSystemEntityType.link:
+          _replaceWithSymlink(target, Link(entity.path).targetSync());
+          break;
+        case FileSystemEntityType.pipe:
+        case FileSystemEntityType.unixDomainSock:
+        case FileSystemEntityType.notFound:
+          break;
+      }
+    }
+  }
+
+  List<Map<String, dynamic>> _backupManifestEntries(String snapshotDir) {
+    final entries = <Map<String, dynamic>>[];
+    void walk(String dirPath) {
+      for (final entity in Directory(dirPath).listSync(followLinks: false)) {
+        final rel = p.relative(entity.path, from: snapshotDir);
+        final type = FileSystemEntity.typeSync(entity.path, followLinks: false);
+        switch (type) {
+          case FileSystemEntityType.file:
+            final file = File(entity.path);
+            final stat = file.statSync();
+            entries.add(<String, dynamic>{
+              'path': rel,
+              'type': 'file',
+              'size': stat.size,
+              'sha256': _sha256File(file),
+            });
+            break;
+          case FileSystemEntityType.link:
+            entries.add(<String, dynamic>{
+              'path': rel,
+              'type': 'link',
+              'target': Link(entity.path).targetSync(),
+            });
+            break;
+          case FileSystemEntityType.directory:
+            walk(entity.path);
+            break;
+          case FileSystemEntityType.pipe:
+          case FileSystemEntityType.unixDomainSock:
+          case FileSystemEntityType.notFound:
+            break;
+        }
+      }
+    }
+
+    walk(snapshotDir);
+    entries.sort(
+      (a, b) => a['path'].toString().compareTo(b['path'].toString()),
+    );
+    return entries;
+  }
+
+  String _sha256File(File file) {
+    return sha256.convert(file.readAsBytesSync()).toString();
+  }
+
+  List<_BackupEntry> _backupEntries(
+    ConsumerProfile profile, {
+    String? instance,
+  }) {
+    final root = Directory(_backupsDir(profile));
+    if (!root.existsSync()) {
+      return const <_BackupEntry>[];
+    }
+    final entries = <_BackupEntry>[];
+    final instanceDirs = instance != null
+        ? <Directory>[Directory(p.join(root.path, instance))]
+        : root.listSync(followLinks: false).whereType<Directory>().toList();
+    for (final instanceDir in instanceDirs) {
+      if (!instanceDir.existsSync()) {
+        continue;
+      }
+      final instanceName = p.basename(instanceDir.path);
+      for (final backupDir
+          in instanceDir.listSync(followLinks: false).whereType<Directory>()) {
+        entries.add(
+          _BackupEntry(
+            profile: profile,
+            instance: instanceName,
+            id: p.basename(backupDir.path),
+            path: backupDir.path,
+          ),
+        );
+      }
+    }
+    entries.sort((a, b) {
+      final byInstance = a.instance.compareTo(b.instance);
+      return byInstance != 0 ? byInstance : b.id.compareTo(a.id);
+    });
+    return entries;
+  }
+
+  void _backupList(
+    ConsumerProfile profile,
+    String? instance,
+    _NativeIoBuffer io,
+  ) {
+    final entries = _backupEntries(profile, instance: instance);
+    if (entries.isEmpty) {
+      io.write('(none)');
+      return;
+    }
+    for (final entry in entries) {
+      final manifest = entry.manifest;
+      final label = manifest['label']?.toString().trim() ?? '';
+      final created = manifest['created_at']?.toString().trim() ?? entry.id;
+      final suffix = label.isEmpty ? '' : ' label=$label';
+      io.write('${entry.instance}/${entry.id}  $created$suffix');
+    }
+  }
+
+  (String?, String) _backupResolveInstanceAndId(_FlexibleArgs parsed) {
+    if (parsed.positionals.length == 1) {
+      return (parsed.option('instance'), parsed.positionals.first);
+    }
+    if (parsed.positionals.length == 2) {
+      return (parsed.positionals.first, parsed.positionals[1]);
+    }
+    throw _NativeCommandException(
+      'Usage: backup <delete|verify> [instance] <backup-id>',
+      2,
+    );
+  }
+
+  _BackupEntry _findBackup(
+    ConsumerProfile profile,
+    String id, {
+    String? instance,
+  }) {
+    if (id.contains('/') || id.contains('\\') || id.contains('..')) {
+      throw _NativeCommandException('Invalid backup id: $id', 2);
+    }
+    final matches = _backupEntries(
+      profile,
+      instance: instance,
+    ).where((entry) => entry.id == id).toList(growable: false);
+    if (matches.isEmpty) {
+      throw _NativeCommandException('Backup not found: $id', 2);
+    }
+    if (matches.length > 1) {
+      throw _NativeCommandException(
+        'Backup id $id exists for multiple instances. Use: backup <command> <instance> $id',
+        2,
+      );
+    }
+    return matches.single;
+  }
+
+  Future<void> _backupRestore(
+    ConsumerProfile profile,
+    String instance,
+    String id,
+    _NativeIoBuffer io,
+  ) async {
+    final backup = _findBackup(profile, id, instance: instance);
+    final snapshot = Directory(p.join(backup.path, 'snapshot'));
+    if (!snapshot.existsSync()) {
+      throw _NativeCommandException(
+        'Backup snapshot is missing: ${backup.path}',
+        1,
+      );
+    }
+
+    if (_instanceExists(profile, instance)) {
+      _ensureUnlocked(profile, instance, action: 'restored');
+      if (await _runtimeRunning(profile, instance)) {
+        await _runtimeStop(profile, instance, io);
+      }
+    }
+
+    _backupVerify(backup);
+
+    final target = _instanceDir(profile, instance);
+    final tmp = '$target.restore-${DateTime.now().millisecondsSinceEpoch}';
+    _deletePathEntity(tmp, recursive: true);
+    _copyDirectory(snapshot, Directory(tmp));
+    _deletePathEntity(target, recursive: true);
+    try {
+      Directory(tmp).renameSync(target);
+    } catch (_) {
+      _copyDirectory(Directory(tmp), Directory(target));
+      _deletePathEntity(tmp, recursive: true);
+    }
+    _instanceEnsureRestartScript(profile, instance);
+    if (!_instanceIsolated(profile, instance)) {
+      _instanceEnsureSharedPluginOps(profile, instance, io: io);
+    }
+    if (_currentInstance(profile) == instance) {
+      _instanceActivate(profile, instance);
+    }
+  }
+
+  void _backupVerify(_BackupEntry backup) {
+    final manifest = backup.manifest;
+    final snapshotDir = p.join(
+      backup.path,
+      manifest['snapshot']?.toString() ?? 'snapshot',
+    );
+    final entries = manifest['entries'];
+    if (entries is! List) {
+      throw _NativeCommandException(
+        'Invalid backup manifest: ${backup.path}',
+        1,
+      );
+    }
+    for (final raw in entries) {
+      if (raw is! Map) {
+        continue;
+      }
+      final rel = raw['path']?.toString() ?? '';
+      final type = raw['type']?.toString() ?? '';
+      if (rel.isEmpty) {
+        continue;
+      }
+      final path = p.join(snapshotDir, rel);
+      if (type == 'file') {
+        final file = File(path);
+        if (!file.existsSync()) {
+          throw _NativeCommandException('Backup file missing: $rel', 1);
+        }
+        final expected = raw['sha256']?.toString() ?? '';
+        if (expected.isNotEmpty && _sha256File(file) != expected) {
+          throw _NativeCommandException('Backup checksum mismatch: $rel', 1);
+        }
+      } else if (type == 'link') {
+        if (!_isLink(path)) {
+          throw _NativeCommandException('Backup link missing: $rel', 1);
+        }
+      }
+    }
+  }
+
+  int _backupPrune(
+    ConsumerProfile profile, {
+    required int keep,
+    String? instance,
+  }) {
+    final byInstance = <String, List<_BackupEntry>>{};
+    for (final entry in _backupEntries(profile, instance: instance)) {
+      byInstance.putIfAbsent(entry.instance, () => <_BackupEntry>[]).add(entry);
+    }
+    var deleted = 0;
+    for (final entries in byInstance.values) {
+      entries.sort((a, b) => b.id.compareTo(a.id));
+      for (final entry in entries.skip(keep)) {
+        _deletePathEntity(entry.path, recursive: true);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  String _templatesDir() {
+    return p.join(context.rootDir, '.multiplexor', 'templates');
+  }
+
+  String _templatePath(String name) {
+    return p.join(_templatesDir(), '$name.yaml');
+  }
+
+  String _requireTemplateName(List<String> args, String usage) {
+    if (args.length != 1) {
+      throw _NativeCommandException(usage, 2);
+    }
+    return _validateSimpleName(args.first, label: 'template');
+  }
+
+  Map<String, dynamic> _loadTemplate(String name) {
+    final file = File(_templatePath(name));
+    if (!file.existsSync()) {
+      throw _NativeCommandException('Template not found: $name', 2);
+    }
+    final parsed = _yamlToDart(loadYaml(file.readAsStringSync()));
+    if (parsed is! Map) {
+      throw _NativeCommandException('Template must be a YAML map: $name', 2);
+    }
+    return Map<String, dynamic>.from(parsed);
+  }
+
+  dynamic _yamlToDart(dynamic value) {
+    if (value is YamlMap) {
+      return <String, dynamic>{
+        for (final entry in value.entries)
+          entry.key.toString(): _yamlToDart(entry.value),
+      };
+    }
+    if (value is YamlList) {
+      return value.map(_yamlToDart).toList(growable: false);
+    }
+    return value;
+  }
+
+  void _writeYamlMap(File file, Map<String, dynamic> map) {
+    file.parent.createSync(recursive: true);
+    file.writeAsStringSync('${_yamlFormatMap(map, 0)}\n');
+  }
+
+  String _yamlFormatMap(Map<String, dynamic> map, int indent) {
+    if (map.isEmpty) {
+      return '${''.padLeft(indent)}{}';
+    }
+    final lines = <String>[];
+    final spaces = ''.padLeft(indent);
+    for (final entry in map.entries) {
+      final key = _yamlKey(entry.key);
+      final value = entry.value;
+      if (_yamlIsScalar(value)) {
+        lines.add('$spaces$key: ${_yamlScalar(value)}');
+      } else {
+        lines.add('$spaces$key:');
+        lines.add(_yamlFormat(value, indent + 2));
+      }
+    }
+    return lines.join('\n');
+  }
+
+  String _yamlFormat(dynamic value, int indent) {
+    final spaces = ''.padLeft(indent);
+    if (value is Map) {
+      return _yamlFormatMap(Map<String, dynamic>.from(value), indent);
+    }
+    if (value is List) {
+      if (value.isEmpty) {
+        return '$spaces[]';
+      }
+      final lines = <String>[];
+      for (final item in value) {
+        if (_yamlIsScalar(item)) {
+          lines.add('$spaces- ${_yamlScalar(item)}');
+        } else {
+          lines.add('$spaces-');
+          lines.add(_yamlFormat(item, indent + 2));
+        }
+      }
+      return lines.join('\n');
+    }
+    return '$spaces${_yamlScalar(value)}';
+  }
+
+  bool _yamlIsScalar(dynamic value) {
+    return value == null || value is String || value is num || value is bool;
+  }
+
+  String _yamlScalar(dynamic value) {
+    if (value == null) {
+      return 'null';
+    }
+    if (value is bool || value is num) {
+      return value.toString();
+    }
+    final text = value.toString();
+    if (RegExp(r'^[A-Za-z0-9._/@:+-]+$').hasMatch(text) &&
+        text != 'null' &&
+        text != 'true' &&
+        text != 'false') {
+      return text;
+    }
+    return jsonEncode(text);
+  }
+
+  String _yamlKey(String key) {
+    return RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(key) ? key : jsonEncode(key);
+  }
+
+  Map<String, dynamic> _templateFromInstance(
+    ConsumerProfile profile,
+    String instance,
+    String name,
+  ) {
+    final source = _serverSource(profile, instance);
+    final settings = _runtimeSettingsLoad(profile);
+    final jar = source['jar'] ?? source['installer'];
+    return <String, dynamic>{
+      'name': name,
+      'type': source['type'] ?? 'custom',
+      if (source['mc'] != null) 'mc': source['mc'],
+      if (jar != null && (source['type'] ?? '') == 'custom') 'jar': jar,
+      'heap': settings.heap,
+      'jvm_preset': settings.profile,
+      'isolated': _instanceIsolated(profile, instance),
+      'server_properties': _readServerPropertiesMap(profile, instance),
+      'dropins': <String, dynamic>{'clean': false},
+    };
+  }
+
+  Map<String, String> _readServerPropertiesMap(
+    ConsumerProfile profile,
+    String instance,
+  ) {
+    final file = File(_instanceServerProperties(profile, instance));
+    if (!file.existsSync()) {
+      return const <String, String>{};
+    }
+    final out = <String, String>{};
+    for (final raw in file.readAsLinesSync()) {
+      final line = raw.trim();
+      if (line.isEmpty || line.startsWith('#') || !line.contains('=')) {
+        continue;
+      }
+      final idx = line.indexOf('=');
+      out[line.substring(0, idx)] = line.substring(idx + 1);
+    }
+    return out;
+  }
+
+  Future<void> _templateApply(
+    ConsumerProfile profile,
+    String templateName,
+    Map<String, dynamic> template,
+    String instance,
+    _FlexibleArgs parsed,
+    _NativeIoBuffer io,
+  ) async {
+    final type =
+        (template['type']?.toString().trim().toLowerCase() ?? 'purpur');
+    if (type != 'custom') {
+      final expected = _consumerForServerType(type);
+      if (expected != profile) {
+        throw _NativeCommandException(
+          'Template $templateName targets $type. Switch consumer first: consumer use ${expected.shortName}',
+          2,
+        );
+      }
+    }
+
+    final createArgs = <String>['create', instance, '--type', type];
+    void addOption(String key, String cliName) {
+      final value = template[key]?.toString().trim();
+      if (value != null && value.isNotEmpty) {
+        createArgs.addAll(<String>['--$cliName', value]);
+      }
+    }
+
+    addOption('mc', 'mc');
+    addOption('loader', 'loader');
+    addOption('installer', 'installer');
+    addOption('jar', 'jar');
+    if (_truthy(template['isolated']) || parsed.flag('isolated')) {
+      createArgs.add('--isolated');
+    }
+    if (_truthy(template['auto_build']) || parsed.flag('auto-build')) {
+      createArgs.add('--auto-build');
+    }
+
+    await _dispatchServer(createArgs, io);
+
+    final properties = _stringMap(template['server_properties']);
+    if (properties.isNotEmpty) {
+      _applyServerProperties(profile, instance, properties);
+    }
+
+    final settings = _runtimeSettingsLoad(profile);
+    var nextSettings = settings;
+    final heap = template['heap']?.toString().trim();
+    if (heap != null && heap.isNotEmpty) {
+      if (!_runtimeHeapLooksValid(heap)) {
+        throw _NativeCommandException('Invalid template heap value: $heap', 2);
+      }
+      nextSettings = nextSettings.copyWith(heap: heap.toUpperCase());
+    }
+    final preset = template['jvm_preset']?.toString().trim().toLowerCase();
+    if (preset != null && preset.isNotEmpty) {
+      final args = _runtimeSettingsPresets[preset];
+      if (args == null) {
+        throw _NativeCommandException(
+          'Unknown template JVM preset: $preset',
+          2,
+        );
+      }
+      nextSettings = nextSettings.copyWith(profile: preset, jvmArgs: args);
+    }
+    if (nextSettings.heap != settings.heap ||
+        nextSettings.profile != settings.profile ||
+        nextSettings.jvmArgs != settings.jvmArgs) {
+      _runtimeSettingsSave(profile, nextSettings);
+      io.write('[INFO] Runtime settings updated for ${profile.shortName}');
+    }
+
+    final dropins = _mapValue(template['dropins']);
+    final cleanDropins = _truthy(dropins['clean']);
+    if (parsed.flag('sync') || cleanDropins) {
+      final report = _pluginsSyncInstance(
+        profile,
+        instance,
+        clean: cleanDropins,
+        sourceModsOverride: !_isPluginConsumer(profile),
+        strict: true,
+      );
+      io.write('[SYNC] ${report.copiedJars.length} jar(s) synced to $instance');
+    }
+  }
+
+  bool _truthy(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+    if (value is num) {
+      return value != 0;
+    }
+    final normalized = value?.toString().trim().toLowerCase() ?? '';
+    return normalized == 'true' || normalized == '1' || normalized == 'yes';
+  }
+
+  Map<String, dynamic> _mapValue(dynamic value) {
+    if (value is Map<String, dynamic>) {
+      return value;
+    }
+    if (value is Map) {
+      return Map<String, dynamic>.from(value);
+    }
+    return const <String, dynamic>{};
+  }
+
+  Map<String, String> _stringMap(dynamic value) {
+    final map = _mapValue(value);
+    return <String, String>{
+      for (final entry in map.entries)
+        entry.key.toString(): entry.value.toString(),
+    };
+  }
+
+  void _applyServerProperties(
+    ConsumerProfile profile,
+    String instance,
+    Map<String, String> overrides,
+  ) {
+    _ensureLocalServerProperties(profile, instance);
+    final file = File(_instanceServerProperties(profile, instance));
+    final lines = file.existsSync() ? file.readAsLinesSync() : <String>[];
+    final remaining = Map<String, String>.from(overrides);
+    final next = <String>[];
+    for (final raw in lines) {
+      final trimmed = raw.trim();
+      if (trimmed.startsWith('#') || !trimmed.contains('=')) {
+        next.add(raw);
+        continue;
+      }
+      final key = trimmed.substring(0, trimmed.indexOf('=')).trim();
+      if (remaining.containsKey(key)) {
+        next.add('$key=${remaining.remove(key)}');
+      } else {
+        next.add(raw);
+      }
+    }
+    for (final entry in remaining.entries) {
+      next.add('${entry.key}=${entry.value}');
+    }
+    file.writeAsStringSync('${next.join('\n')}\n');
+  }
+
+  String _contentManifestFile(ConsumerProfile profile) {
+    return p.join(_stateDir(profile), 'content-lock.yaml');
+  }
+
+  Map<String, dynamic> _contentManifestLoad(ConsumerProfile profile) {
+    final file = File(_contentManifestFile(profile));
+    if (!file.existsSync()) {
+      return <String, dynamic>{
+        'version': 1,
+        'consumer': profile.shortName,
+        'entries': <Map<String, dynamic>>[],
+      };
+    }
+    final parsed = _yamlToDart(loadYaml(file.readAsStringSync()));
+    if (parsed is! Map) {
+      throw _NativeCommandException(
+        'Invalid content lockfile: ${file.path}',
+        1,
+      );
+    }
+    final manifest = Map<String, dynamic>.from(parsed);
+    manifest['entries'] = _contentEntriesFromManifest(manifest);
+    return manifest;
+  }
+
+  List<Map<String, dynamic>> _contentEntriesFromManifest(
+    Map<String, dynamic> manifest,
+  ) {
+    final raw = manifest['entries'];
+    if (raw is! List) {
+      return <Map<String, dynamic>>[];
+    }
+    return raw
+        .whereType<Map>()
+        .map((entry) => Map<String, dynamic>.from(entry))
+        .toList(growable: true);
+  }
+
+  void _contentManifestSave(
+    ConsumerProfile profile,
+    List<Map<String, dynamic>> entries,
+  ) {
+    entries.sort(
+      (a, b) => a['name'].toString().compareTo(b['name'].toString()),
+    );
+    _writeYamlMap(File(_contentManifestFile(profile)), <String, dynamic>{
+      'version': 1,
+      'consumer': profile.shortName,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+      'entries': entries,
+    });
+  }
+
+  Future<void> _contentSearch(
+    ConsumerProfile profile,
+    String query,
+    _NativeIoBuffer io,
+  ) async {
+    final facets = <List<String>>[
+      <String>['project_type:${_contentProjectType(profile)}'],
+    ];
+    final uri = Uri.https('api.modrinth.com', '/v2/search', <String, String>{
+      'query': query,
+      'limit': '10',
+      'facets': jsonEncode(facets),
+    });
+    final payload = await _httpGetJsonObject(uri.toString());
+    final hits = payload['hits'];
+    if (hits is! List || hits.isEmpty) {
+      io.write('(none)');
+      return;
+    }
+    for (final raw in hits) {
+      if (raw is! Map) {
+        continue;
+      }
+      final title = raw['title']?.toString() ?? 'Untitled';
+      final slug =
+          raw['slug']?.toString() ?? raw['project_id']?.toString() ?? '-';
+      final downloads = raw['downloads']?.toString() ?? '0';
+      final versions = raw['versions'] is List
+          ? (raw['versions'] as List).take(4).join(',')
+          : '';
+      io.write(
+        '$slug  $title  downloads=$downloads${versions.isEmpty ? '' : '  versions=$versions'}',
+      );
+    }
+  }
+
+  String _contentProjectType(ConsumerProfile profile) {
+    return _isPluginConsumer(profile) ? 'plugin' : 'mod';
+  }
+
+  bool _looksLikeUrl(String value) {
+    final uri = Uri.tryParse(value);
+    return uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
+  }
+
+  Future<void> _contentInstallUrl(
+    ConsumerProfile profile,
+    String url,
+    _FlexibleArgs parsed,
+    _NativeIoBuffer io,
+  ) async {
+    if (!_looksLikeUrl(url)) {
+      throw _NativeCommandException('Invalid URL: $url', 2);
+    }
+    final uri = Uri.parse(url);
+    final rawName =
+        parsed.option('name') ?? p.basenameWithoutExtension(uri.path);
+    final name = _sanitizeSimpleName(rawName, fallback: 'content');
+    final fileName = _sanitizeJarFileName(
+      parsed.option('file') ?? p.basename(uri.path),
+      fallback: '$name.jar',
+    );
+    final output = p.join(
+      _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
+      fileName,
+    );
+    await _downloadToFile(url, output, io: io);
+    final entry = <String, dynamic>{
+      'name': name,
+      'source': 'url',
+      'url': url,
+      'file': fileName,
+      'sha256': _sha256File(File(output)),
+      'installed_at': DateTime.now().toUtc().toIso8601String(),
+    };
+    _contentSaveOrReplace(profile, entry, io);
+    io.write('[OK] Installed content: $name -> $fileName');
+  }
+
+  Future<void> _contentInstallModrinth(
+    ConsumerProfile profile,
+    String slug,
+    _FlexibleArgs parsed,
+    _NativeIoBuffer io,
+  ) async {
+    final entry = await _contentResolveAndDownloadModrinth(
+      profile,
+      slug: slug,
+      name: parsed.option('name'),
+      mc: await _contentMinecraftVersion(profile, parsed),
+      loader: _contentLoader(profile, parsed),
+      io: io,
+    );
+    _contentSaveOrReplace(profile, entry, io);
+    io.write(
+      '[OK] Installed ${entry['name']} ${entry['version_number']} -> ${entry['file']}',
+    );
+  }
+
+  Future<Map<String, dynamic>> _contentResolveAndDownloadModrinth(
+    ConsumerProfile profile, {
+    required String slug,
+    required String? name,
+    required String mc,
+    required String loader,
+    required _NativeIoBuffer io,
+  }) async {
+    final project = await _httpGetJsonObject(
+      Uri.https('api.modrinth.com', '/v2/project/$slug').toString(),
+    );
+    final projectType = project['project_type']?.toString() ?? '';
+    final expectedType = _contentProjectType(profile);
+    if (projectType.isNotEmpty && projectType != expectedType) {
+      throw _NativeCommandException(
+        '$slug is a Modrinth $projectType, but ${profile.shortName} expects $expectedType content',
+        2,
+      );
+    }
+    final projectId = project['id']?.toString() ?? slug;
+    final title = project['title']?.toString() ?? slug;
+    final version = await _contentResolveModrinthVersion(projectId, mc, loader);
+    final files = version['files'];
+    if (files is! List || files.isEmpty) {
+      throw _NativeCommandException('No downloadable files for $slug', 1);
+    }
+    Map<String, dynamic>? selectedFile;
+    for (final raw in files.whereType<Map>()) {
+      final file = Map<String, dynamic>.from(raw);
+      final filename = file['filename']?.toString().toLowerCase() ?? '';
+      if (filename.endsWith('.jar') && file['primary'] == true) {
+        selectedFile = file;
+        break;
+      }
+      if (filename.endsWith('.jar')) {
+        selectedFile ??= file;
+      }
+    }
+    if (selectedFile == null) {
+      throw _NativeCommandException('No jar file found for $slug', 1);
+    }
+    final url = selectedFile['url']?.toString() ?? '';
+    if (url.isEmpty) {
+      throw _NativeCommandException('No download URL found for $slug', 1);
+    }
+    final fileName = _sanitizeJarFileName(
+      selectedFile['filename']?.toString() ?? '$slug.jar',
+      fallback: '$slug.jar',
+    );
+    final output = p.join(
+      _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
+      fileName,
+    );
+    await _downloadToFile(url, output, io: io);
+    final hashes = _mapValue(selectedFile['hashes']);
+    return <String, dynamic>{
+      'name': _sanitizeSimpleName(name ?? slug, fallback: slug),
+      'source': 'modrinth',
+      'slug': slug,
+      'project_id': projectId,
+      'title': title,
+      'mc': mc,
+      'loader': loader,
+      'version_id': version['id']?.toString() ?? '',
+      'version_number': version['version_number']?.toString() ?? '',
+      'file': fileName,
+      'url': url,
+      if (hashes['sha512'] != null)
+        'upstream_sha512': hashes['sha512'].toString(),
+      if (hashes['sha1'] != null) 'upstream_sha1': hashes['sha1'].toString(),
+      'sha256': _sha256File(File(output)),
+      'installed_at': DateTime.now().toUtc().toIso8601String(),
+    };
+  }
+
+  Future<Map<String, dynamic>> _contentResolveModrinthVersion(
+    String projectId,
+    String mc,
+    String loader,
+  ) async {
+    Future<List<dynamic>> fetch({required String? loaderFilter}) {
+      final query = <String, String>{
+        'game_versions': jsonEncode(<String>[mc]),
+        if (loaderFilter != null && loaderFilter.isNotEmpty)
+          'loaders': jsonEncode(<String>[loaderFilter]),
+      };
+      final uri = Uri.https(
+        'api.modrinth.com',
+        '/v2/project/$projectId/version',
+        query,
+      );
+      return _httpGetJsonList(uri.toString());
+    }
+
+    var versions = await fetch(loaderFilter: loader);
+    if (versions.isEmpty &&
+        _isPluginConsumer(_activeConsumer) &&
+        loader != 'paper') {
+      versions = await fetch(loaderFilter: 'paper');
+    }
+    if (versions.isEmpty) {
+      versions = await fetch(loaderFilter: null);
+    }
+    for (final raw in versions) {
+      if (raw is! Map) {
+        continue;
+      }
+      final version = Map<String, dynamic>.from(raw);
+      final files = version['files'];
+      if (files is List &&
+          files.whereType<Map>().any(
+            (file) => (file['filename']?.toString().toLowerCase() ?? '')
+                .endsWith('.jar'),
+          )) {
+        return version;
+      }
+    }
+    throw _NativeCommandException(
+      'No compatible Modrinth version found for project=$projectId mc=$mc loader=$loader',
+      1,
+    );
+  }
+
+  Future<String> _contentMinecraftVersion(
+    ConsumerProfile profile,
+    _FlexibleArgs parsed,
+  ) async {
+    final explicit = parsed.option('mc')?.trim();
+    if (explicit != null && explicit.isNotEmpty) {
+      return explicit;
+    }
+    final current = _currentInstance(profile);
+    if (current != null && _instanceExists(profile, current)) {
+      final source = _serverSource(profile, current);
+      final mc = source['mc']?.trim();
+      if (mc != null && mc.isNotEmpty) {
+        return mc;
+      }
+    }
+    final latest = await _latestMinecraftRelease();
+    if (latest.isNotEmpty) {
+      return latest;
+    }
+    throw _NativeCommandException(
+      'Use --mc <version> to select content compatibility',
+      2,
+    );
+  }
+
+  String _contentLoader(ConsumerProfile profile, _FlexibleArgs parsed) {
+    final explicit = parsed.option('loader')?.trim().toLowerCase();
+    if (explicit != null && explicit.isNotEmpty) {
+      return explicit;
+    }
+    if (!_isPluginConsumer(profile)) {
+      return profile.shortName;
+    }
+    final current = _currentInstance(profile);
+    if (current != null && _instanceExists(profile, current)) {
+      final type = _instanceSourceType(profile, current);
+      if (type == 'paper' ||
+          type == 'purpur' ||
+          type == 'folia' ||
+          type == 'spigot') {
+        return type;
+      }
+    }
+    return 'paper';
+  }
+
+  String _sanitizeJarFileName(String value, {required String fallback}) {
+    var name = p.basename(value.trim());
+    if (name.isEmpty || name == '.' || name == '..') {
+      name = fallback;
+    }
+    name = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '-');
+    if (!name.toLowerCase().endsWith('.jar')) {
+      name = '$name.jar';
+    }
+    return name;
+  }
+
+  void _contentSaveOrReplace(
+    ConsumerProfile profile,
+    Map<String, dynamic> entry,
+    _NativeIoBuffer io,
+  ) {
+    final manifest = _contentManifestLoad(profile);
+    final entries = _contentEntriesFromManifest(manifest);
+    final name = entry['name']?.toString() ?? '';
+    final source = entry['source']?.toString() ?? '';
+    final identity =
+        entry[source == 'modrinth' ? 'slug' : 'url']?.toString() ?? '';
+    final dropins = _dropinsSource(profile, mods: !_isPluginConsumer(profile));
+    entries.removeWhere((existing) {
+      final sameName = existing['name']?.toString() == name;
+      final sameIdentity =
+          existing['source']?.toString() == source &&
+          (existing[source == 'modrinth' ? 'slug' : 'url']?.toString() ?? '') ==
+              identity;
+      if (sameName || sameIdentity) {
+        final oldFile = existing['file']?.toString() ?? '';
+        final nextFile = entry['file']?.toString() ?? '';
+        if (oldFile.isNotEmpty && oldFile != nextFile) {
+          File(p.join(dropins, oldFile)).deleteSyncSafe();
+          io.write('[INFO] Removed old content file: $oldFile');
+        }
+        return true;
+      }
+      return false;
+    });
+    entries.add(entry);
+    _contentManifestSave(profile, entries);
+  }
+
+  void _contentList(ConsumerProfile profile, _NativeIoBuffer io) {
+    final entries = _contentEntriesFromManifest(_contentManifestLoad(profile));
+    if (entries.isEmpty) {
+      io.write('(none)');
+      return;
+    }
+    for (final entry in entries) {
+      final name = entry['name']?.toString() ?? '-';
+      final source = entry['source']?.toString() ?? '-';
+      final version =
+          entry['version_number']?.toString() ??
+          entry['url']?.toString() ??
+          '-';
+      final file = entry['file']?.toString() ?? '-';
+      io.write('$name  $source  $version  $file');
+    }
+  }
+
+  void _contentRemove(
+    ConsumerProfile profile,
+    String name,
+    _NativeIoBuffer io,
+  ) {
+    final manifest = _contentManifestLoad(profile);
+    final entries = _contentEntriesFromManifest(manifest);
+    final dropins = _dropinsSource(profile, mods: !_isPluginConsumer(profile));
+    Map<String, dynamic>? removed;
+    entries.removeWhere((entry) {
+      final matches =
+          entry['name']?.toString() == name ||
+          entry['slug']?.toString() == name;
+      if (matches) {
+        removed = entry;
+      }
+      return matches;
+    });
+    if (removed == null) {
+      throw _NativeCommandException('Content entry not found: $name', 2);
+    }
+    final file = removed!['file']?.toString() ?? '';
+    if (file.isNotEmpty) {
+      File(p.join(dropins, file)).deleteSyncSafe();
+    }
+    _contentManifestSave(profile, entries);
+    io.write('[OK] Removed content: $name');
+  }
+
+  Future<void> _contentUpdate(
+    ConsumerProfile profile,
+    String? target,
+    _NativeIoBuffer io,
+  ) async {
+    final manifest = _contentManifestLoad(profile);
+    final entries = _contentEntriesFromManifest(manifest);
+    if (entries.isEmpty) {
+      io.write('(none)');
+      return;
+    }
+    var matched = 0;
+    final nextEntries = <Map<String, dynamic>>[];
+    for (final entry in entries) {
+      final name = entry['name']?.toString() ?? '';
+      final slug = entry['slug']?.toString() ?? '';
+      final shouldUpdate = target == null || target == name || target == slug;
+      if (!shouldUpdate) {
+        nextEntries.add(entry);
+        continue;
+      }
+      matched++;
+      final source = entry['source']?.toString() ?? '';
+      if (source == 'modrinth') {
+        final updated = await _contentResolveAndDownloadModrinth(
+          profile,
+          slug: slug,
+          name: name,
+          mc: entry['mc']?.toString() ?? await _latestMinecraftRelease(),
+          loader:
+              entry['loader']?.toString() ??
+              _contentLoader(profile, _FlexibleArgs.empty),
+          io: io,
+        );
+        _contentDeleteOldFileIfChanged(profile, entry, updated);
+        nextEntries.add(updated);
+        io.write('[OK] Updated $name -> ${updated['version_number']}');
+      } else if (source == 'url') {
+        final url = entry['url']?.toString() ?? '';
+        if (url.isEmpty) {
+          throw _NativeCommandException(
+            'URL content entry missing url: $name',
+            1,
+          );
+        }
+        final file = entry['file']?.toString() ?? '$name.jar';
+        final output = p.join(
+          _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
+          file,
+        );
+        await _downloadToFile(url, output, io: io);
+        final updated = Map<String, dynamic>.from(entry)
+          ..['sha256'] = _sha256File(File(output))
+          ..['installed_at'] = DateTime.now().toUtc().toIso8601String();
+        nextEntries.add(updated);
+        io.write('[OK] Updated $name');
+      } else {
+        nextEntries.add(entry);
+        io.write('[WARN] Unknown content source for $name; skipped');
+      }
+    }
+    if (matched == 0) {
+      throw _NativeCommandException('Content entry not found: $target', 2);
+    }
+    _contentManifestSave(profile, nextEntries);
+  }
+
+  void _contentDeleteOldFileIfChanged(
+    ConsumerProfile profile,
+    Map<String, dynamic> oldEntry,
+    Map<String, dynamic> newEntry,
+  ) {
+    final oldFile = oldEntry['file']?.toString() ?? '';
+    final newFile = newEntry['file']?.toString() ?? '';
+    if (oldFile.isEmpty || oldFile == newFile) {
+      return;
+    }
+    File(
+      p.join(
+        _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
+        oldFile,
+      ),
+    ).deleteSyncSafe();
+  }
+
+  Future<void> _contentSync(
+    ConsumerProfile profile,
+    String? target, {
+    required bool all,
+    required bool clean,
+    required _NativeIoBuffer io,
+  }) {
+    final instances = all
+        ? _instanceNames(profile)
+        : <String>[target ?? _currentInstance(profile) ?? ''];
+    if (instances.isEmpty || instances.first.isEmpty) {
+      throw _NativeCommandException('No active instance set', 2);
+    }
+    for (final instance in instances) {
+      final report = _pluginsSyncInstance(
+        profile,
+        instance,
+        clean: clean,
+        sourceModsOverride: !_isPluginConsumer(profile),
+        strict: true,
+      );
+      io.write('[SYNC] $instance copied ${report.copiedJars.length} jar(s)');
+    }
+    return Future<void>.value();
   }
 
   Future<void> _reposSync(
@@ -6665,6 +8672,77 @@ class NativeCommandService {
   ];
 
   static const List<String> _sharedConfigDirsBase = <String>['config'];
+}
+
+class _DoctorCheck {
+  const _DoctorCheck({
+    required this.level,
+    required this.name,
+    required this.detail,
+  });
+
+  final String level;
+  final String name;
+  final String detail;
+}
+
+class _FlexibleArgs {
+  const _FlexibleArgs({
+    required this.options,
+    required this.flags,
+    required this.positionals,
+  });
+
+  static const empty = _FlexibleArgs(
+    options: <String, String>{},
+    flags: <String, bool>{},
+    positionals: <String>[],
+  );
+
+  final Map<String, String> options;
+  final Map<String, bool> flags;
+  final List<String> positionals;
+
+  String? option(String name) => options[name];
+
+  bool flag(String name) => flags[name] == true;
+}
+
+class _BackupEntry {
+  const _BackupEntry({
+    required this.profile,
+    required this.instance,
+    required this.id,
+    required this.path,
+  });
+
+  final ConsumerProfile profile;
+  final String instance;
+  final String id;
+  final String path;
+
+  Map<String, dynamic> get manifest {
+    final file = File(p.join(path, 'manifest.json'));
+    if (!file.existsSync()) {
+      return <String, dynamic>{
+        'id': id,
+        'consumer': profile.shortName,
+        'instance': instance,
+        'created_at': id,
+        'label': '',
+        'snapshot': 'snapshot',
+        'entries': <Map<String, dynamic>>[],
+      };
+    }
+    final decoded = jsonDecode(file.readAsStringSync());
+    if (decoded is Map<String, dynamic>) {
+      return decoded;
+    }
+    if (decoded is Map) {
+      return Map<String, dynamic>.from(decoded);
+    }
+    throw _NativeCommandException('Invalid backup manifest: ${file.path}', 1);
+  }
 }
 
 class _NativeCommandException implements Exception {

@@ -2,6 +2,9 @@ import 'dart:io';
 
 import '../../services/app_context.dart';
 
+Future<void> handleNativePassthrough(List<String> args) async =>
+    _runAndExit(args);
+
 Future<void> handleReposSync(
   Map<String, dynamic> args,
   Map<String, dynamic> flags,

@@ -18,6 +18,12 @@ Future<int> runCli(List<String> args) async {
       case 'wizard':
         await handleWizard();
         return 0;
+      case 'doctor':
+      case 'backup':
+      case 'template':
+      case 'content':
+        await handleNativePassthrough(<String>[command, ...rest]);
+        return 0;
       case 'consumer':
         return _runConsumer(rest);
       case 'repos':
@@ -241,6 +247,9 @@ Future<int> _runInstance(List<String> rest) async {
         'name': parsed.option('name') ?? parsed.positionalOrNull(0),
       });
       return 0;
+    case 'safe-update':
+      await handleNativePassthrough(<String>['instance', ...rest]);
+      return 0;
     case 'update':
       await handleInstanceUpdate(
         <String, dynamic>{
@@ -295,7 +304,7 @@ Future<int> _runInstance(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
+        'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|safe-update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
       );
       return 2;
   }

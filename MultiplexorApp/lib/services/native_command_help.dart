@@ -33,8 +33,13 @@ void _printHelp(_NativeIoBuffer io) {
   );
   _writeHelpCommand(
     io,
-    './start.sh build latest paper',
-    'check the latest supported Paper version',
+    './start.sh backup create demo --label before-change',
+    'create a restore point for an instance',
+  );
+  _writeHelpCommand(
+    io,
+    './start.sh doctor',
+    'check local tools, workspace state, and instance metadata',
   );
   io.write('');
 
@@ -53,6 +58,7 @@ void _printHelp(_NativeIoBuffer io) {
     'path [name]',
     'open [name]',
     'update <name> [--mc <version>] [--jar <path>] [--auto-build]',
+    'safe-update <name> [--mc <version>] [--auto-build] [--promote]',
     'isolated [name] [true|false]',
     'lock <name> [--pin <digits>]',
     'unlock <name> [--pin <digits>]',
@@ -112,6 +118,31 @@ void _printHelp(_NativeIoBuffer io) {
     'status [instance]',
     'localize [instance|--all]',
   ]);
+  _writeHelpGroup(io, 'backup', <String>[
+    'create [instance] [--label <label>] [--include-logs]',
+    'list [instance|--all]',
+    'restore [instance] <backup-id>',
+    'verify [instance] <backup-id>',
+    'delete [instance] <backup-id>',
+    'prune [instance] [--keep <n>]',
+  ]);
+  _writeHelpGroup(io, 'template', <String>[
+    'list',
+    'init <name> [--type <type>] [--mc <version>] [--heap <size>] [--preset <name>]',
+    'show <name>',
+    'apply <template> <instance> [--auto-build] [--sync]',
+    'export <instance> <template>',
+    'delete <name>',
+  ]);
+  _writeHelpGroup(io, 'content', <String>[
+    'search <query>',
+    'install <modrinth-slug|url> [--mc <version>] [--loader <loader>] [--sync]',
+    'list',
+    'update [name|--all] [--sync]',
+    'remove <name>',
+    'sync [instance|--all] [--clean]',
+  ]);
+  _writeHelpGroup(io, 'doctor', <String>['[--fix] [--json]']);
   io.write('');
 
   _writeHelpSection(io, 'Global Flags');

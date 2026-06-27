@@ -30,10 +30,13 @@ Dashboard shortcuts: `n` new instance, `s` start all, `k` stop all, `g` all cons
 - **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. They never share state. The active profile is set with `consumer use`.
 - **Instance** — one server install inside a consumer. Lives at `consumers/<profile>/instances/<name>` (or under `~/.multiplexor/instance-store/...` if the workspace path contains `[` or `]`). Metadata is in `.server-source` (type, launch mode, jar path, isolated flag, and lock state + hashed PIN).
 - **Active instance** — the default target when an instance name is omitted. Set with `instance activate`.
-- **Dropins** — plugin or mod jars under `consumers/<profile>/plugin-source` (or `mod-source`). On `runtime start` and via the watcher, these jars are copied into every non-isolated instance's `plugins/` (or `mods/`) folder.
+- **Dropins** — plugin or mod jars under `consumers/<profile>/dropins/plugins` or `consumers/<profile>/dropins/mods`. On `runtime start` and via the watcher, these jars are copied into every non-isolated instance's `plugins/` (or `mods/`) folder.
 - **Isolated instance** — opts out of all shared state: no dropin sync, no Iris pack symlink, no shared `ops.json` merge. Created with `server create --isolated` or toggled later with `instance isolated <name> true`.
-- **Shared plugin data** — `consumers/plugin/shared-plugin-data/` holds Iris packs and a merged `ops.json` for non-isolated plugin instances.
+- **Shared plugin data** — `consumers/plugin-consumers/shared-plugin-data/` holds Iris packs and a merged `ops.json` for non-isolated plugin instances.
 - **Build cache** — `consumers/<profile>/builds/<type>/` holds versioned server jars. `server create --type ...` resolves jars from here; `--auto-build` refreshes from upstream first.
+- **Content lockfile** — `consumers/<profile>/state/content-lock.yaml` tracks jars installed by `content install` so they can be updated, removed, and re-synced through the existing dropin pipeline.
+- **Template** — `.multiplexor/templates/<name>.yaml` captures a reusable server blueprint: server type/version, JVM settings, isolation, server.properties overrides, and optional dropin sync behavior.
+- **Backup** — `consumers/<profile>/backups/<instance>/<backup-id>/` stores a restorable snapshot with checksums and a manifest. Backups are used manually and by `instance safe-update`.
 
 ## CLI Reference
 
@@ -60,6 +63,7 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `instance path [name]` | Print the on-disk path. Active instance if omitted. |
 | `instance open [name]` | Open the instance folder in the host file manager. |
 | `instance update <name> [--mc <v>] [--jar <path>] [--auto-build] [--type <t>]` | Re-point `server.jar` at a new version. Stops the instance first. Preserves worlds, dropins, config, and the isolated flag. Jar-launch only — installer-based servers (Forge/NeoForge) must be recreated. |
+| `instance safe-update <name> [--mc <v>] [--jar <path>] [--auto-build] [--type <t>] [--promote] [--cleanup] [--timeout <s>]` | Create a backup, clone the instance to staging on a free port, update staging, start it, and wait for a Minecraft ping. Without `--promote`, the original stays unchanged. With `--promote`, the original is updated after staging passes and can be restored from the backup on promotion failure. |
 | `instance isolated [name] [true\|false]` | Read the flag (no value) or toggle it. Turning it off re-links shared Iris packs and merges shared ops. |
 | `instance lock <name> [--pin <digits>]` | Lock the instance so it cannot be deleted or factory-reset. Prompts for a 4–12 digit PIN (or pass `--pin`). The PIN is stored salted+hashed in `.server-source` and survives factory reset. Settings stay editable. |
 | `instance unlock <name> [--pin <digits>]` | Verify the PIN and unlock, re-enabling delete and factory reset. |
@@ -122,6 +126,47 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 | `plugins iris-packs-path` | Print the shared Iris packs directory (`plugin` consumer only). |
 | `plugins iris-packs-link [instance\|--all]` | Symlink the shared Iris packs into an instance's `plugins/iris/packs`. Isolated instances are skipped. |
 
+### backup — restorable instance snapshots
+
+| Command | What it does |
+|---------|--------------|
+| `backup create [instance] [--label <label>] [--include-logs]` | Snapshot an instance into `consumers/<profile>/backups/<instance>/...`. Active instance if omitted. Logs are skipped unless `--include-logs`. |
+| `backup list [instance\|--all]` | List backups in the active consumer. |
+| `backup restore [instance] <backup-id>` | Stop the target if needed, verify checksums, and replace the instance with the snapshot. Refused if the target is locked. |
+| `backup verify [instance] <backup-id>` | Verify the backup manifest and file checksums. |
+| `backup delete [instance] <backup-id>` | Delete one backup. |
+| `backup prune [instance] [--keep <n>]` | Keep the newest `n` backups per instance and delete older ones. Default `10`. |
+
+### template — reusable server blueprints
+
+| Command | What it does |
+|---------|--------------|
+| `template list` | List templates under `.multiplexor/templates/`. |
+| `template init <name> [--type <type>] [--mc <v>] [--heap <size>] [--preset <name>] [--isolated]` | Write a starter YAML template. |
+| `template show <name>` | Print the YAML template. |
+| `template apply <template> <instance> [--auto-build] [--sync]` | Create an instance from a template, apply server.properties overrides, apply runtime heap/preset settings, and optionally sync dropins. |
+| `template export <instance> <template>` | Create a template from an existing instance's source metadata, runtime settings, isolation flag, and `server.properties`. |
+| `template delete <name>` | Delete a template file. |
+
+### content — Modrinth/URL plugin and mod manager
+
+| Command | What it does |
+|---------|--------------|
+| `content search <query>` | Search Modrinth for plugin content under the plugin consumer, or mod content under mod consumers. |
+| `content install <modrinth-slug\|url> [--mc <v>] [--loader <loader>] [--name <alias>] [--sync]` | Download a compatible Modrinth jar or direct jar URL into the active consumer's dropin source and record it in `content-lock.yaml`. |
+| `content list` | List managed content entries. |
+| `content update [name\|--all] [--sync]` | Re-download managed content, preserving recorded MC/loader compatibility. |
+| `content remove <name>` | Remove the manifest entry and downloaded jar. |
+| `content sync [instance\|--all] [--clean]` | Reuse the normal plugin/mod sync pipeline for managed and manually added jars. |
+
+### doctor — workspace diagnostics
+
+| Command | What it does |
+|---------|--------------|
+| `doctor` | Check workspace markers, consumer roots, active instances, key external tools (`dart`, `java`, `git`, `tmux`), duplicate configured ports, source metadata, and active-instance symlinks. Exits non-zero on hard failures. |
+| `doctor --fix` | Recreate expected consumer directories and refresh active-instance links before checking. |
+| `doctor --json` | Emit a machine-readable diagnostics payload. |
+
 ### build — fetch or compile server jars into the cache
 
 | Command | What it does |
@@ -166,8 +211,22 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 ./start.sh instance update lobby --mc 1.21.11 --auto-build
 ./start.sh runtime start lobby
 
-# See live player counts and uptime for every running server
-./start.sh runtime stats
+# Create a restore point before experimenting
+./start.sh backup create lobby --label before-plugin-test
+
+# Apply a reusable server blueprint
+./start.sh template init purpur-dev --type purpur --heap 6G --preset aikar
+./start.sh template apply purpur-dev dev-lobby --auto-build --sync
+
+# Install managed content from Modrinth, then sync it everywhere
+./start.sh content search luckperms
+./start.sh content install luckperms --mc 1.21.11 --sync
+
+# Run diagnostics when setup or runtime behavior looks suspicious
+./start.sh doctor
+
+# Try an update safely on staging before touching the original
+./start.sh instance safe-update lobby --mc 1.21.11 --auto-build
 
 # Lock a server so it can't be deleted or factory-reset (settings stay editable)
 ./start.sh instance lock lobby --pin 4827
@@ -188,14 +247,17 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 ```
 consumers/<profile>/
   builds/<type>/                  # cached server jars
-  plugin-source/ or mod-source/   # dropin jars (your build outputs)
-  instances/<name>/               # one server's worldroot
+  backups/<instance>/              # restorable snapshots + manifest/checksums
+  dropins/plugins or dropins/mods   # dropin jars (manual and content-managed)
+  instances/<name>/                 # one server's worldroot
     .server-source                # type, launch mode, jar path, isolated flag
     server.jar                    # symlink into builds/
     plugins/ or mods/             # synced from dropin-source
   shared-plugin-data/             # plugin-only: iris packs + merged ops.json
   state/runtime/                  # tmux logs, pid files
-.multiplexor/workspace.yaml       # workspace marker
+  state/content-lock.yaml          # managed plugin/mod manifest
+.multiplexor/templates/             # reusable server blueprints
+.multiplexor/workspace.yaml         # workspace marker
 active-instance                   # symlink to the active instance
 ```
 
