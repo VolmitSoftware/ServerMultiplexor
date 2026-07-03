@@ -1,7 +1,8 @@
+import '../models/consumer_profile.dart';
+import '../utils/process_runner.dart';
 import 'consumer_service.dart';
 import 'manager_context.dart';
 import 'native_command_service.dart';
-import '../utils/process_runner.dart';
 
 class PassthroughService {
   PassthroughService(
@@ -20,6 +21,10 @@ class PassthroughService {
   final NativeCommandService _native;
 
   bool get hasLegacyBackend => context.hasLegacyBackend;
+
+  void setConsumerOverride(ConsumerProfile? profile) {
+    _native.setConsumerOverride(profile);
+  }
 
   Future<int> run(List<String> args) async {
     final native = await _native.execute(args, stream: true);

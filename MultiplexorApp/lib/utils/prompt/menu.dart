@@ -68,6 +68,7 @@ Future<T> menuSelect<T>(
   String? hint,
   Future<List<MenuEntry<T>>> Function()? onTick,
   Duration tickInterval = const Duration(seconds: 1),
+  T? Function(String rawChar, MenuEntry<T> highlighted)? onActionKey,
 }) async {
   final List<int> selectable = <int>[
     for (int i = 0; i < entries.length; i++)
@@ -194,20 +195,22 @@ Future<T> menuSelect<T>(
       return entries[index].selectable ? index : null;
     }
 
-    T finish(int index) {
+    T finishWith(T value, String label) {
       clear();
       io.disableMouse();
       io.showCursor();
       // Leave raw mode before printing: with OPOST off, "\n" does not
       // return the carriage and the next line starts mid-column.
       io.setRawMode(false);
-      final MenuEntry<T> entry = entries[index];
       stdout.writeln(
         '${Ansi.style('✔', Ansi.green)} ${Ansi.style(title, Ansi.bold)} '
-        '${Ansi.style('·', Ansi.gray)} ${Ansi.style(entry.label, Ansi.green)}',
+        '${Ansi.style('·', Ansi.gray)} ${Ansi.style(label, Ansi.green)}',
       );
-      return entry.value as T;
+      return value;
     }
+
+    T finish(int index) =>
+        finishWith(entries[index].value as T, entries[index].label);
 
     while (true) {
       TermEvent? event;
@@ -296,6 +299,12 @@ Future<T> menuSelect<T>(
           }
           break;
         case TermEventKind.char:
+          if (onActionKey != null) {
+            final T? actionValue = onActionKey(event.char, entries[selected]);
+            if (actionValue != null) {
+              return finishWith(actionValue, entries[selected].label);
+            }
+          }
           final String char = event.char.toLowerCase();
           final int digit = int.tryParse(char) ?? -1;
           if (digit >= 1 && digit <= selectable.length) {

@@ -4,6 +4,7 @@ import '../models/consumer_profile.dart';
 import '../utils/process_runner.dart';
 import '../utils/user_prompt.dart';
 import 'consumer_service.dart';
+import 'dashboard_quick_action.dart';
 import 'passthrough_service.dart';
 import 'runtime_state.dart';
 
@@ -23,12 +24,14 @@ class InteractiveWizard {
   final ConsumerService consumerService;
   final PassthroughService passthrough;
   final ConsumerProfile? requestedConsumer;
+  ConsumerProfile? _consumerOverride;
 
   static const List<String> _serverTypes = <String>[
     'paper',
     'purpur',
     'folia',
     'canvas',
+    'leaf',
     'spigot',
     'forge',
     'fabric',
@@ -143,6 +146,9 @@ class InteractiveWizard {
         if (row.locked) {
           bits.add('locked');
         }
+        if (row.isolated) {
+          bits.add('isolated');
+        }
         final String activeMark = row.name == active
             ? '  ${Ansi.style('active', Ansi.cyan)}'
             : '';
@@ -185,7 +191,7 @@ class InteractiveWizard {
         );
         entries.add(
           MenuEntry<_DashChoice>(
-            'All consoles',
+            'All consoles: grid',
             value: const _DashChoice(_Act.consolesGrid),
             shortcut: 'g',
             detail: 'grid view',
@@ -193,7 +199,7 @@ class InteractiveWizard {
         );
         entries.add(
           MenuEntry<_DashChoice>(
-            'All consoles',
+            'All consoles: side-by-side',
             value: const _DashChoice(_Act.consolesLateral),
             detail: 'side-by-side view',
           ),
@@ -255,6 +261,30 @@ class InteractiveWizard {
       'Dashboard',
       _buildDashEntries(data.rows, data.active),
       initialIndex: data.rows.isEmpty ? 0 : 1,
+      hint:
+          '↑↓ move · enter open · R restart · S stop · X kill · O console · esc back',
+      onActionKey: (String raw, MenuEntry<_DashChoice> entry) {
+        final _DashChoice? value = entry.value;
+        final bool onServerRow = value != null &&
+            value.kind == _Act.instance &&
+            value.instance != null;
+        final DashboardQuickAction? action =
+            dashboardQuickAction(raw, onServerRow: onServerRow);
+        if (action == null) {
+          return null;
+        }
+        final String name = value!.instance!;
+        switch (action) {
+          case DashboardQuickAction.restart:
+            return _DashChoice(_Act.instanceRestart, instance: name);
+          case DashboardQuickAction.stop:
+            return _DashChoice(_Act.instanceStop, instance: name);
+          case DashboardQuickAction.kill:
+            return _DashChoice(_Act.instanceKill, instance: name);
+          case DashboardQuickAction.console:
+            return _DashChoice(_Act.instanceConsole, instance: name);
+        }
+      },
       // Live refresh: re-poll players/TPS/version and redraw in place ~1s.
       onTick: () async {
         final List<_InstanceRow> rows = await _loadInstanceMetricRows();
@@ -269,6 +299,18 @@ class InteractiveWizard {
       case _Act.instance:
         await _instanceMenu(choice.instance!);
         return;
+      case _Act.instanceRestart:
+        await _quickRestart(choice.instance!);
+        return;
+      case _Act.instanceStop:
+        await _quickStop(choice.instance!);
+        return;
+      case _Act.instanceKill:
+        await _quickKill(choice.instance!);
+        return;
+      case _Act.instanceConsole:
+        await _quickConsole(choice.instance!);
+        return;
       case _Act.create:
         await _createInstance();
         return;
@@ -276,10 +318,10 @@ class InteractiveWizard {
         await _createMany();
         return;
       case _Act.startAll:
-        await _startAllStopped(rows);
+        await _startAllStopped(await Ui.shielded(_loadInstanceRows));
         return;
       case _Act.stopAll:
-        await _stopAllRunning(rows);
+        await _stopAllRunning(await Ui.shielded(_loadInstanceRows));
         return;
       case _Act.wipeEverything:
         await _wipeEverything();
@@ -450,11 +492,9 @@ class InteractiveWizard {
 
     switch (action) {
       case _InstanceAct.startWithConsole:
-        await _syncDropinsAllTargets();
         await _shellRun(<String>['runtime', 'start', name]);
         return;
       case _InstanceAct.startBackground:
-        await _syncDropinsAllTargets();
         Ui.doing('Starting $name in background');
         final int code = await _shellRun(<String>[
           'runtime',
@@ -511,6 +551,7 @@ class InteractiveWizard {
       case _InstanceAct.reset:
         final bool confirmed = await Ui.confirm(
           'Factory reset $name? Worlds, config, and dropins are wiped.',
+          defaultValue: false,
         );
         if (confirmed) {
           await _shellRun(<String>['instance', 'reset', name]);
@@ -520,6 +561,7 @@ class InteractiveWizard {
       case _InstanceAct.delete:
         final bool confirmed = await Ui.confirm(
           'Delete instance $name permanently?',
+          defaultValue: false,
         );
         if (confirmed) {
           await _shellRun(<String>['instance', 'delete', name]);
@@ -527,6 +569,46 @@ class InteractiveWizard {
         return;
       case _InstanceAct.back:
         return;
+    }
+  }
+
+  Future<void> _quickRestart(String name) async {
+    final _InstanceRow? row = await Ui.shielded(() => _loadInstanceRow(name));
+    final bool running = row != null && row.state != RuntimeState.stopped;
+    Ui.doing(running ? 'Restarting $name' : 'Starting $name');
+    final int code = running
+        ? await _shellRun(<String>['runtime', 'restart', name, '--no-console'])
+        : await _shellRun(<String>['runtime', 'start', name, '--no-console']);
+    if (code != 0) {
+      await Ui.pause();
+    }
+  }
+
+  Future<void> _quickStop(String name) async {
+    final _InstanceRow? row = await Ui.shielded(() => _loadInstanceRow(name));
+    if (row == null || row.state == RuntimeState.stopped) {
+      return;
+    }
+    Ui.doing('Stopping $name (graceful)');
+    await _shellRun(<String>['runtime', 'stop', name, '--graceful']);
+  }
+
+  Future<void> _quickKill(String name) async {
+    final _InstanceRow? row = await Ui.shielded(() => _loadInstanceRow(name));
+    if (row == null || row.state == RuntimeState.stopped) {
+      return;
+    }
+    Ui.doing('Killing $name');
+    await _shellRun(<String>['runtime', 'stop', name]);
+  }
+
+  Future<void> _quickConsole(String name) async {
+    final _InstanceRow? row = await Ui.shielded(() => _loadInstanceRow(name));
+    final bool running = row != null && row.state != RuntimeState.stopped;
+    if (running) {
+      await _shellRun(<String>['runtime', 'console', name]);
+    } else {
+      await _shellRun(<String>['runtime', 'start', name]);
     }
   }
 
@@ -584,7 +666,10 @@ class InteractiveWizard {
   // ─── Create flow ─────────────────────────────────────────────────────
 
   Future<void> _createInstance() async {
-    final String type = await Ui.pick('Server platform', _serverTypes);
+    final String type = await Ui.pick(
+      'Server platform',
+      _serverTypesForActiveConsumer(),
+    );
     final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String version = versionChoice.version;
 
@@ -701,6 +786,7 @@ class InteractiveWizard {
     );
     final bool confirmed = await Ui.confirm(
       'Wipe every instance in every consumer profile?',
+      defaultValue: false,
     );
     if (!confirmed) {
       return;
@@ -892,6 +978,9 @@ class InteractiveWizard {
         .toList(growable: false);
     final String selected = await Ui.pick('Consumer profile', options);
     await _shellRun(<String>['consumer', 'use', selected]);
+    final profile = ConsumerProfile.parse(selected)!;
+    _consumerOverride = profile;
+    passthrough.setConsumerOverride(profile);
   }
 
   // ─── Build & tuning ──────────────────────────────────────────────────
@@ -919,6 +1008,8 @@ class InteractiveWizard {
       final _RuntimeSettings settings = await _runtimeSettings();
       final String heap = settings.heap ?? '4G';
       final String profile = settings.profile ?? 'aikar';
+      final String wrap = settings.consoleWrap ?? 'off';
+      final String logFormat = settings.consoleLogFormat ?? 'minimal';
 
       final List<MenuEntry<_BuildAct>> entries = <MenuEntry<_BuildAct>>[
         const MenuEntry<_BuildAct>.separator('build'),
@@ -948,6 +1039,16 @@ class InteractiveWizard {
           'Flag profile',
           value: _BuildAct.flags,
           detail: profile,
+        ),
+        MenuEntry<_BuildAct>(
+          'Console line wrap',
+          value: _BuildAct.wrap,
+          detail: wrap,
+        ),
+        MenuEntry<_BuildAct>(
+          'Console log format',
+          value: _BuildAct.logFormat,
+          detail: logFormat,
         ),
         const MenuEntry<_BuildAct>(
           'Reset JVM defaults',
@@ -1032,6 +1133,36 @@ class InteractiveWizard {
             ]);
           });
           break;
+        case _BuildAct.wrap:
+          await _runStep(() async {
+            final String selected = await Ui.pick(
+              'Console line wrap',
+              const <String>['off', 'on'],
+              initialIndex: wrap.startsWith('on') ? 1 : 0,
+            );
+            await _shellRun(<String>[
+              'runtime',
+              'settings',
+              'set-wrap',
+              selected,
+            ]);
+          });
+          break;
+        case _BuildAct.logFormat:
+          await _runStep(() async {
+            final String selected = await Ui.pick(
+              'Console log format',
+              const <String>['minimal', 'default'],
+              initialIndex: logFormat.startsWith('default') ? 1 : 0,
+            );
+            await _shellRun(<String>[
+              'runtime',
+              'settings',
+              'set-log-format',
+              selected,
+            ]);
+          });
+          break;
         case _BuildAct.resetJvm:
           await _shellRun(<String>['runtime', 'settings', 'reset']);
           break;
@@ -1042,7 +1173,10 @@ class InteractiveWizard {
   }
 
   Future<void> _buildServerArtifact() async {
-    final String type = await Ui.pick('Server platform', _serverTypes);
+    final String type = await Ui.pick(
+      'Server platform',
+      _serverTypesForActiveConsumer(),
+    );
     final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String label = _serverTypeLabel(type);
     Ui.doing('Building $label for Minecraft ${versionChoice.version}');
@@ -1119,7 +1253,9 @@ class InteractiveWizard {
   }
 
   ConsumerProfile _activeConsumer() {
-    return requestedConsumer ?? consumerService.readActive();
+    return _consumerOverride ??
+        requestedConsumer ??
+        consumerService.readActive();
   }
 
   bool _isPluginConsumer() {
@@ -1150,6 +1286,7 @@ class InteractiveWizard {
           ),
           port: parts[2],
           locked: parts.length > 4 && parts[4] == 'locked',
+          isolated: parts.length > 5 && parts[5] == 'isolated',
         ),
       );
     }
@@ -1170,7 +1307,7 @@ class InteractiveWizard {
 
     final List<_InstanceRow> rows = <_InstanceRow>[];
     for (final String line in result.stdout.split('\n')) {
-      // name, state, port, locked, players, max, version, tps
+      // name, state, port, locked, players, max, version, tps, isolation
       final List<String> parts = line.trim().split('\t');
       if (parts.length < 8 || parts[0].isEmpty) {
         continue;
@@ -1184,6 +1321,7 @@ class InteractiveWizard {
           ),
           port: parts[2],
           locked: parts[3] == 'locked',
+          isolated: parts.length > 8 && parts[8] == 'isolated',
           players: int.tryParse(parts[4]),
           maxPlayers: int.tryParse(parts[5]),
           version: parts[6] == '-' ? null : parts[6],
@@ -1258,6 +1396,8 @@ class InteractiveWizard {
     return _RuntimeSettings(
       heap: extract('heap size'),
       profile: extract('flags profile'),
+      consoleWrap: extract('console wrap'),
+      consoleLogFormat: extract('console log'),
     );
   }
 
@@ -1336,12 +1476,29 @@ class InteractiveWizard {
     return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(input.trim());
   }
 
+  List<String> _serverTypesForActiveConsumer() {
+    return switch (_activeConsumer()) {
+      ConsumerProfile.plugin => const <String>[
+        'paper',
+        'purpur',
+        'folia',
+        'canvas',
+        'leaf',
+        'spigot',
+      ],
+      ConsumerProfile.forge => const <String>['forge'],
+      ConsumerProfile.fabric => const <String>['fabric'],
+      ConsumerProfile.neoforge => const <String>['neoforge'],
+    };
+  }
+
   String _serverTypeLabel(String type) {
     return switch (type) {
       'paper' => 'Paper',
       'purpur' => 'Purpur',
       'folia' => 'Folia',
       'canvas' => 'Canvas',
+      'leaf' => 'Leaf',
       'spigot' => 'Spigot',
       'forge' => 'Forge',
       'fabric' => 'Fabric',
@@ -1385,6 +1542,10 @@ class InteractiveWizard {
 
 enum _Act {
   instance,
+  instanceRestart,
+  instanceStop,
+  instanceKill,
+  instanceConsole,
   create,
   createMany,
   startAll,
@@ -1432,6 +1593,8 @@ enum _BuildAct {
   source,
   heap,
   flags,
+  wrap,
+  logFormat,
   resetJvm,
   back,
 }
@@ -1442,6 +1605,7 @@ class _InstanceRow {
     required this.state,
     required this.port,
     this.locked = false,
+    this.isolated = false,
     this.players,
     this.maxPlayers,
     this.version,
@@ -1452,6 +1616,7 @@ class _InstanceRow {
   final RuntimeState state;
   final String port;
   final bool locked;
+  final bool isolated;
 
   /// Live metrics, populated by the metrics sweep (`runtime metrics`). Null on
   /// the fast state-only load and for servers that are not currently pingable.
@@ -1474,10 +1639,17 @@ class _DashboardData {
 }
 
 class _RuntimeSettings {
-  const _RuntimeSettings({this.heap, this.profile});
+  const _RuntimeSettings({
+    this.heap,
+    this.profile,
+    this.consoleWrap,
+    this.consoleLogFormat,
+  });
 
   final String? heap;
   final String? profile;
+  final String? consoleWrap;
+  final String? consoleLogFormat;
 }
 
 class _BuildVersionChoice {

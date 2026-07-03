@@ -19,6 +19,14 @@ void main() {
       expect(events.single.char, 'q');
     });
 
+    test('preserves case for uppercase letters', () {
+      final TermEventParser parser = TermEventParser();
+      final List<TermEvent> events = feed(parser, 'R');
+      expect(events, hasLength(1));
+      expect(events.single.kind, TermEventKind.char);
+      expect(events.single.char, 'R');
+    });
+
     test('parses enter for both CR and LF', () {
       final TermEventParser parser = TermEventParser();
       expect(feed(parser, '\r').single.kind, TermEventKind.enter);

@@ -1,10 +1,19 @@
 import 'dart:io';
 
+import 'command_help.dart';
 import 'handlers/consumer_handlers.dart';
 import 'handlers/passthrough_handlers.dart';
 import 'handlers/wizard_handler.dart';
 
 Future<int> runCli(List<String> args) async {
+  if (isCliHelpRequest(args)) {
+    return printCliHelpForArgs(args);
+  }
+  if (isCliVersionRequest(args)) {
+    printCliVersion();
+    return 0;
+  }
+
   if (args.isEmpty) {
     await handleWizard();
     return 0;
@@ -43,11 +52,9 @@ Future<int> runCli(List<String> args) async {
       case 'config':
         return _runConfig(rest);
       case 'help':
-        await handleHelp();
-        return 0;
+        return printCliHelpForArgs(args);
       case 'version':
-        stdout.writeln('Multiplexor CLI v0.2.0');
-        stdout.writeln('Minecraft server profile manager');
+        printCliVersion();
         return 0;
       default:
         stderr.writeln('[ERROR] Unknown command: $command');
@@ -103,7 +110,7 @@ Future<int> _runRepos(List<String> rest) async {
       }, const <String, dynamic>{});
       return 0;
     default:
-      stderr.writeln('Usage: repos sync [all|paper|purpur|folia|canvas]');
+      stderr.writeln('Usage: repos sync [all|paper|purpur|folia|canvas|leaf]');
       return 2;
   }
 }
@@ -140,6 +147,7 @@ Future<int> _runBuild(List<String> rest) async {
     case 'purpur':
     case 'folia':
     case 'canvas':
+    case 'leaf':
     case 'spigot':
     case 'forge':
     case 'fabric':

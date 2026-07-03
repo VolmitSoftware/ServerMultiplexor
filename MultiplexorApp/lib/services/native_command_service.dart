@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
+import 'package:multiplexor/cli/command_help.dart';
 import 'package:path/path.dart' as p;
 import 'package:yaml/yaml.dart';
 
@@ -25,6 +26,11 @@ class NativeCommandService {
 
   final ManagerContext context;
   final ConsumerService consumerService;
+  ConsumerProfile? _consumerOverride;
+
+  void setConsumerOverride(ConsumerProfile? profile) {
+    _consumerOverride = profile;
+  }
 
   Future<CapturedResult> execute(
     List<String> args, {
@@ -53,6 +59,14 @@ class NativeCommandService {
   }
 
   Future<int> _dispatch(List<String> args, _NativeIoBuffer io) async {
+    if (isCliHelpRequest(args)) {
+      return _printHelpForArgs(args, io);
+    }
+    if (isCliVersionRequest(args)) {
+      _printVersion(io);
+      return 0;
+    }
+
     final command = args.first;
     final rest = args.sublist(1);
 
@@ -60,11 +74,9 @@ class NativeCommandService {
       case 'help':
       case '-h':
       case '--help':
-        _printHelp(io);
-        return 0;
+        return _printHelpForArgs(args, io);
       case 'version':
-        io.write('Multiplexor CLI v0.2.0');
-        io.write('Minecraft server profile manager (native mode)');
+        _printVersion(io);
         return 0;
       case 'doctor':
         return _dispatchDoctor(rest, io);
@@ -905,6 +917,14 @@ class NativeCommandService {
     final profile = _activeConsumer;
     final isolated = options['isolated'] == 'true';
 
+    if (!_isKnownServerType(type) && (jar == null || jar.isEmpty)) {
+      throw _NativeCommandException(
+        'Unknown server type: $type. Use --jar <path> for custom server jars.',
+        2,
+      );
+    }
+    _ensureConsumerOwnsServerType(profile, type, command: 'server create');
+
     if (jar != null && jar.isNotEmpty) {
       _serverCreateFromJar(
         profile,
@@ -1068,7 +1088,17 @@ class NativeCommandService {
         await _runtimeConsoles(profile, io, layout: 'lateral');
         return 0;
       case 'stop':
-        await _runtimeStop(profile, rest.isNotEmpty ? rest.first : null, io);
+        final bool graceful = rest.contains('--graceful');
+        final List<String> stopPositional = rest
+            .where((String a) => a != '--graceful')
+            .toList(growable: false);
+        final String? stopTarget =
+            stopPositional.isNotEmpty ? stopPositional.first : null;
+        if (graceful) {
+          await _runtimeGracefulStop(profile, stopTarget, io);
+        } else {
+          await _runtimeStop(profile, stopTarget, io);
+        }
         return 0;
       case 'restart':
         final restartParsed = _parseRuntimeTargetArgs(
@@ -1102,7 +1132,12 @@ class NativeCommandService {
           final port = _instanceGetServerPort(profile, name);
           final pid = _readPid(_runtimeServerPidFile(profile, name));
           final locked = _instanceLocked(profile, name) ? 'locked' : 'unlocked';
-          io.write('$name\t${state.name}\t$port\t${pid ?? '-'}\t$locked');
+          final isolated = _instanceIsolated(profile, name)
+              ? 'isolated'
+              : 'shared';
+          io.write(
+            '$name\t${state.name}\t$port\t${pid ?? '-'}\t$locked\t$isolated',
+          );
         }
         return 0;
       case 'metrics':
@@ -1111,7 +1146,7 @@ class NativeCommandService {
         return _dispatchRuntimeSettings(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (start/restart support --instance/--no-console)',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (start/restart support --instance/--no-console; stop supports --graceful)',
           2,
         );
     }
@@ -1434,7 +1469,7 @@ class NativeCommandService {
       case 'latest':
         if (rest.isEmpty) {
           throw _NativeCommandException(
-            'Usage: build latest <paper|purpur|folia|canvas|forge|fabric|neoforge|spigot>',
+            'Usage: build latest <paper|purpur|folia|canvas|leaf|forge|fabric|neoforge|spigot>',
             2,
           );
         }
@@ -1453,16 +1488,18 @@ class NativeCommandService {
       case 'purpur':
       case 'folia':
       case 'canvas':
+      case 'leaf':
       case 'spigot':
       case 'forge':
       case 'fabric':
       case 'neoforge':
         final buildOptions = _parseOptions(rest);
+        _ensureConsumerOwnsServerType(profile, sub, command: 'build $sub');
         await _buildTarget(profile, sub, buildOptions, io);
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: build <paper|purpur|folia|canvas|spigot|forge|fabric|neoforge|latest|list|list-all|versions|test-latest>',
+          'Usage: build <paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge|latest|list|list-all|versions|test-latest>',
           2,
         );
     }
@@ -1480,7 +1517,7 @@ class NativeCommandService {
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: repos sync [all|paper|purpur|folia|canvas]',
+          'Usage: repos sync [all|paper|purpur|folia|canvas|leaf]',
           2,
         );
     }
@@ -3320,14 +3357,14 @@ class NativeCommandService {
     }
 
     final types = switch (target) {
-      'all' => const <String>['paper', 'purpur', 'folia', 'canvas'],
-      'paper' || 'purpur' || 'folia' || 'canvas' => <String>[target],
+      'all' => const <String>['paper', 'purpur', 'folia', 'canvas', 'leaf'],
+      'paper' || 'purpur' || 'folia' || 'canvas' || 'leaf' => <String>[target],
       'forge' || 'fabric' || 'neoforge' => throw _NativeCommandException(
         '$target resolves versions from upstream metadata APIs; there is no repo to sync. Use: build $target [--mc <version>]',
         2,
       ),
       _ => throw _NativeCommandException(
-        'Usage: repos sync [all|paper|purpur|folia|canvas]',
+        'Usage: repos sync [all|paper|purpur|folia|canvas|leaf]',
         2,
       ),
     };
@@ -3698,7 +3735,7 @@ class NativeCommandService {
     Map<String, String> options,
     _NativeIoBuffer io,
   ) async {
-    final targets = <String>['paper', 'purpur', 'folia', 'canvas'];
+    final targets = <String>['paper', 'purpur', 'folia', 'canvas', 'leaf'];
     final failures = <String>[];
 
     for (final type in targets) {
@@ -3746,6 +3783,8 @@ class NativeCommandService {
         return _buildDownloadPaperLike(profile, normalized, mc, io);
       case 'purpur':
         return _buildDownloadPurpur(profile, mc, io);
+      case 'leaf':
+        return _buildDownloadLeaf(profile, mc, io);
       case 'canvas':
         return _buildDownloadCanvas(profile, mc, io);
       case 'fabric':
@@ -3867,6 +3906,76 @@ class NativeCommandService {
     await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'purpur', output);
     io.write('[OK] Cached purpur build $latestBuild for mc=$mc');
+    io.write('[INFO] Jar: $output');
+    return output;
+  }
+
+  Future<String> _buildDownloadLeaf(
+    ConsumerProfile profile,
+    String mc,
+    _NativeIoBuffer io,
+  ) async {
+    final payload = await _httpGetJsonObject(
+      'https://api.leafmc.one/v2/projects/leaf/versions/$mc/builds',
+    );
+    final builds = payload['builds'];
+    if (builds is! List || builds.isEmpty) {
+      throw _NativeCommandException('No Leaf builds available for mc=$mc', 1);
+    }
+
+    // Prefer the highest stable ("default" channel) build, falling back to the
+    // highest build of any channel when a version only has experimental builds.
+    // Leaf's v2 API exposes the jar name under downloads.primary.name (Paper
+    // uses downloads.application), so the URL is assembled explicitly.
+    var bestStableBuild = -1;
+    String? stableJarName;
+    var bestAnyBuild = -1;
+    String? anyJarName;
+    for (final raw in builds) {
+      if (raw is! Map) {
+        continue;
+      }
+      final build = raw['build'];
+      final downloads = raw['downloads'];
+      if (build is! num || downloads is! Map) {
+        continue;
+      }
+      final primary = downloads['primary'];
+      if (primary is! Map) {
+        continue;
+      }
+      final jarName = primary['name'];
+      if (jarName is! String || jarName.trim().isEmpty) {
+        continue;
+      }
+      final buildNumber = build.toInt();
+      if (buildNumber > bestAnyBuild) {
+        bestAnyBuild = buildNumber;
+        anyJarName = jarName.trim();
+      }
+      final isStable =
+          raw['channel']?.toString().trim().toLowerCase() == 'default';
+      if (isStable && buildNumber > bestStableBuild) {
+        bestStableBuild = buildNumber;
+        stableJarName = jarName.trim();
+      }
+    }
+
+    final bestBuild = bestStableBuild > 0 ? bestStableBuild : bestAnyBuild;
+    final jarName = bestStableBuild > 0 ? stableJarName : anyJarName;
+    if (bestBuild <= 0 || jarName == null) {
+      throw _NativeCommandException(
+        'No downloadable Leaf build found for mc=$mc',
+        1,
+      );
+    }
+
+    final downloadUrl =
+        'https://api.leafmc.one/v2/projects/leaf/versions/$mc/builds/$bestBuild/downloads/$jarName';
+    final output = p.join(_buildDir(profile, 'leaf'), 'leaf-$mc-$bestBuild.jar');
+    await _downloadToFile(downloadUrl, output, io: io);
+    _registerBuiltJar(profile, 'leaf', output);
+    io.write('[OK] Cached leaf build $bestBuild for mc=$mc');
     io.write('[INFO] Jar: $output');
     return output;
   }
@@ -4411,7 +4520,7 @@ class NativeCommandService {
 
     if (!_allBuildTypes.contains(target)) {
       throw _NativeCommandException(
-        'Usage: build list-all [paper|purpur|spigot|folia|canvas|forge|fabric|neoforge]',
+        'Usage: build list-all [paper|purpur|spigot|folia|canvas|leaf|forge|fabric|neoforge]',
         2,
       );
     }
@@ -4457,7 +4566,7 @@ class NativeCommandService {
 
     if (!_allBuildTypes.contains(target)) {
       throw _NativeCommandException(
-        'Usage: build versions [paper|purpur|spigot|folia|canvas|forge|fabric|neoforge]',
+        'Usage: build versions [paper|purpur|spigot|folia|canvas|leaf|forge|fabric|neoforge]',
         2,
       );
     }
@@ -4482,7 +4591,7 @@ class NativeCommandService {
       return upstream;
     }
 
-    if (<String>{'paper', 'purpur', 'folia', 'canvas'}.contains(normalized)) {
+    if (<String>{'paper', 'purpur', 'folia', 'canvas', 'leaf'}.contains(normalized)) {
       final stable = await _repoLatestStableVersion(profile, normalized);
       if (stable != null && stable.isNotEmpty) {
         return stable;
@@ -4511,7 +4620,7 @@ class NativeCommandService {
       }
     } catch (_) {}
 
-    if (<String>{'paper', 'purpur', 'folia', 'canvas'}.contains(type)) {
+    if (<String>{'paper', 'purpur', 'folia', 'canvas', 'leaf'}.contains(type)) {
       return _repoStableVersions(profile, type);
     }
 
@@ -4525,6 +4634,8 @@ class NativeCommandService {
         return _resolvePaperLikeMcVersions(type);
       case 'purpur':
         return _resolvePurpurMcVersions();
+      case 'leaf':
+        return _resolveLeafMcVersions();
       case 'canvas':
         return _resolveCanvasMcVersions();
       case 'fabric':
@@ -4581,6 +4692,8 @@ class NativeCommandService {
           return _resolveLatestPaperLikeMcVersion(type);
         case 'purpur':
           return _resolveLatestPurpurMcVersion();
+        case 'leaf':
+          return _resolveLatestLeafMcVersion();
         case 'canvas':
           return _resolveLatestCanvasMcVersion();
         case 'fabric':
@@ -4640,6 +4753,22 @@ class NativeCommandService {
       return const <String>[];
     }
     return _stableSortedMcVersions(versionsRaw);
+  }
+
+  Future<List<String>> _resolveLeafMcVersions() async {
+    final payload = await _httpGetJsonObject(
+      'https://api.leafmc.one/v2/projects/leaf',
+    );
+    final versionsRaw = payload['versions'];
+    if (versionsRaw is! List) {
+      return const <String>[];
+    }
+    return _stableSortedMcVersions(versionsRaw);
+  }
+
+  Future<String?> _resolveLatestLeafMcVersion() async {
+    final versions = await _resolveLeafMcVersions();
+    return versions.isEmpty ? null : versions.last;
   }
 
   Future<List<String>> _resolveCanvasMcVersions() async {
@@ -5924,6 +6053,60 @@ class NativeCommandService {
     }
   }
 
+  Future<void> _runtimeGracefulStop(
+    ConsumerProfile profile,
+    String? inputInstance,
+    _NativeIoBuffer io,
+  ) async {
+    final instance = inputInstance?.trim().isNotEmpty == true
+        ? inputInstance!.trim()
+        : _currentInstance(profile);
+
+    if (instance == null || instance.isEmpty) {
+      throw _NativeCommandException('No active instance set', 2);
+    }
+
+    final tmuxSession = _tmuxSessionName(profile, instance);
+    if (!await _tmuxSessionExists(tmuxSession)) {
+      // No live console to talk to; defer to the hard path so pid files are
+      // cleaned up and the result is reported once.
+      await _runtimeStop(profile, instance, io);
+      return;
+    }
+
+    // Ask the server to shut down cleanly (flushes and saves worlds).
+    await _runProcess('tmux', <String>[
+      'send-keys',
+      '-t',
+      tmuxSession,
+      'stop',
+      'Enter',
+    ]);
+
+    final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
+    final deadline = DateTime.now().add(const Duration(seconds: 60));
+    var exited = false;
+    while (DateTime.now().isBefore(deadline)) {
+      final sessionAlive = await _tmuxSessionExists(tmuxSession);
+      final pidAlive = serverPid != null && await _pidRunning(serverPid);
+      if (!sessionAlive && !pidAlive) {
+        exited = true;
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
+    if (!exited) {
+      io.write('[WARN] Graceful stop timed out; forcing: $instance');
+      await _runtimeStop(profile, instance, io);
+      return;
+    }
+
+    File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
+    File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
+    io.write('[OK] Runtime stopped (graceful): $instance');
+  }
+
   Future<void> _runtimeStatus(
     ConsumerProfile profile,
     String? inputInstance,
@@ -7141,6 +7324,7 @@ class NativeCommandService {
       'paper' => 'Paper',
       'folia' => 'Folia',
       'canvas' => 'Canvas',
+      'leaf' => 'Leaf',
       'spigot' => 'Spigot',
       'forge' => 'Forge',
       'fabric' => 'Fabric',
@@ -7155,6 +7339,7 @@ class NativeCommandService {
       'paper' => 'b',
       'folia' => 'a',
       'canvas' => 'e',
+      'leaf' => '2',
       'spigot' => '6',
       'forge' => 'c',
       'fabric' => '9',
@@ -8156,9 +8341,9 @@ class NativeCommandService {
   }
 
   /// Emits one tab-separated line per instance with live metrics for the
-  /// dashboard: name, state, port, locked, players, max, version, tps. Running
-  /// servers are pinged (and RCON-queried for TPS) concurrently with short
-  /// timeouts so the whole sweep stays within ~1s.
+  /// dashboard: name, state, port, locked, players, max, version, tps,
+  /// isolation. Running servers are pinged (and RCON-queried for TPS)
+  /// concurrently with short timeouts so the whole sweep stays within ~1s.
   Future<int> _runtimeMetrics(
     ConsumerProfile profile,
     _NativeIoBuffer io,
@@ -8188,8 +8373,11 @@ class NativeCommandService {
         final max = ping != null ? '${ping.max}' : '-';
         final version = ping?.versionName ?? '-';
         final tpsCell = tps != null ? tps.toStringAsFixed(1) : '-';
+        final isolated = _instanceIsolated(profile, name)
+            ? 'isolated'
+            : 'shared';
         return '$name\t${state.name}\t$port\t$locked\t$players\t$max'
-            '\t$version\t$tpsCell';
+            '\t$version\t$tpsCell\t$isolated';
       }),
     );
     for (final line in lines) {
@@ -8277,6 +8465,7 @@ class NativeCommandService {
       case 'purpur':
       case 'folia':
       case 'canvas':
+      case 'leaf':
       case 'spigot':
         return ConsumerProfile.plugin;
       default:
@@ -8287,12 +8476,50 @@ class NativeCommandService {
     }
   }
 
+  bool _isKnownServerType(String type) {
+    switch (type.toLowerCase().trim()) {
+      case 'paper':
+      case 'purpur':
+      case 'folia':
+      case 'canvas':
+      case 'leaf':
+      case 'spigot':
+      case 'forge':
+      case 'fabric':
+      case 'neoforge':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  void _ensureConsumerOwnsServerType(
+    ConsumerProfile profile,
+    String type, {
+    required String command,
+  }) {
+    if (!_isKnownServerType(type)) {
+      return;
+    }
+    final expected = _consumerForServerType(type);
+    if (profile == expected) {
+      return;
+    }
+    throw _NativeCommandException(
+      'Server type "$type" belongs to the ${expected.shortName} consumer, '
+      'but the active consumer is ${profile.shortName}. Use: ./start.sh '
+      '--consumer ${expected.shortName} $command ...',
+      2,
+    );
+  }
+
   String _repoUrl(String type) {
     return switch (type) {
       'paper' => 'https://github.com/PaperMC/Paper.git',
       'purpur' => 'https://github.com/PurpurMC/Purpur.git',
       'folia' => 'https://github.com/PaperMC/Folia.git',
       'canvas' => 'https://github.com/CraftCanvasMC/Canvas.git',
+      'leaf' => 'https://github.com/Winds-Studio/Leaf.git',
       _ => throw _NativeCommandException('Unknown repo type: $type', 2),
     };
   }
@@ -8488,7 +8715,9 @@ class NativeCommandService {
   }
 
   ConsumerProfile get _activeConsumer {
-    return context.requestedConsumer ?? consumerService.readActive();
+    return _consumerOverride ??
+        context.requestedConsumer ??
+        consumerService.readActive();
   }
 
   String _consumerRoot(ConsumerProfile profile) {
@@ -8641,6 +8870,7 @@ class NativeCommandService {
     'spigot',
     'folia',
     'canvas',
+    'leaf',
     'forge',
     'fabric',
     'neoforge',

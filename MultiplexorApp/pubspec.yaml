@@ -1,5 +1,5 @@
 name: multiplexor
-version: 0.1.0
+version: 0.2.0
 description: Multiplexor CLI for Minecraft server profile management and runtime orchestration.
 homepage: https://github.com/brianfopiano/multiplexor
 repository: https://github.com/brianfopiano/multiplexor

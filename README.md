@@ -25,6 +25,10 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 
 Dashboard shortcuts: `n` new instance, `s` start all, `k` stop all, `g` all consoles, `b` build & tuning, `c` switch consumer, `r` refresh, `q` quit.
 
+Highlighted-server quick keys (act on the selected server without opening its menu): `R` restart, `S` stop (graceful), `X` kill (force), `O` console. These are uppercase (Shift), so they never clash with the lowercase shortcuts above; they do nothing when a non-server row (New, Build, etc.) is highlighted.
+
+Use `m` for Create many. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
+
 ## Concepts
 
 - **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. They never share state. The active profile is set with `consumer use`.
@@ -40,7 +44,7 @@ Dashboard shortcuts: `n` new instance, `s` start all, `k` stop all, `g` all cons
 
 ## CLI Reference
 
-Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--consumer <profile>` for a one-shot profile override, `--root <path>` for a different workspace, `--verbose` for arg-normalization debug output.
+Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--consumer <profile>` for a one-shot profile override, `--root <path>` for a different workspace, `--verbose` for arg-normalization debug output. Use `./start.sh help <command>` or `<command> --help` for focused command help.
 
 ### consumer — pick which profile is active
 
@@ -83,7 +87,9 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `server create <name> --jar <path> [--type label] [--isolated]` | Create + wire an explicit jar. |
 | `server create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]` | Spin up one instance per type in a single call. Each instance is named after its type (or `<prefix>-<type>` if `--prefix` is set) and routed to the correct consumer (plugin types → plugin profile, modded types → their own). Skips collisions and resolution failures without aborting the batch. |
 
-`<type>` is one of: `paper`, `purpur`, `folia`, `canvas`, `spigot`, `forge`, `fabric`, `neoforge`. For `forge` / `neoforge`, an installer jar triggers args-file launch mode automatically.
+Single `server create` and `build <type>` commands must run under the consumer that owns the selected server type. Use `--consumer fabric`, `--consumer forge`, or `--consumer neoforge` for modded types; plugin-family types use `plugin`. `server create-many` remains the cross-consumer batch command.
+
+`<type>` is one of: `paper`, `purpur`, `folia`, `canvas`, `leaf`, `spigot`, `forge`, `fabric`, `neoforge`. `leaf` is a high-performance Paper fork and behaves like any other plugin-family type. For `forge` / `neoforge`, an installer jar triggers args-file launch mode automatically.
 
 ### runtime — start, stop, attach
 
@@ -92,15 +98,15 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | Command | What it does |
 |---------|--------------|
 | `runtime start [instance] [--no-console]` | Start the instance and attach its console. `--no-console` returns immediately. |
-| `runtime stop [instance]` | Send a graceful stop. |
+| `runtime stop [instance] [--graceful]` | Force-stop the instance immediately (kills the tmux session, then SIGTERM/SIGKILL any tracked pids). With `--graceful`, sends `stop` to the server console and waits up to 60s for a clean world-save shutdown, falling back to a force-stop on timeout. |
 | `runtime restart [instance] [--no-console]` | Stop and start again. Attaches console unless `--no-console`. |
 | `runtime console [instance]` | Attach to a running console. Esc detaches; the server keeps running. Mouse wheel scrolls; drag-select copies to clipboard. |
 | `runtime consoles` | Open every running console in a tmux grid. |
 | `runtime consoles-lateral` | Open every running console side-by-side. |
 | `runtime status [instance]` | Print the runtime state of one instance. |
 | `runtime stats [instance]` | Show live stats for running servers: player count (`online/max`), state, uptime, port, and version, plus the names of online players. With no instance, scans every consumer for running servers; with an instance, reports that one. Player counts come from a Server List Ping, so neither `enable-query` nor `enable-rcon` is required. |
-| `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`. |
-| `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps`. Running servers are pinged (and RCON-queried for TPS) concurrently. Backs the wizard dashboard's live refresh. TPS is `-` unless the server is Paper-family and was started with RCON enabled. |
+| `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked<TAB>isolated`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`; the final two columns are `locked`/`unlocked` and `isolated`/`shared`. |
+| `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps<TAB>isolated`. Running servers are pinged (and RCON-queried for TPS) concurrently. Backs the wizard dashboard's live refresh. TPS is `-` unless the server is Paper-family and was started with RCON enabled. |
 | `runtime list` | Print running instance names. |
 | `runtime settings show` | Print the active heap, JVM preset, and flags. |
 | `runtime settings presets` | List available JVM presets (`aikar`, `vanilla`, `conservative`). |
@@ -182,7 +188,7 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 | Command | What it does |
 |---------|--------------|
-| `repos sync [all\|paper\|purpur\|folia\|canvas]` | Clone or pull upstream repos used for version discovery. Build commands resolve metadata over HTTP, so this is mostly used for Spigot/BuildTools. |
+| `repos sync [all\|paper\|purpur\|folia\|canvas\|leaf]` | Clone or pull upstream repos used for version discovery. Build commands resolve metadata over HTTP, so this is mostly used for Spigot/BuildTools. |
 
 ### config — per-instance config plumbing
 
@@ -199,6 +205,9 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 # Create an isolated test server (won't pick up your dropins)
 ./start.sh server create vanilla-test --type purpur --isolated
+
+# Create a Leaf server (high-performance Paper fork) on the latest stable build
+./start.sh server create leaf --type leaf --auto-build
 
 # Spin up one of every plugin flavor at the same MC version
 ./start.sh server create-many --types paper,purpur,canvas,spigot --mc 1.21.11 --auto-build

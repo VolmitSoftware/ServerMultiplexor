@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:fast_log/fast_log.dart';
 
+import 'package:multiplexor/cli/command_help.dart';
 import 'package:multiplexor/cli/runner.dart';
 import 'package:multiplexor/services/app_context.dart';
 
@@ -13,6 +14,19 @@ Future<void> main(List<String> arguments) async {
     lDebugMode = true;
     stdout.writeln('[debug] args=${parsed.args.join(' ')}');
     stdout.writeln('[debug] normalized=${normalizedArgs.join(' ')}');
+  }
+
+  if (isCliHelpRequest(normalizedArgs)) {
+    final code = printCliHelpForArgs(normalizedArgs);
+    if (code != 0) {
+      exit(code);
+    }
+    return;
+  }
+
+  if (isCliVersionRequest(normalizedArgs)) {
+    printCliVersion();
+    return;
   }
 
   try {
@@ -147,6 +161,7 @@ List<String> _normalizePositionalArgs(List<String> args) {
         'purpur',
         'folia',
         'canvas',
+        'leaf',
         'spigot',
         'forge',
         'fabric',

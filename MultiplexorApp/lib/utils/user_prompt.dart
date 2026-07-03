@@ -276,28 +276,30 @@ class Ui {
     }
   }
 
-  /// Single-key confirmation: y/n, Enter accepts yes, Esc backs out.
-  static Future<bool> confirm(String prompt) async {
+  /// Single-key confirmation: y/n, Enter accepts the configured default,
+  /// Esc backs out.
+  static Future<bool> confirm(String prompt, {bool defaultValue = true}) async {
+    final hint = defaultValue ? 'Y/n' : 'y/N';
     if (!hasTerminal) {
-      stdout.write('$prompt [Y/n]: ');
+      stdout.write('$prompt [$hint]: ');
       final String value = (stdin.readLineSync() ?? '').trim().toLowerCase();
       if (value.isEmpty) {
-        return true;
+        return defaultValue;
       }
       return value == 'y' || value == 'yes';
     }
 
     final TermIo io = TermIo.instance;
     io.drainInput();
-    stdout.write(_inputPrompt(prompt, hint: 'Y/n'));
+    stdout.write(_inputPrompt(prompt, hint: hint));
     io.setRawMode(true);
     try {
       while (true) {
         final TermEvent event = io.readEvent();
         switch (event.kind) {
           case TermEventKind.enter:
-            stdout.writeln('yes');
-            return true;
+            stdout.writeln(defaultValue ? 'yes' : 'no');
+            return defaultValue;
           case TermEventKind.escape:
             stdout.writeln('');
             throw const PromptBackNavigation();
