@@ -28,6 +28,13 @@ class NativeCommandService {
   final ConsumerService consumerService;
   ConsumerProfile? _consumerOverride;
 
+  /// Persistent RCON connections, reused across dashboard refreshes so the
+  /// server log isn't flooded with connect/disconnect lines every tick.
+  final RconConnectionPool _rconPool = RconConnectionPool();
+
+  /// Closes every pooled RCON connection. Call on shutdown.
+  void disposeRcon() => _rconPool.disposeAll();
+
   void setConsumerOverride(ConsumerProfile? profile) {
     _consumerOverride = profile;
   }
@@ -6719,6 +6726,15 @@ class NativeCommandService {
   /// `[time level]: ` prefix from the console while keeping a full file
   /// appender targeting `logs/latest.log` — so `cat logs/latest.log` still
   /// shows timestamps and levels. Returns the absolute path to the config.
+  ///
+  /// The Root logger also carries a [RegexFilter] that drops the RCON client
+  /// connect/disconnect lines (`Thread RCON Client /… started` /
+  /// `… shutting down`). Those are pure noise from the manager's own live TPS
+  /// polling, not the operator's traffic. The filter matches message text
+  /// rather than a logger name so it works across server versions and mapping
+  /// schemes, and it targets only `RCON Client` thread lifecycle lines so real
+  /// RCON warnings and errors still surface. It applies to both the console and
+  /// `logs/latest.log`, so the spam is gone from the file too.
   String _ensureMinimalLog4jConfig(ConsumerProfile profile, String instance) {
     final dir = _instanceDir(profile, instance);
     final path = p.join(dir, '.multiplexor-log4j2.xml');
@@ -6745,6 +6761,7 @@ class NativeCommandService {
     </Appenders>
     <Loggers>
         <Root level="info">
+            <RegexFilter regex="(?s).*RCON Client.*" useRawMsg="false" onMatch="DENY" onMismatch="NEUTRAL"/>
             <AppenderRef ref="MinimalConsole"/>
             <AppenderRef ref="File"/>
         </Root>
@@ -8330,7 +8347,7 @@ class NativeCommandService {
       return null;
     }
     final host = _instanceGetServerIp(profile, instance);
-    final response = await RconClient.command(
+    final response = await _rconPool.command(
       host == '0.0.0.0' ? '127.0.0.1' : host,
       port,
       password,

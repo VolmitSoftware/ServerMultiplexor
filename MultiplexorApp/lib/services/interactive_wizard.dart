@@ -66,6 +66,7 @@ class InteractiveWizard {
       Ui.error('Input stream lost: $e');
       stdout.writeln('Wizard closed to avoid a redraw loop.');
     } finally {
+      passthrough.disposeRcon();
       TermIo.instance.restoreTerminal();
     }
   }

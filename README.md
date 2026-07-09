@@ -113,7 +113,7 @@ Single `server create` and `build <type>` commands must run under the consumer t
 | `runtime settings set-heap <2G\|4G\|...>` | Set JVM `-Xmx`. |
 | `runtime settings set-preset <name>` | Apply a JVM preset's flags. |
 | `runtime settings set-wrap <on\|off>` | Toggle tmux console line wrap. Default `off` (long server lines clip at the pane edge instead of wrapping). Takes effect on next `runtime start`. **The `logs/latest.log` file is unaffected** — wrapping is purely a terminal-renderer concern. |
-| `runtime settings set-log-format <minimal\|default>` | Toggle the console log pattern. Default `minimal` — strips the `[HH:mm:ss INFO]` prefix from the console only. `default` restores the server's bundled Log4j pattern. **The `logs/latest.log` file always keeps the full timestamped pattern.** Takes effect on next `runtime start`. |
+| `runtime settings set-log-format <minimal\|default>` | Toggle the console log pattern. Default `minimal` — strips the `[HH:mm:ss INFO]` prefix from the console only, and filters out the `RCON Client … started` / `… shutting down` lines the manager's live TPS polling triggers (from both the console and `logs/latest.log`). `default` restores the server's bundled Log4j pattern (RCON lines reappear). **The `logs/latest.log` file always keeps the full timestamped pattern.** Takes effect on next `runtime start`. |
 | `runtime settings reset` | Restore default runtime settings. |
 
 Paper/Spigot/Purpur `/restart` is wired to a per-instance `multiplexor-restart.sh`, so `/restart` re-enters Multiplexor instead of exiting permanently. While that script waits, the instance reports `restarting`.

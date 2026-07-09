@@ -26,6 +26,11 @@ class PassthroughService {
     _native.setConsumerOverride(profile);
   }
 
+  /// Closes pooled RCON connections held for live dashboard metrics.
+  void disposeRcon() {
+    _native.disposeRcon();
+  }
+
   Future<int> run(List<String> args) async {
     final native = await _native.execute(args, stream: true);
     return native.exitCode;
