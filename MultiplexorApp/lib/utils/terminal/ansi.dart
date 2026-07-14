@@ -14,6 +14,10 @@ class Ansi {
   static const String cyan = '\x1B[36m';
   static const String gray = '\x1B[90m';
   static const String eraseLine = '\x1B[2K';
+  static const String eraseToEnd = '\x1B[0K';
+
+  /// Subtle dark background used for the selected menu row (256-color).
+  static const String bgHighlight = '\x1B[48;5;236m';
 
   static String style(String text, String codes) => '$codes$text$reset';
 
@@ -31,5 +35,34 @@ class Ansi {
       return text;
     }
     return text + ' ' * (width - visible);
+  }
+
+  /// Clips [text] to at most [width] visible columns, keeping escape
+  /// sequences intact. Prevents soft-wrapped rows from corrupting in-place
+  /// menu repaints. A reset is appended only when styled text was clipped.
+  static String clipVisible(String text, int width) {
+    if (visibleLength(text) <= width) {
+      return text;
+    }
+    final StringBuffer out = StringBuffer();
+    int visible = 0;
+    int i = 0;
+    bool sawEscape = false;
+    while (i < text.length && visible < width) {
+      final Match? escape = _ansiPattern.matchAsPrefix(text, i);
+      if (escape != null) {
+        out.write(escape.group(0));
+        i = escape.end;
+        sawEscape = true;
+        continue;
+      }
+      out.write(text[i]);
+      visible++;
+      i++;
+    }
+    if (sawEscape) {
+      out.write(reset);
+    }
+    return out.toString();
   }
 }

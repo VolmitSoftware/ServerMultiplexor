@@ -1,9 +1,11 @@
 import 'dart:io';
 
+import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
 import '../utils/process_runner.dart';
 import '../utils/user_prompt.dart';
 import 'consumer_service.dart';
+import 'dashboard_glyphs.dart';
 import 'dashboard_quick_action.dart';
 import 'passthrough_service.dart';
 import 'runtime_state.dart';
@@ -47,7 +49,10 @@ class InteractiveWizard {
     TermIo.instance.installSignalRestore();
     try {
       while (true) {
-        final _DashboardData data = await Ui.shielded(_loadDashboardData);
+        final _DashboardData data = await Ui.spin(
+          'Loading servers',
+          _loadDashboardData,
+        );
         _renderHeader(data);
 
         _DashChoice choice;
@@ -94,6 +99,7 @@ class InteractiveWizard {
       rows: await _loadInstanceRows(),
       active: await _activeInstance(),
       dropins: await _dropinsSource(),
+      buildCache: await _cachedBuilds('all'),
     );
   }
 
@@ -112,8 +118,9 @@ class InteractiveWizard {
 
   List<MenuEntry<_DashChoice>> _buildDashEntries(
     List<_InstanceRow> rows,
-    String? active,
-  ) {
+    String? active, {
+    int frame = 0,
+  }) {
     final List<_InstanceRow> running = rows
         .where((_InstanceRow r) => r.state != RuntimeState.stopped)
         .toList(growable: false);
@@ -134,21 +141,28 @@ class InteractiveWizard {
     } else {
       entries.add(const MenuEntry<_DashChoice>.separator('servers'));
       for (final _InstanceRow row in rows) {
-        final List<String> bits = <String>[':${row.port}'];
+        final List<String> bits = <String>[
+          Ansi.style(':${row.port}', Ansi.gray),
+        ];
         if (row.players != null) {
-          bits.add('${row.players}/${row.maxPlayers ?? '?'}');
+          final String players = '${row.players}/${row.maxPlayers ?? '?'}';
+          bits.add(
+            Ansi.style(players, row.players! > 0 ? Ansi.cyan : Ansi.gray),
+          );
         }
         if (row.tps != null) {
-          bits.add('${row.tps!.toStringAsFixed(1)} tps');
+          bits.add(
+            Ansi.style('${row.tps!.toStringAsFixed(1)} tps', _tpsColor(row.tps!)),
+          );
         }
         if (row.version != null && row.version!.isNotEmpty) {
-          bits.add(row.version!);
+          bits.add(Ansi.style(row.version!, Ansi.gray));
         }
         if (row.locked) {
-          bits.add('locked');
+          bits.add(Ansi.style('locked', Ansi.yellow));
         }
         if (row.isolated) {
-          bits.add('isolated');
+          bits.add(Ansi.style('isolated', Ansi.gray));
         }
         final String activeMark = row.name == active
             ? '  ${Ansi.style('active', Ansi.cyan)}'
@@ -157,13 +171,16 @@ class InteractiveWizard {
           MenuEntry<_DashChoice>(
             row.name,
             value: _DashChoice(_Act.instance, instance: row.name),
-            badge: '${_stateGlyph(row.state)} ${row.state.name}',
+            badge: '${animatedStateGlyph(row.state, frame)} ${row.state.name}',
             badgeColor: _stateColor(row.state),
-            detail: '${bits.join(' · ')}$activeMark',
+            detail: '${bits.join(Ansi.style(' · ', Ansi.gray))}$activeMark',
           ),
         );
       }
-      entries.add(const MenuEntry<_DashChoice>.separator());
+    }
+
+    entries.add(const MenuEntry<_DashChoice>.separator('actions'));
+    if (rows.isNotEmpty) {
       entries.add(
         MenuEntry<_DashChoice>(
           'New instance',
@@ -171,43 +188,7 @@ class InteractiveWizard {
           shortcut: 'n',
         ),
       );
-      if (stopped.length > 1) {
-        entries.add(
-          MenuEntry<_DashChoice>(
-            'Start all stopped',
-            value: const _DashChoice(_Act.startAll),
-            shortcut: 's',
-            detail: '${stopped.length} instances',
-          ),
-        );
-      }
-      if (running.length > 1) {
-        entries.add(
-          MenuEntry<_DashChoice>(
-            'Stop all running',
-            value: const _DashChoice(_Act.stopAll),
-            shortcut: 'k',
-            detail: '${running.length} instances',
-          ),
-        );
-        entries.add(
-          MenuEntry<_DashChoice>(
-            'All consoles: grid',
-            value: const _DashChoice(_Act.consolesGrid),
-            shortcut: 'g',
-            detail: 'grid view',
-          ),
-        );
-        entries.add(
-          MenuEntry<_DashChoice>(
-            'All consoles: side-by-side',
-            value: const _DashChoice(_Act.consolesLateral),
-            detail: 'side-by-side view',
-          ),
-        );
-      }
     }
-
     entries.add(
       MenuEntry<_DashChoice>(
         'Create many',
@@ -218,6 +199,51 @@ class InteractiveWizard {
     );
     entries.add(
       MenuEntry<_DashChoice>(
+        'Pull latest builds',
+        value: const _DashChoice(_Act.pullBuilds),
+        shortcut: 'p',
+        detail: 'force re-download every platform jar',
+      ),
+    );
+    if (stopped.length > 1) {
+      entries.add(
+        MenuEntry<_DashChoice>(
+          'Start all stopped',
+          value: const _DashChoice(_Act.startAll),
+          shortcut: 's',
+          detail: '${stopped.length} instances',
+        ),
+      );
+    }
+    if (running.length > 1) {
+      entries.add(
+        MenuEntry<_DashChoice>(
+          'Stop all running',
+          value: const _DashChoice(_Act.stopAll),
+          shortcut: 'k',
+          detail: '${running.length} instances',
+        ),
+      );
+      entries.add(
+        MenuEntry<_DashChoice>(
+          'All consoles: grid',
+          value: const _DashChoice(_Act.consolesGrid),
+          shortcut: 'g',
+          detail: 'grid view',
+        ),
+      );
+      entries.add(
+        MenuEntry<_DashChoice>(
+          'All consoles: side-by-side',
+          value: const _DashChoice(_Act.consolesLateral),
+          detail: 'side-by-side view',
+        ),
+      );
+    }
+
+    entries.add(const MenuEntry<_DashChoice>.separator('workspace'));
+    entries.add(
+      MenuEntry<_DashChoice>(
         'Build & tuning',
         value: const _DashChoice(_Act.buildMenu),
         shortcut: 'b',
@@ -226,17 +252,18 @@ class InteractiveWizard {
     );
     entries.add(
       MenuEntry<_DashChoice>(
-        'Wipe everything',
-        value: const _DashChoice(_Act.wipeEverything),
-        detail: 'delete all instances across all consumers',
-      ),
-    );
-    entries.add(
-      MenuEntry<_DashChoice>(
         'Switch consumer',
         value: const _DashChoice(_Act.consumer),
         shortcut: 'c',
         detail: _activeConsumer().shortName,
+      ),
+    );
+    entries.add(
+      MenuEntry<_DashChoice>(
+        'Wipe everything',
+        value: const _DashChoice(_Act.wipeEverything),
+        labelColor: Ansi.red,
+        detail: 'delete all instances across all consumers',
       ),
     );
     entries.add(
@@ -258,12 +285,19 @@ class InteractiveWizard {
   }
 
   Future<_DashChoice> _dashboardMenu(_DashboardData data) async {
+    int frame = 0;
+    List<_InstanceRow> rows = data.rows;
+    String? active = data.active;
+    List<BuildCacheEntry> cache = data.buildCache;
+
     return menuSelect<_DashChoice>(
       'Dashboard',
-      _buildDashEntries(data.rows, data.active),
+      _buildDashEntries(rows, active),
       initialIndex: data.rows.isEmpty ? 0 : 1,
       hint:
           '↑↓ move · enter open · R restart · S stop · X kill · O console · esc back',
+      footer: _liveFooter(cache, 0),
+      tickInterval: const Duration(milliseconds: 250),
       onActionKey: (String raw, MenuEntry<_DashChoice> entry) {
         final _DashChoice? value = entry.value;
         final bool onServerRow = value != null &&
@@ -286,13 +320,27 @@ class InteractiveWizard {
             return _DashChoice(_Act.instanceConsole, instance: name);
         }
       },
-      // Live refresh: re-poll players/TPS/version and redraw in place ~1s.
+      // Animation repaints ~4x/s from cached rows; the expensive metrics
+      // sweep (pings every running server) still runs only ~once a second.
       onTick: () async {
-        final List<_InstanceRow> rows = await _loadInstanceMetricRows();
-        final String? active = await _activeInstance();
-        return _buildDashEntries(rows, active);
+        frame++;
+        if (frame % 4 == 0) {
+          rows = await _loadInstanceMetricRows();
+          active = await _activeInstance();
+          cache = await _cachedBuilds('all');
+        }
+        return MenuTick<_DashChoice>(
+          _buildDashEntries(rows, active, frame: frame),
+          footer: _liveFooter(cache, frame),
+        );
       },
     );
+  }
+
+  /// Dashboard footer with the breathing blob and live build freshness.
+  String _liveFooter(List<BuildCacheEntry> cache, int frame) {
+    return '${Ansi.style(blobGlyph(frame), blobStyle(frame))} '
+        '${_buildFreshnessFooter(cache)}';
   }
 
   Future<void> _dispatch(_DashChoice choice, List<_InstanceRow> rows) async {
@@ -317,6 +365,9 @@ class InteractiveWizard {
         return;
       case _Act.createMany:
         await _createMany();
+        return;
+      case _Act.pullBuilds:
+        await _refreshAllBuilds();
         return;
       case _Act.startAll:
         await _startAllStopped(await Ui.shielded(_loadInstanceRows));
@@ -462,6 +513,7 @@ class InteractiveWizard {
         const MenuEntry<_InstanceAct>(
           'Factory reset',
           value: _InstanceAct.reset,
+          labelColor: Ansi.red,
           detail: 'wipes worlds, config, dropins',
         ),
       );
@@ -469,6 +521,7 @@ class InteractiveWizard {
         const MenuEntry<_InstanceAct>(
           'Delete',
           value: _InstanceAct.delete,
+          labelColor: Ansi.red,
           detail: 'removes the instance entirely',
         ),
       );
@@ -479,7 +532,7 @@ class InteractiveWizard {
     );
 
     final String badge =
-        '${_stateGlyph(row.state)} ${row.state.name} on :${row.port}'
+        '${animatedStateGlyph(row.state, 1)} ${row.state.name} on :${row.port}'
         '${isActive ? ' · active' : ''}'
         '${isolated ? ' · isolated' : ''}'
         '${locked ? ' · locked' : ''}';
@@ -667,10 +720,7 @@ class InteractiveWizard {
   // ─── Create flow ─────────────────────────────────────────────────────
 
   Future<void> _createInstance() async {
-    final String type = await Ui.pick(
-      'Server platform',
-      _serverTypesForActiveConsumer(),
-    );
+    final String type = await _pickServerPlatform();
     final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String version = versionChoice.version;
 
@@ -681,8 +731,10 @@ class InteractiveWizard {
       validationMessage: 'Use letters, numbers, ., _, or - with no spaces.',
     );
 
-    final bool refresh = await Ui.confirm(
-      'Refresh ${_serverTypeLabel(type)} $version from upstream first?',
+    final bool refresh = _announceRefreshPlan(
+      type: type,
+      version: version,
+      cachedAge: versionChoice.cachedAge,
     );
 
     // Confirms default YES — phrase as "subscribe?" so accepting keeps the
@@ -756,13 +808,42 @@ class InteractiveWizard {
       'Shared Minecraft version (blank to resolve latest per type)',
       defaultValue: '',
     );
-    final bool refresh = await Ui.confirm(
-      'Refresh each type from upstream before creating?',
-    );
     final bool subscribe = await Ui.confirm(
       'Subscribe new servers to plugin/mod dropins and shared ops?',
     );
     final bool isolated = !subscribe;
+
+    // Auto-refresh instead of asking: stale cached builds are refreshed
+    // up front, missing ones are fetched by create-many itself, and fresh
+    // caches are reused as-is.
+    final String? versionFilter = mc.trim().isEmpty ? null : mc.trim();
+    final Map<String, Duration?> ages = <String, Duration?>{};
+    await Ui.spin('Checking cached builds', () async {
+      for (final String type in types) {
+        ages[type] = newestCachedAge(
+          await _cachedBuilds(type),
+          version: versionFilter,
+        );
+      }
+    });
+    Ui.note(
+      'Cached builds: ${types.map((String t) => '$t ${formatBuildAgeShort(ages[t])}').join(' · ')}',
+    );
+    for (final String type in types) {
+      final Duration? age = ages[type];
+      if (age == null ||
+          !BuildCachePolicy.shouldRefresh(type: type, cachedAge: age)) {
+        continue;
+      }
+      Ui.doing(
+        'Refreshing ${_serverTypeLabel(type)} build (cached ${formatBuildAge(age)})',
+      );
+      await _shellRun(<String>[
+        'build',
+        type,
+        if (versionFilter != null) ...<String>['--mc', versionFilter],
+      ]);
+    }
 
     Ui.doing('Creating ${types.length} server(s)');
     await _shellRun(<String>[
@@ -772,11 +853,44 @@ class InteractiveWizard {
       types.join(','),
       if (prefix.trim().isNotEmpty) ...<String>['--prefix', prefix.trim()],
       if (mc.trim().isNotEmpty) ...<String>['--mc', mc.trim()],
-      if (refresh) '--auto-build',
       if (isolated) '--isolated',
     ]);
     if (!isolated) {
       await _syncDropinsAllTargets();
+    }
+    await Ui.pause();
+  }
+
+  /// Force re-downloads the newest build of every platform the active
+  /// consumer owns. Spigot is excluded: BuildTools compiles take many
+  /// minutes, so it is only rebuilt on explicit request.
+  Future<void> _refreshAllBuilds() async {
+    final List<String> types = _serverTypesForActiveConsumer();
+    final List<String> pull = types
+        .where(
+          (String t) => !BuildCachePolicy.expensiveRebuild.contains(t),
+        )
+        .toList(growable: false);
+    if (pull.length != types.length) {
+      Ui.note(
+        'spigot skipped: BuildTools rebuilds take minutes — use Build & tuning → Build server jar.',
+      );
+    }
+    int pulled = 0;
+    int failed = 0;
+    for (final String type in pull) {
+      Ui.doing('Pulling latest ${_serverTypeLabel(type)} build');
+      final int code = await _shellRun(<String>['build', type]);
+      if (code == 0) {
+        pulled++;
+      } else {
+        failed++;
+      }
+    }
+    if (failed > 0) {
+      Ui.warn('Pulled $pulled build(s); $failed failed.');
+    } else {
+      Ui.success('All $pulled platform build(s) fresh from upstream.');
     }
     await Ui.pause();
   }
@@ -914,8 +1028,10 @@ class InteractiveWizard {
     }
 
     final _BuildVersionChoice choice = await _pickSupportedVersion(currentType);
-    final bool refresh = await Ui.confirm(
-      'Refresh ${_serverTypeLabel(currentType)} ${choice.version} from upstream first?',
+    final bool refresh = _announceRefreshPlan(
+      type: currentType,
+      version: choice.version,
+      cachedAge: choice.cachedAge,
     );
 
     Ui.doing(
@@ -1006,7 +1122,12 @@ class InteractiveWizard {
       final bool plugins = _isPluginConsumer();
       final String dropinCommand = plugins ? 'plugins' : 'mods';
       final String dropinLabel = plugins ? 'plugins' : 'mods';
-      final _RuntimeSettings settings = await _runtimeSettings();
+      late final _RuntimeSettings settings;
+      late final List<BuildCacheEntry> cache;
+      await Ui.spin('Loading build & tuning state', () async {
+        settings = await _runtimeSettings();
+        cache = await _cachedBuilds('all');
+      });
       final String heap = settings.heap ?? '4G';
       final String profile = settings.profile ?? 'aikar';
       final String wrap = settings.consoleWrap ?? 'off';
@@ -1019,6 +1140,12 @@ class InteractiveWizard {
           value: _BuildAct.build,
           shortcut: 'b',
           detail: 'pick platform and version',
+        ),
+        const MenuEntry<_BuildAct>(
+          'Pull latest builds',
+          value: _BuildAct.pullAll,
+          shortcut: 'p',
+          detail: 'force re-download every platform jar',
         ),
         const MenuEntry<_BuildAct>('Show build cache', value: _BuildAct.cache),
         const MenuEntry<_BuildAct>(
@@ -1062,7 +1189,11 @@ class InteractiveWizard {
 
       _BuildAct action;
       try {
-        action = await menuSelect<_BuildAct>('Build & tuning', entries);
+        action = await menuSelect<_BuildAct>(
+          'Build & tuning',
+          entries,
+          footer: _buildFreshnessFooter(cache),
+        );
       } on PromptBackNavigation {
         return;
       }
@@ -1070,6 +1201,9 @@ class InteractiveWizard {
       switch (action) {
         case _BuildAct.build:
           await _runStep(_buildServerArtifact);
+          break;
+        case _BuildAct.pullAll:
+          await _refreshAllBuilds();
           break;
         case _BuildAct.cache:
           await _shellRun(<String>['build', 'list']);
@@ -1174,10 +1308,7 @@ class InteractiveWizard {
   }
 
   Future<void> _buildServerArtifact() async {
-    final String type = await Ui.pick(
-      'Server platform',
-      _serverTypesForActiveConsumer(),
-    );
+    final String type = await _pickServerPlatform();
     final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String label = _serverTypeLabel(type);
     Ui.doing('Building $label for Minecraft ${versionChoice.version}');
@@ -1185,11 +1316,42 @@ class InteractiveWizard {
     await Ui.pause();
   }
 
+  /// Platform menu with per-type build freshness so nobody has to wonder
+  /// whether picking a platform triggers a download.
+  Future<String> _pickServerPlatform() async {
+    final List<String> types = _serverTypesForActiveConsumer();
+    if (types.length == 1) {
+      return types.first;
+    }
+    final List<BuildCacheEntry> cache = await Ui.spin(
+      'Checking cached builds',
+      () => _cachedBuilds('all'),
+    );
+    final List<MenuEntry<String>> entries = <MenuEntry<String>>[
+      for (final String type in types)
+        MenuEntry<String>(
+          _serverTypeLabel(type),
+          value: type,
+          detail: _freshnessDetail(_newestAgeForType(cache, type)),
+        ),
+    ];
+    return menuSelect<String>(
+      'Server platform',
+      entries,
+      footer: _buildFreshnessFooter(cache),
+    );
+  }
+
   Future<_BuildVersionChoice> _pickSupportedVersion(String type) async {
     final String label = _serverTypeLabel(type);
-    Ui.note('Checking supported Minecraft versions for $label...');
-    final List<String> supported = await _resolveSupportedVersions(type);
-    final String latest = await _resolveLatestVersion(type);
+    late final List<String> supported;
+    late final String latest;
+    late final List<BuildCacheEntry> cache;
+    await Ui.spin('Fetching $label versions', () async {
+      supported = await _resolveSupportedVersions(type);
+      latest = await _resolveLatestVersion(type);
+      cache = await _cachedBuilds(type);
+    });
 
     Future<_BuildVersionChoice> manualEntry() async {
       final String manual = await Ui.input(
@@ -1198,9 +1360,11 @@ class InteractiveWizard {
         validator: _looksLikeMinecraftVersion,
         validationMessage: 'Use a version like 1.21.11 or 26.1.2.',
       );
+      final String trimmed = manual.trim();
       return _BuildVersionChoice(
-        version: manual.trim(),
-        isLatest: manual.trim() == latest,
+        version: trimmed,
+        isLatest: trimmed == latest,
+        cachedAge: newestCachedAge(cache, version: trimmed),
       );
     }
 
@@ -1214,12 +1378,36 @@ class InteractiveWizard {
       visible.insert(0, latest);
     }
 
+    String? versionDetail(String version) {
+      final List<String> parts = <String>[
+        if (version == latest) Ansi.style('latest', Ansi.cyan),
+      ];
+      final Duration? age = newestCachedAge(cache, version: version);
+      if (age != null) {
+        parts.add(
+          Ansi.style(
+            'cached ${formatBuildAge(age)}',
+            age <= BuildCachePolicy.ttl ? Ansi.green : Ansi.yellow,
+          ),
+        );
+      }
+      return parts.isEmpty ? null : parts.join(Ansi.style(' · ', Ansi.gray));
+    }
+
+    final Duration? newestAny = newestCachedAge(cache);
+    final String footer = Ansi.style(
+      newestAny == null
+          ? '$label builds: none cached · create fetches fresh from upstream'
+          : '$label builds updated ${formatBuildAge(newestAny)} · auto-refresh after ${BuildCachePolicy.ttl.inHours}h',
+      Ansi.gray,
+    );
+
     final List<MenuEntry<String>> entries = <MenuEntry<String>>[
       for (final String version in visible)
         MenuEntry<String>(
           'Minecraft $version',
           value: version,
-          detail: version == latest ? 'latest supported by $label' : null,
+          detail: versionDetail(version),
         ),
       MenuEntry<String>(
         'Enter another version',
@@ -1233,11 +1421,97 @@ class InteractiveWizard {
     final String selected = await menuSelect<String>(
       '$label version (${supported.length} supported)',
       entries,
+      footer: footer,
     );
     if (selected.isEmpty) {
       return manualEntry();
     }
-    return _BuildVersionChoice(version: selected, isLatest: selected == latest);
+    return _BuildVersionChoice(
+      version: selected,
+      isLatest: selected == latest,
+      cachedAge: newestCachedAge(cache, version: selected),
+    );
+  }
+
+  /// Decides whether a create/update pulls a fresh build and says so;
+  /// replaces the old "Refresh from upstream first?" prompt.
+  bool _announceRefreshPlan({
+    required String type,
+    required String version,
+    required Duration? cachedAge,
+  }) {
+    final String label = _serverTypeLabel(type);
+    final bool refresh = BuildCachePolicy.shouldRefresh(
+      type: type,
+      cachedAge: cachedAge,
+    );
+    if (refresh) {
+      Ui.info(
+        cachedAge == null
+            ? 'No cached $label $version build — fetching fresh from upstream.'
+            : 'Cached $label $version build is ${formatBuildAge(cachedAge)} — refreshing from upstream.',
+      );
+      return true;
+    }
+    final StringBuffer note = StringBuffer(
+      'Using cached $label $version build (updated ${formatBuildAge(cachedAge)}).',
+    );
+    if (BuildCachePolicy.expensiveRebuild.contains(type) &&
+        cachedAge != null &&
+        cachedAge > BuildCachePolicy.ttl) {
+      note.write(' Rebuilds are slow; force one from Build & tuning.');
+    }
+    Ui.note(note.toString());
+    return false;
+  }
+
+  Future<List<BuildCacheEntry>> _cachedBuilds(String type) async {
+    final CapturedResult result = await passthrough.capture(<String>[
+      'build',
+      'cache-info',
+      type,
+    ]);
+    if (!result.success) {
+      return const <BuildCacheEntry>[];
+    }
+    return BuildCacheEntry.parseAll(result.stdout);
+  }
+
+  Duration? _newestAgeForType(List<BuildCacheEntry> cache, String type) {
+    return newestCachedAge(
+      cache
+          .where((BuildCacheEntry e) => e.type == type)
+          .toList(growable: false),
+    );
+  }
+
+  String _freshnessDetail(Duration? age) {
+    if (age == null) {
+      return Ansi.style('no cached build', Ansi.gray);
+    }
+    return Ansi.style(
+      'updated ${formatBuildAge(age)}',
+      age <= BuildCachePolicy.ttl ? Ansi.green : Ansi.yellow,
+    );
+  }
+
+  /// Bottom status line: when each platform's build was last refreshed.
+  String _buildFreshnessFooter(List<BuildCacheEntry> cache) {
+    final List<String> parts = <String>[];
+    for (final String type in _serverTypesForActiveConsumer()) {
+      final Duration? age = _newestAgeForType(cache, type);
+      final String token = formatBuildAgeShort(age);
+      final String colored = age == null
+          ? Ansi.style(token, Ansi.gray)
+          : Ansi.style(
+              token,
+              age <= BuildCachePolicy.ttl ? Ansi.green : Ansi.yellow,
+            );
+      parts.add('${Ansi.style(type, Ansi.gray)} $colored');
+    }
+    return '${Ansi.style('builds', '${Ansi.gray}${Ansi.bold}')}  '
+        '${parts.join(Ansi.style(' · ', Ansi.gray))}'
+        '${Ansi.style('  ·  auto-refresh after ${BuildCachePolicy.ttl.inHours}h', Ansi.gray)}';
   }
 
   // ─── Backend helpers ─────────────────────────────────────────────────
@@ -1508,16 +1782,6 @@ class InteractiveWizard {
     };
   }
 
-  String _stateGlyph(RuntimeState state) {
-    return switch (state) {
-      RuntimeState.running => '●',
-      RuntimeState.starting => '◐',
-      RuntimeState.stopping => '◑',
-      RuntimeState.restarting => '↻',
-      RuntimeState.stopped => '○',
-    };
-  }
-
   String _stateColor(RuntimeState state) {
     return switch (state) {
       RuntimeState.running => Ansi.green,
@@ -1526,6 +1790,16 @@ class InteractiveWizard {
       RuntimeState.restarting => Ansi.yellow,
       RuntimeState.stopped => Ansi.gray,
     };
+  }
+
+  String _tpsColor(double tps) {
+    if (tps >= 18) {
+      return Ansi.green;
+    }
+    if (tps >= 15) {
+      return Ansi.yellow;
+    }
+    return Ansi.red;
   }
 
   String _shortenPath(String path) {
@@ -1549,6 +1823,7 @@ enum _Act {
   instanceConsole,
   create,
   createMany,
+  pullBuilds,
   startAll,
   stopAll,
   wipeEverything,
@@ -1588,6 +1863,7 @@ enum _InstanceAct {
 
 enum _BuildAct {
   build,
+  pullAll,
   cache,
   repos,
   sync,
@@ -1632,11 +1908,13 @@ class _DashboardData {
     required this.rows,
     required this.active,
     required this.dropins,
+    required this.buildCache,
   });
 
   final List<_InstanceRow> rows;
   final String? active;
   final String? dropins;
+  final List<BuildCacheEntry> buildCache;
 }
 
 class _RuntimeSettings {
@@ -1654,8 +1932,16 @@ class _RuntimeSettings {
 }
 
 class _BuildVersionChoice {
-  const _BuildVersionChoice({required this.version, required this.isLatest});
+  const _BuildVersionChoice({
+    required this.version,
+    required this.isLatest,
+    this.cachedAge,
+  });
 
   final String version;
   final bool isLatest;
+
+  /// Age of the newest cached jar matching [version]; null when nothing is
+  /// cached. Drives the automatic refresh decision.
+  final Duration? cachedAge;
 }

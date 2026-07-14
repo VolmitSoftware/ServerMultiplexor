@@ -31,6 +31,7 @@ class MenuEntry<T> {
     this.badge,
     this.badgeColor,
     this.shortcut,
+    this.labelColor,
     this.isSeparator = false,
   });
 
@@ -51,9 +52,27 @@ class MenuEntry<T> {
 
   /// Single-character hotkey that activates this entry directly.
   final String? shortcut;
+
+  /// ANSI code applied to the label (e.g. red for destructive actions).
+  /// Also used, bolded, when the entry is selected.
+  final String? labelColor;
   final bool isSeparator;
 
   bool get selectable => !isSeparator;
+}
+
+/// One live-refresh update from a menu's onTick callback.
+class MenuTick<T> {
+  const MenuTick(this.entries, {this.footer});
+
+  /// Replacement entries; applied only when the entry count is unchanged
+  /// (a structural change is picked up on the next full reload).
+  final List<MenuEntry<T>> entries;
+
+  /// Replacement footer; applied only when the menu was created with a
+  /// footer, so the repaint row count stays stable. Null keeps the
+  /// current footer.
+  final String? footer;
 }
 
 /// Interactive menu with keyboard and mouse support.
@@ -66,7 +85,8 @@ Future<T> menuSelect<T>(
   List<MenuEntry<T>> entries, {
   int initialIndex = 0,
   String? hint,
-  Future<List<MenuEntry<T>>> Function()? onTick,
+  String? footer,
+  Future<MenuTick<T>> Function()? onTick,
   Duration tickInterval = const Duration(seconds: 1),
   T? Function(String rawChar, MenuEntry<T> highlighted)? onActionKey,
 }) async {
@@ -100,6 +120,10 @@ Future<T> menuSelect<T>(
     (int w, MenuEntry<T> e) => (e.badge?.length ?? 0) > w ? e.badge!.length : w,
   );
 
+  final bool hasShortcuts = entries.any(
+    (MenuEntry<T> e) => e.selectable && e.shortcut != null,
+  );
+
   String renderEntry(int index) {
     final MenuEntry<T> entry = entries[index];
     if (entry.isSeparator) {
@@ -112,16 +136,23 @@ Future<T> menuSelect<T>(
     final String marker = isSelected
         ? Ansi.style('▸', '${Ansi.cyan}${Ansi.bold}')
         : ' ';
-    final String key = entry.shortcut == null
-        ? ' '
-        : Ansi.style(entry.shortcut!, Ansi.gray);
+    // Shortcut keys render as small [k] button chips; menus without any
+    // shortcuts drop the column entirely.
+    final String key = !hasShortcuts
+        ? ''
+        : entry.shortcut == null
+        ? '    '
+        : ' ${Ansi.style('[', Ansi.gray)}${Ansi.style(entry.shortcut!, Ansi.cyan)}${Ansi.style(']', Ansi.gray)}';
+    final String selectedColor = '${entry.labelColor ?? Ansi.cyan}${Ansi.bold}';
     final String label = isSelected
-        ? Ansi.style(
+        ? Ansi.style(Ansi.padVisible(entry.label, labelWidth), selectedColor)
+        : entry.labelColor == null
+        ? Ansi.padVisible(entry.label, labelWidth)
+        : Ansi.style(
             Ansi.padVisible(entry.label, labelWidth),
-            '${Ansi.cyan}${Ansi.bold}',
-          )
-        : Ansi.padVisible(entry.label, labelWidth);
-    final StringBuffer line = StringBuffer('$marker $key  $label');
+            entry.labelColor!,
+          );
+    final StringBuffer line = StringBuffer('$marker$key  $label');
     if (entry.badge != null) {
       line.write('  ');
       line.write(
@@ -134,14 +165,36 @@ Future<T> menuSelect<T>(
       line.write('  ${' ' * badgeWidth}');
     }
     if (entry.detail != null && entry.detail!.isNotEmpty) {
-      line.write('  ${Ansi.style(entry.detail!, Ansi.gray)}');
+      // Details carrying their own ANSI styling render as-is; plain
+      // details get the standard dim treatment.
+      final String detail = entry.detail!;
+      line.write(
+        '  ${detail.contains('\x1B') ? detail : Ansi.style(detail, Ansi.gray)}',
+      );
     }
-    return line.toString();
+    // Clamp to the terminal width: a soft-wrapped row would break the
+    // cursor-up repaint math and leave ghost lines behind.
+    final String clipped = Ansi.clipVisible(
+      line.toString(),
+      TermIo.instance.terminalColumns,
+    );
+    if (!isSelected) {
+      return clipped;
+    }
+    // Paint the selected row as a full-width bar: re-assert the background
+    // after every inner reset, then erase-to-EOL extends it to the edge.
+    final String painted = clipped.replaceAll(
+      Ansi.reset,
+      '${Ansi.reset}${Ansi.bgHighlight}',
+    );
+    return '${Ansi.bgHighlight}$painted${Ansi.eraseToEnd}${Ansi.reset}';
   }
 
-  final String footer =
+  final String hintLine =
       '  ${Ansi.style(hint ?? '↑↓ move · enter select · esc back · click', Ansi.gray)}';
-  final int redrawLines = entries.length + 1;
+  String? currentFooter = footer;
+  final int tailLines = footer == null ? 1 : 2;
+  final int redrawLines = entries.length + tailLines;
 
   void draw({required bool repaint}) {
     if (repaint) {
@@ -152,7 +205,13 @@ Future<T> menuSelect<T>(
       stdout.writeln(renderEntry(i));
     }
     stdout.write('\r${Ansi.eraseLine}');
-    stdout.writeln(footer);
+    stdout.writeln(hintLine);
+    if (currentFooter != null) {
+      stdout.write('\r${Ansi.eraseLine}');
+      stdout.writeln(
+        Ansi.clipVisible('  $currentFooter', TermIo.instance.terminalColumns),
+      );
+    }
   }
 
   void clear() {
@@ -170,7 +229,7 @@ Future<T> menuSelect<T>(
   }
 
   stdout.writeln(
-    '${Ansi.style('?', Ansi.yellow)} ${Ansi.style(title, Ansi.bold)}',
+    '${Ansi.style('◆', Ansi.cyan)} ${Ansi.style(title, Ansi.bold)}',
   );
 
   io.setRawMode(true);
@@ -181,7 +240,7 @@ Future<T> menuSelect<T>(
     draw(repaint: false);
     final int? rowAfter = io.cursorRow();
     if (rowAfter != null) {
-      firstEntryRow = rowAfter - 1 - entries.length;
+      firstEntryRow = rowAfter - tailLines - entries.length;
     }
 
     int? entryAtRow(int row) {
@@ -225,18 +284,22 @@ Future<T> menuSelect<T>(
       }
 
       if (event == null) {
-        // Timed out with no input: refresh the entries and redraw in place.
-        // The refresh must preserve the row count so the repaint cursor math
-        // stays correct; a structural change is picked up on the next full
-        // reload instead.
-        List<MenuEntry<T>>? refreshed;
+        // Timed out with no input: refresh entries/footer and redraw in
+        // place. The refresh must preserve the row count so the repaint
+        // cursor math stays correct; a structural change is picked up on
+        // the next full reload instead.
+        MenuTick<T>? update;
         try {
-          refreshed = await onTick!();
+          update = await onTick!();
         } catch (_) {
-          refreshed = null;
+          update = null;
         }
-        if (refreshed != null && refreshed.length == entries.length) {
-          entries = refreshed;
+        if (update == null) {
+          continue;
+        }
+        bool changed = false;
+        if (update.entries.length == entries.length) {
+          entries = update.entries;
           labelWidth = entries
               .where((MenuEntry<T> e) => e.selectable)
               .fold(
@@ -249,6 +312,13 @@ Future<T> menuSelect<T>(
             (int w, MenuEntry<T> e) =>
                 (e.badge?.length ?? 0) > w ? e.badge!.length : w,
           );
+          changed = true;
+        }
+        if (footer != null && update.footer != null) {
+          currentFooter = update.footer;
+          changed = true;
+        }
+        if (changed) {
           draw(repaint: true);
         }
         continue;

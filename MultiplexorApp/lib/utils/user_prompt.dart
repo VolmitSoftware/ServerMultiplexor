@@ -2,6 +2,7 @@
 /// shielded execution of background work.
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dart_console/dart_console.dart';
@@ -26,16 +27,32 @@ class Ui {
     stdout.write('\x1B[2J\x1B[0;0H');
   }
 
-  /// Compact one-line app header with a colored brand block.
+  /// Compact one-line app header with a gradient brand block.
   static void appHeader(String brand, List<String> facts) {
-    final String left =
-        ' ${Ansi.style(' $brand ', '${Ansi.inverse}${Ansi.bold}${Ansi.cyan}')}';
+    final String left = ' ${_gradientBlock(brand)}';
     final String right = facts
         .where((String fact) => fact.isNotEmpty)
         .map((String fact) => Ansi.style(fact, Ansi.gray))
         .join(Ansi.style('  ·  ', Ansi.gray));
     stdout.writeln('$left  $right');
     rule();
+  }
+
+  /// Renders [text] as a block with a cyan-to-blue background gradient.
+  static String _gradientBlock(String text) {
+    const List<int> ramp = <int>[51, 50, 45, 44, 39, 38, 33];
+    final String padded = ' $text ';
+    final StringBuffer out = StringBuffer();
+    for (int i = 0; i < padded.length; i++) {
+      final int position = padded.length <= 1
+          ? 0
+          : (i * (ramp.length - 1)) ~/ (padded.length - 1);
+      out.write(
+        '\x1B[48;5;${ramp[position]}m\x1B[38;5;16m${Ansi.bold}${padded[i]}',
+      );
+    }
+    out.write(Ansi.reset);
+    return out.toString();
   }
 
   static void rule() {
@@ -84,6 +101,52 @@ class Ui {
     return TermIo.instance.shielded(operation);
   }
 
+  static const List<String> _spinnerFrames = <String>[
+    '⠋',
+    '⠙',
+    '⠹',
+    '⠸',
+    '⠼',
+    '⠴',
+    '⠦',
+    '⠧',
+    '⠇',
+    '⠏',
+  ];
+
+  /// Runs silent background work shielded while animating a spinner next to
+  /// [message]. Only for operations that do not write to stdout themselves
+  /// (captured commands); every frame is carriage-anchored and the line is
+  /// erased before returning, so it is safe in raw and cooked mode alike.
+  static Future<T> spin<T>(
+    String message,
+    Future<T> Function() operation,
+  ) async {
+    if (!hasTerminal) {
+      return shielded(operation);
+    }
+    final TermIo io = TermIo.instance;
+    io.hideCursor();
+    int frame = 0;
+    final Timer timer = Timer.periodic(const Duration(milliseconds: 80), (
+      Timer _,
+    ) {
+      final String glyph = _spinnerFrames[frame % _spinnerFrames.length];
+      frame++;
+      stdout.write(
+        '\r${Ansi.eraseLine} ${Ansi.style(glyph, Ansi.cyan)} '
+        '${Ansi.style(message, Ansi.gray)}',
+      );
+    });
+    try {
+      return await shielded(operation);
+    } finally {
+      timer.cancel();
+      stdout.write('\r${Ansi.eraseLine}');
+      io.showCursor();
+    }
+  }
+
   /// Waits for any key (Enter/Space/click). Drains stale input first so a
   /// key pressed during preceding work cannot skip the pause.
   static Future<void> pause({String message = 'any key to continue'}) async {
@@ -115,6 +178,9 @@ class Ui {
         }
       }
     } on TermInputUnavailable {
+      // Leave raw mode before the newline: with OPOST off, "\n" does not
+      // return the carriage and the next line starts mid-column.
+      io.setRawMode(false);
       stdout.writeln();
     } finally {
       io.showCursor();
@@ -153,10 +219,14 @@ class Ui {
         '$hintPart ${Ansi.style('›', Ansi.gray)} ';
   }
 
-  static void _inputAccepted(String message, String value) {
+  static void _inputAccepted(
+    String message,
+    String value, {
+    String color = Ansi.green,
+  }) {
     stdout.writeln(
       '${Ansi.style('✔', Ansi.green)} ${Ansi.style(message, Ansi.bold)} '
-      '${Ansi.style('·', Ansi.gray)} ${Ansi.style(value, Ansi.green)}',
+      '${Ansi.style('·', Ansi.gray)} ${Ansi.style(value, color)}',
     );
   }
 
@@ -235,15 +305,27 @@ class Ui {
     io.setRawMode(true);
     io.hideCursor();
     final StringBuffer buffer = StringBuffer();
+
+    // Leave raw mode before printing anything ending in "\n": with OPOST
+    // off, "\n" does not return the carriage and the next line starts
+    // mid-column (the stair-step bug).
+    void finishLine({required bool accepted}) {
+      io.setRawMode(false);
+      stdout.write('\r${Ansi.eraseLine}');
+      if (accepted) {
+        _inputAccepted(prompt, '•' * buffer.length);
+      }
+    }
+
     try {
       while (true) {
         final TermEvent event = io.readEvent();
         switch (event.kind) {
           case TermEventKind.enter:
-            stdout.writeln('');
+            finishLine(accepted: true);
             return buffer.toString();
           case TermEventKind.escape:
-            stdout.writeln('');
+            finishLine(accepted: false);
             throw const PromptBackNavigation();
           case TermEventKind.ctrlC:
             io.restoreTerminal();
@@ -291,17 +373,39 @@ class Ui {
 
     final TermIo io = TermIo.instance;
     io.drainInput();
-    stdout.write(_inputPrompt(prompt, hint: hint));
+    // Button-style chips: the default answer is a filled key, the other dim.
+    final String chips = defaultValue
+        ? '${Ansi.style(' Y ', '${Ansi.inverse}${Ansi.green}')} ${Ansi.style(' n ', Ansi.gray)}'
+        : '${Ansi.style(' y ', Ansi.gray)} ${Ansi.style(' N ', '${Ansi.inverse}${Ansi.red}')}';
+    stdout.write(
+      '${Ansi.style('?', Ansi.yellow)} ${Ansi.style(prompt, Ansi.bold)} '
+      '$chips ${Ansi.style('›', Ansi.gray)} ',
+    );
     io.setRawMode(true);
+
+    // Leave raw mode before echoing the answer: with OPOST off, "\n" does
+    // not return the carriage and every following line starts mid-column
+    // (the stair-step bug).
+    bool finish(bool value) {
+      io.setRawMode(false);
+      stdout.write('\r${Ansi.eraseLine}');
+      _inputAccepted(
+        prompt,
+        value ? 'yes' : 'no',
+        color: value ? Ansi.green : Ansi.gray,
+      );
+      return value;
+    }
+
     try {
       while (true) {
         final TermEvent event = io.readEvent();
         switch (event.kind) {
           case TermEventKind.enter:
-            stdout.writeln(defaultValue ? 'yes' : 'no');
-            return defaultValue;
+            return finish(defaultValue);
           case TermEventKind.escape:
-            stdout.writeln('');
+            io.setRawMode(false);
+            stdout.write('\r${Ansi.eraseLine}');
             throw const PromptBackNavigation();
           case TermEventKind.ctrlC:
             io.restoreTerminal();
@@ -310,12 +414,10 @@ class Ui {
           case TermEventKind.char:
             final String char = event.char.toLowerCase();
             if (char == 'y') {
-              stdout.writeln('yes');
-              return true;
+              return finish(true);
             }
             if (char == 'n') {
-              stdout.writeln('no');
-              return false;
+              return finish(false);
             }
             break;
           default:

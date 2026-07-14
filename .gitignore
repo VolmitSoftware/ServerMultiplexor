@@ -100,3 +100,5 @@ BuildTools.jar
 multiplexor
 
 .codegraph/
+
+.qa/

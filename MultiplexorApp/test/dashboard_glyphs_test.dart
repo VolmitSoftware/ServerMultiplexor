@@ -1,0 +1,60 @@
+import 'package:multiplexor/services/dashboard_glyphs.dart';
+import 'package:multiplexor/services/runtime_state.dart';
+import 'package:test/test.dart';
+
+void main() {
+  group('animatedStateGlyph', () {
+    test('stopped is a static hollow dot on every frame', () {
+      for (int frame = 0; frame < 12; frame++) {
+        expect(animatedStateGlyph(RuntimeState.stopped, frame), '○');
+      }
+    });
+
+    test('running is a solid dot with a pulse every eighth frame', () {
+      expect(animatedStateGlyph(RuntimeState.running, 0), '◉');
+      expect(animatedStateGlyph(RuntimeState.running, 1), '●');
+      expect(animatedStateGlyph(RuntimeState.running, 7), '●');
+      expect(animatedStateGlyph(RuntimeState.running, 8), '◉');
+    });
+
+    test('transitional states rotate through quarter circles', () {
+      const List<String> spin = <String>['◐', '◓', '◑', '◒'];
+      for (final RuntimeState state in <RuntimeState>[
+        RuntimeState.starting,
+        RuntimeState.stopping,
+        RuntimeState.restarting,
+      ]) {
+        for (int frame = 0; frame < 8; frame++) {
+          expect(animatedStateGlyph(state, frame), spin[frame % 4]);
+        }
+      }
+    });
+
+    test('frame zero matches the legacy static glyphs for stable states', () {
+      expect(animatedStateGlyph(RuntimeState.stopped, 1), '○');
+      expect(animatedStateGlyph(RuntimeState.running, 1), '●');
+    });
+  });
+
+  group('blob', () {
+    test('breathes through a smooth four-phase cycle', () {
+      expect(blobGlyph(0), '∙');
+      expect(blobGlyph(1), '●');
+      expect(blobGlyph(2), '●');
+      expect(blobGlyph(3), '●');
+      expect(blobGlyph(4), '∙');
+    });
+
+    test('style peaks bold at the middle of the cycle', () {
+      expect(blobStyle(2).contains('\x1B[1m'), isTrue);
+      expect(blobStyle(0).contains('\x1B[1m'), isFalse);
+      expect(blobStyle(1).contains('\x1B[1m'), isFalse);
+    });
+
+    test('every phase styles in cyan', () {
+      for (int frame = 0; frame < 4; frame++) {
+        expect(blobStyle(frame).contains('\x1B[36m'), isTrue);
+      }
+    });
+  });
+}

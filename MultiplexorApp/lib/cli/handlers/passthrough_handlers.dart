@@ -40,6 +40,16 @@ Future<void> handleBuildVersions(Map<String, dynamic> args) async {
   await _runAndExit(<String>['build', 'versions', type]);
 }
 
+Future<void> handleBuildCacheInfo(Map<String, dynamic> args) async {
+  final type = _arg(args, 'type') ?? 'all';
+  final mc = _arg(args, 'mc');
+  final cmd = <String>['build', 'cache-info', type];
+  if (mc != null) {
+    cmd.addAll(<String>['--mc', mc]);
+  }
+  await _runAndExit(cmd);
+}
+
 Future<void> handleBuildTestLatest(Map<String, dynamic> args) async {
   final spigotMc = _arg(args, 'spigot-mc');
   final cmd = <String>['build', 'test-latest'];

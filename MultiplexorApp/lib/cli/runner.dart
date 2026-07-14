@@ -138,6 +138,12 @@ Future<int> _runBuild(List<String> rest) async {
         'type': parsed.option('type') ?? parsed.positionalOrNull(0) ?? 'all',
       });
       return 0;
+    case 'cache-info':
+      await handleBuildCacheInfo(<String, dynamic>{
+        'type': parsed.option('type') ?? parsed.positionalOrNull(0) ?? 'all',
+        'mc': parsed.option('mc'),
+      });
+      return 0;
     case 'test-latest':
       await handleBuildTestLatest(<String, dynamic>{
         'spigot-mc': parsed.option('spigot-mc') ?? parsed.positionalOrNull(0),
@@ -160,7 +166,7 @@ Future<int> _runBuild(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: build <target|latest|list|list-all|versions|test-latest>',
+        'Usage: build <target|latest|list|list-all|versions|cache-info|test-latest>',
       );
       return 2;
   }

@@ -59,6 +59,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     '<paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge> [--mc <version>] [--loader <version>] [--installer <version>]',
     'latest <type>',
     'versions [type]',
+    'cache-info [type] [--mc <version>]',
     'list',
     'list-all [type]',
     'test-latest [--spigot-mc <version>]',

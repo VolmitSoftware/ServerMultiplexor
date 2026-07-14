@@ -1487,6 +1487,13 @@ class NativeCommandService {
         final target = rest.isEmpty ? 'all' : rest.first;
         await _buildVersions(profile, target, io);
         return 0;
+      case 'cache-info':
+        final parsed = _parseFlexibleArgs(rest);
+        final target = parsed.positionals.isEmpty
+            ? 'all'
+            : parsed.positionals.first;
+        _buildCacheInfo(profile, target, parsed.option('mc'), io);
+        return 0;
       case 'test-latest':
         final testOptions = _parseOptions(rest);
         await _buildTestLatest(profile, testOptions, io);
@@ -1506,7 +1513,7 @@ class NativeCommandService {
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: build <paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge|latest|list|list-all|versions|test-latest>',
+          'Usage: build <paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge|latest|list|list-all|versions|cache-info|test-latest>',
           2,
         );
     }
@@ -4586,6 +4593,51 @@ class NativeCommandService {
     }
     for (final version in versions) {
       io.write('  - $version');
+    }
+  }
+
+  /// Machine-readable jar-cache report: one `<type>\t<jarBasename>\t<ageSeconds>`
+  /// line per cached jar, newest first. Feeds the wizard's automatic
+  /// refresh decisions and its "builds updated Xh ago" status footer.
+  void _buildCacheInfo(
+    ConsumerProfile profile,
+    String target,
+    String? mcFilter,
+    _NativeIoBuffer io,
+  ) {
+    if (target != 'all' && !_allBuildTypes.contains(target)) {
+      throw _NativeCommandException(
+        'Usage: build cache-info [all|paper|purpur|spigot|folia|canvas|leaf|forge|fabric|neoforge] [--mc <version>]',
+        2,
+      );
+    }
+    final types = target == 'all' ? _allBuildTypes : <String>[target];
+    final now = DateTime.now();
+    for (final type in types) {
+      final dir = Directory(_buildDir(profile, type));
+      if (!dir.existsSync()) {
+        continue;
+      }
+      final jars =
+          dir
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.endsWith('.jar'))
+              .where((f) => p.basename(f.path) != 'latest.jar')
+              .where(
+                (f) =>
+                    mcFilter == null ||
+                    mcFilter.isEmpty ||
+                    p.basename(f.path).contains(mcFilter),
+              )
+              .toList(growable: false)
+            ..sort(
+              (a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()),
+            );
+      for (final jar in jars) {
+        final age = now.difference(jar.lastModifiedSync()).inSeconds;
+        io.write('$type\t${p.basename(jar.path)}\t${age < 0 ? 0 : age}');
+      }
     }
   }
 

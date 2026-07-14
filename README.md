@@ -23,11 +23,15 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 
 `./start.sh` with no args opens a dashboard listing every instance with a live state badge, port, and `active` / `isolated` / `locked` markers. The dashboard refreshes about once a second: running servers show live player count (`online/max`), version, and — for Paper-family servers started with RCON enabled — TPS. Pick an instance to get a state-aware action menu (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation/lock-or-unlock always). Delete and factory reset are hidden while an instance is locked. Keyboard and mouse both work — arrows/wheel to move, Enter or click to activate, Esc to go back. Keys pressed while a build or sync runs are discarded.
 
-Dashboard shortcuts: `n` new instance, `s` start all, `k` stop all, `g` all consoles, `b` build & tuning, `c` switch consumer, `r` refresh, `q` quit.
+Dashboard shortcuts: `n` new instance, `m` create many, `p` pull latest builds, `s` start all, `k` stop all, `g` all consoles, `b` build & tuning, `c` switch consumer, `r` refresh, `q` quit.
 
 Highlighted-server quick keys (act on the selected server without opening its menu): `R` restart, `S` stop (graceful), `X` kill (force), `O` console. These are uppercase (Shift), so they never clash with the lowercase shortcuts above; they do nothing when a non-server row (New, Build, etc.) is highlighted.
 
 Use `m` for Create many. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
+
+Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the dashboard, platform picker, and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `b` → Build server jar.
+
+`p` (Pull latest builds, also in Build & tuning) force re-downloads the newest build of every platform the active consumer owns, skipping spigot for the same reason. The dashboard itself is live: state dots pulse and spin with each server's lifecycle, players/TPS/version and the build-freshness footer update in place, and destructive actions (wipe, delete, factory reset) are shown in red.
 
 ## Concepts
 
@@ -180,6 +184,7 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 | `build <type> [--mc <v>] [--loader <v>] [--installer <v>]` | Build or download a server jar. Refreshes from upstream every run; spigot also refreshes `BuildTools.jar`. |
 | `build latest <type>` | Print the latest supported MC version for `<type>`. |
 | `build versions [type]` | Print all supported versions. |
+| `build cache-info [type] [--mc <v>]` | Machine-readable jar-cache report: one `<type>\t<jar>\t<ageSeconds>` line per cached jar, newest first. Drives the wizard's automatic refresh decisions and its "builds updated" footer. |
 | `build list` | Show what's in the active profile's cache. |
 | `build list-all [type]` | Show cache contents across profiles. |
 | `build test-latest [--spigot-mc <v>]` | Sanity-check the latest of every type. |
