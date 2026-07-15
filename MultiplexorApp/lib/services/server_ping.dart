@@ -255,9 +255,11 @@ Future<MinecraftPingResult?> pingMinecraftServer(
     final subscription = socket.listen(
       (chunk) {
         buffer.addAll(chunk);
-        final body = extractPacketBody(buffer);
-        if (body != null && !completer.isCompleted) {
-          completer.complete(body);
+        if (!completer.isCompleted) {
+          final body = extractPacketBody(buffer);
+          if (body != null) {
+            completer.complete(body);
+          }
         }
       },
       onError: (_) {
@@ -276,7 +278,23 @@ Future<MinecraftPingResult?> pingMinecraftServer(
     final body = await completer.future;
     stopwatch.stop();
     timer.cancel();
+
+    // Graceful shutdown: send FIN and keep draining briefly instead of
+    // aborting. An abortive close (destroy with unread data) resets the
+    // connection, and busy or still-starting servers then accept already
+    // dead sockets — surfacing as Netty "setsockopt() failed: Invalid
+    // argument" spam in their consoles. The close future needs its own
+    // error handler: it can fail after the timeout below has already won,
+    // and that late error must not surface as an unhandled exception.
+    final Future<void> closed = socket.close().then<void>(
+      (Object? _) {},
+      onError: (Object _) {},
+    );
+    try {
+      await closed.timeout(const Duration(milliseconds: 300));
+    } catch (_) {}
     await subscription.cancel();
+
     if (body == null) {
       return null;
     }

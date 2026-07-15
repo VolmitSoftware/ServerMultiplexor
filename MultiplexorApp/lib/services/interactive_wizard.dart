@@ -224,12 +224,16 @@ class InteractiveWizard {
           detail: '${running.length} instances',
         ),
       );
+    }
+    if (running.isNotEmpty) {
       entries.add(
         MenuEntry<_DashChoice>(
           'All consoles: grid',
           value: const _DashChoice(_Act.consolesGrid),
           shortcut: 'g',
-          detail: 'grid view',
+          detail: running.length == 1
+              ? '1 console'
+              : 'grid view · ${running.length} consoles',
         ),
       );
       entries.add(

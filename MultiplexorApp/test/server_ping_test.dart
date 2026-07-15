@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:multiplexor/services/server_ping.dart';
 import 'package:test/test.dart';
@@ -167,6 +169,102 @@ void main() {
       expect(result.versionName, '?');
       expect(result.sample, isEmpty);
       expect(result.motd, '');
+    });
+  });
+
+  group('pingMinecraftServer socket behavior (loopback)', () {
+    const String statusJson =
+        '{"players":{"online":3,"max":20},'
+        '"version":{"name":"Loopback 1.0"},"description":"test"}';
+
+    test('closes gracefully (FIN, not RST) even with trailing data', () async {
+      final ServerSocket server = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      final Completer<bool> sawCleanEof = Completer<bool>();
+      server.listen((Socket client) {
+        client.listen(
+          (List<int> _) {},
+          onError: (Object _) {
+            if (!sawCleanEof.isCompleted) {
+              sawCleanEof.complete(false);
+            }
+          },
+          onDone: () {
+            if (!sawCleanEof.isCompleted) {
+              sawCleanEof.complete(true);
+            }
+            client.destroy();
+          },
+        );
+        client.add(buildStatusPacket(statusJson));
+        // Straggler bytes after the response, like a server keeping the
+        // connection open for the optional ping/pong exchange. An abortive
+        // close with these unread resets the connection (RST) instead of
+        // finishing it (FIN).
+        Future<void>.delayed(const Duration(milliseconds: 60), () {
+          try {
+            client.add(<int>[0x00]);
+          } catch (_) {}
+        });
+      });
+
+      final MinecraftPingResult? result = await pingMinecraftServer(
+        '127.0.0.1',
+        server.port,
+        timeout: const Duration(seconds: 2),
+      );
+      expect(result, isNotNull);
+      expect(result!.online, 3);
+      expect(result.versionName, 'Loopback 1.0');
+
+      final bool clean = await sawCleanEof.future.timeout(
+        const Duration(seconds: 3),
+      );
+      expect(
+        clean,
+        isTrue,
+        reason: 'server side must observe EOF (FIN), not a reset (RST)',
+      );
+      await server.close();
+    });
+
+    test('closes gracefully when the server never responds', () async {
+      final ServerSocket server = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      final Completer<bool> sawCleanEof = Completer<bool>();
+      server.listen((Socket client) {
+        client.listen(
+          (List<int> _) {},
+          onError: (Object _) {
+            if (!sawCleanEof.isCompleted) {
+              sawCleanEof.complete(false);
+            }
+          },
+          onDone: () {
+            if (!sawCleanEof.isCompleted) {
+              sawCleanEof.complete(true);
+            }
+            client.destroy();
+          },
+        );
+      });
+
+      final MinecraftPingResult? result = await pingMinecraftServer(
+        '127.0.0.1',
+        server.port,
+        timeout: const Duration(milliseconds: 300),
+      );
+      expect(result, isNull);
+
+      final bool clean = await sawCleanEof.future.timeout(
+        const Duration(seconds: 3),
+      );
+      expect(clean, isTrue, reason: 'timed-out probes must FIN, not RST');
+      await server.close();
     });
   });
 }

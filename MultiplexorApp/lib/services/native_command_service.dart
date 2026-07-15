@@ -8423,8 +8423,11 @@ class NativeCommandService {
         final state = await _runtimeStateOf(profile, name);
         final port = _instanceGetServerPort(profile, name);
         final locked = _instanceLocked(profile, name) ? 'locked' : 'unlocked';
-        final live =
-            state != RuntimeState.stopped && state != RuntimeState.stopping;
+        // Probe only fully-started servers. A starting server's accept
+        // queue is stalled during world load, so probes just time out and
+        // every abandoned connection surfaces as Netty setsockopt noise in
+        // its console the moment it begins accepting.
+        final live = state == RuntimeState.running;
         MinecraftPingResult? ping;
         double? tps;
         if (live) {
