@@ -109,6 +109,64 @@ void main() {
     });
   });
 
+  group('TermEventParser legacy X10 mouse', () {
+    // X10 encoding: ESC [ M cb cx cy with each value offset by 32. Sent by
+    // terminals that ignore the SGR-1006 extension.
+    String x10(int cb, int col, int row) {
+      return '\x1B[M${String.fromCharCode(cb + 32)}'
+          '${String.fromCharCode(col + 32)}${String.fromCharCode(row + 32)}';
+    }
+
+    test('parses a left button press with position', () {
+      final TermEventParser parser = TermEventParser();
+      final List<TermEvent> events = feed(parser, x10(0, 34, 12));
+      expect(events, hasLength(1));
+      expect(events.single.kind, TermEventKind.mouseDown);
+      expect(events.single.col, 34);
+      expect(events.single.row, 12);
+      expect(events.single.button, 0);
+    });
+
+    test('parses a release (X10 reports button 3 on release)', () {
+      final TermEventParser parser = TermEventParser();
+      final TermEvent event = feed(parser, x10(3, 5, 7)).single;
+      expect(event.kind, TermEventKind.mouseUp);
+      expect(event.row, 7);
+      expect(event.col, 5);
+    });
+
+    test('parses wheel up and wheel down', () {
+      final TermEventParser parser = TermEventParser();
+      expect(feed(parser, x10(64, 1, 1)).single.kind, TermEventKind.wheelUp);
+      expect(feed(parser, x10(65, 1, 1)).single.kind, TermEventKind.wheelDown);
+    });
+
+    test('ignores motion events', () {
+      final TermEventParser parser = TermEventParser();
+      expect(feed(parser, x10(32, 9, 9)).single.kind, TermEventKind.unknown);
+    });
+
+    test('press then release then a key parses in sequence', () {
+      final TermEventParser parser = TermEventParser();
+      final List<TermEvent> events = feed(
+        parser,
+        '${x10(0, 10, 6)}${x10(3, 10, 6)}q',
+      );
+      expect(events, hasLength(3));
+      expect(events[0].kind, TermEventKind.mouseDown);
+      expect(events[1].kind, TermEventKind.mouseUp);
+      expect(events[2].kind, TermEventKind.char);
+      expect(events[2].char, 'q');
+    });
+
+    test('timeout mid-sequence resolves to unknown and recovers', () {
+      final TermEventParser parser = TermEventParser();
+      expect(feed(parser, '\x1B[M'), isEmpty);
+      expect(parser.timeout()!.kind, TermEventKind.unknown);
+      expect(feed(parser, 'q').single.kind, TermEventKind.char);
+    });
+  });
+
   group('TermEventParser cursor report', () {
     test('parses CPR response', () {
       final TermEventParser parser = TermEventParser();

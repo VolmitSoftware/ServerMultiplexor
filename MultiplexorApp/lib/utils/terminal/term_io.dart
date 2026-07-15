@@ -34,9 +34,13 @@ class TermIo {
   }
 
   void enableMouse() {
-    if (_mouseEnabled || !hasTerminal) {
+    if (!hasTerminal) {
       return;
     }
+    // Always re-write the enable sequence, even when the flag says mouse is
+    // already on: external programs that share the tty (tmux console
+    // attach/detach, subprocess cleanup) can reset tracking modes behind
+    // our back, and the sequence is idempotent.
     _mouseEnabled = true;
     stdout.write('\x1B[?1000h\x1B[?1006h');
   }
@@ -153,8 +157,8 @@ class TermIo {
   }
 
   /// Reports the 1-based cursor row, or null if the terminal does not
-  /// answer. Stale input received while waiting is discarded. Requires raw
-  /// mode.
+  /// answer. Other events received while waiting (clicks, keys) are queued
+  /// for the next [readEvent] rather than discarded. Requires raw mode.
   int? cursorRow() {
     if (!hasTerminal) {
       return null;
@@ -178,6 +182,7 @@ class TermIo {
         if (event.kind == TermEventKind.cursorReport) {
           return event.row;
         }
+        _queue.add(event);
       }
     }
     return null;

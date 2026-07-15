@@ -60,12 +60,13 @@ class TermEvent {
       '${row == 0 && col == 0 ? '' : ', row=$row, col=$col'})';
 }
 
-enum _ParseState { ground, escape, csi, ss3, utf8 }
+enum _ParseState { ground, escape, csi, ss3, utf8, x10Mouse }
 
 class TermEventParser {
   _ParseState _state = _ParseState.ground;
   final List<int> _csiBytes = <int>[];
   final List<int> _utf8Bytes = <int>[];
+  final List<int> _x10Bytes = <int>[];
   int _utf8Expected = 0;
 
   bool get hasPartial => _state != _ParseState.ground;
@@ -84,6 +85,8 @@ class TermEventParser {
         return <TermEvent>[_ss3Key(byte)];
       case _ParseState.utf8:
         return _inUtf8(byte);
+      case _ParseState.x10Mouse:
+        return _inX10(byte);
     }
   }
 
@@ -93,6 +96,7 @@ class TermEventParser {
     _state = _ParseState.ground;
     _csiBytes.clear();
     _utf8Bytes.clear();
+    _x10Bytes.clear();
     _utf8Expected = 0;
     if (state == _ParseState.escape) {
       return const TermEvent(TermEventKind.escape);
@@ -160,6 +164,13 @@ class TermEventParser {
   }
 
   List<TermEvent> _inCsi(int byte) {
+    if (byte == 0x4D && _csiBytes.isEmpty) {
+      // ESC [ M with no parameters: legacy X10 mouse report; three
+      // offset-encoded payload bytes (button, column, row) follow.
+      _state = _ParseState.x10Mouse;
+      _x10Bytes.clear();
+      return const <TermEvent>[];
+    }
     if (byte >= 0x40 && byte <= 0x7E) {
       _state = _ParseState.ground;
       final String params = String.fromCharCodes(_csiBytes);
@@ -282,6 +293,43 @@ class TermEventParser {
         return const TermEvent(TermEventKind.unknown);
     }
     return const TermEvent(TermEventKind.unknown);
+  }
+
+  List<TermEvent> _inX10(int byte) {
+    _x10Bytes.add(byte);
+    if (_x10Bytes.length < 3) {
+      return const <TermEvent>[];
+    }
+    _state = _ParseState.ground;
+    final int cb = _x10Bytes[0] - 32;
+    final int col = _x10Bytes[1] - 32;
+    final int row = _x10Bytes[2] - 32;
+    _x10Bytes.clear();
+    return <TermEvent>[_x10Event(cb, col, row)];
+  }
+
+  TermEvent _x10Event(int cb, int col, int row) {
+    if (cb >= 64 && cb < 96) {
+      return TermEvent(
+        cb == 64 ? TermEventKind.wheelUp : TermEventKind.wheelDown,
+        row: row,
+        col: col,
+      );
+    }
+    if ((cb & 32) != 0) {
+      // Motion/drag tracking; menus do not use it.
+      return const TermEvent(TermEventKind.unknown);
+    }
+    // X10 reports button 3 for any release.
+    if ((cb & 0x03) == 3) {
+      return TermEvent(TermEventKind.mouseUp, row: row, col: col);
+    }
+    return TermEvent(
+      TermEventKind.mouseDown,
+      row: row,
+      col: col,
+      button: cb & 0x03,
+    );
   }
 
   TermEvent _sgrMouse(String params, {required bool pressed}) {

@@ -242,12 +242,23 @@ Future<T> menuSelect<T>(
     if (rowAfter != null) {
       firstEntryRow = rowAfter - tailLines - entries.length;
     }
+    bool retriedRowQuery = false;
 
     int? entryAtRow(int row) {
-      if (firstEntryRow == null) {
+      if (firstEntryRow == null && !retriedRowQuery) {
+        // The init-time measurement failed; the cursor rests just below
+        // the menu between repaints, so measure again on first click.
+        retriedRowQuery = true;
+        final int? rowNow = io.cursorRow();
+        if (rowNow != null) {
+          firstEntryRow = rowNow - tailLines - entries.length;
+        }
+      }
+      final int? first = firstEntryRow;
+      if (first == null) {
         return null;
       }
-      final int index = row - firstEntryRow;
+      final int index = row - first;
       if (index < 0 || index >= entries.length) {
         return null;
       }
@@ -319,6 +330,11 @@ Future<T> menuSelect<T>(
           changed = true;
         }
         if (changed) {
+          // Re-assert mouse tracking with the repaint: programs sharing the
+          // tty (tmux console attach/detach) can reset it behind our back,
+          // and the enable sequence is idempotent. Self-heals within one
+          // tick instead of leaving the menu click-dead.
+          io.enableMouse();
           draw(repaint: true);
         }
         continue;
