@@ -275,13 +275,18 @@ class NativeCommandService {
       return 0;
     }
 
-    // One confirmation gate for the cross-consumer wipe.
+    // Double confirmation gate for the cross-consumer wipe.
     if (io.stream && !force) {
       stdout.write(
-        'Type WIPE EVERYTHING to delete EVERY instance across plugin/forge/fabric/neoforge: ',
+        'Delete EVERY instance across plugin/forge/fabric/neoforge? [y/N]: ',
       );
-      final answer = stdin.readLineSync()?.trim() ?? '';
-      if (answer != 'WIPE EVERYTHING') {
+      final String answer = stdin.readLineSync()?.trim().toLowerCase() ?? '';
+      if (answer != 'y' && answer != 'yes') {
+        throw _NativeCommandException('Wipe cancelled', 1);
+      }
+      stdout.write('Are you sure? [y/N]: ');
+      final String again = stdin.readLineSync()?.trim().toLowerCase() ?? '';
+      if (again != 'y' && again != 'yes') {
         throw _NativeCommandException('Wipe cancelled', 1);
       }
     }

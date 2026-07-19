@@ -81,7 +81,7 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `instance reset <name>` | Wipe worlds/config/plugins/mods/logs back to baseline. Keeps the launch artifacts and the isolated flag, and re-applies the styled MOTD for the server type. Refused while the instance is locked. |
 | `instance delete <name>` | Delete the instance entirely (kills any running process first). Refused while the instance is locked. |
 | `instance delete-all [--force]` | Delete every instance in the active profile. Asks for `DELETE` confirmation unless `--force`. Locked instances are skipped and left untouched. |
-| `instance delete-all --everywhere [--force]` | Wipe every instance across plugin/forge/fabric/neoforge in one call. Asks for `WIPE EVERYTHING` confirmation unless `--force`. Locked instances are skipped. |
+| `instance delete-all --everywhere [--force]` | Wipe every instance across plugin/forge/fabric/neoforge in one call. Asks for a double y/N confirmation unless `--force`. Locked instances are skipped. |
 
 ### server — first-time jar wiring
 
@@ -217,7 +217,7 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 # Spin up one of every plugin flavor at the same MC version
 ./start.sh server create-many --types paper,purpur,canvas,spigot --mc 1.21.11 --auto-build
 
-# Wipe every instance across every consumer (asks for WIPE EVERYTHING confirmation)
+# Wipe every instance across every consumer (asks for a double y/N confirmation)
 ./start.sh instance delete-all --everywhere
 
 # Update an existing server to a new MC version (worlds may not survive)

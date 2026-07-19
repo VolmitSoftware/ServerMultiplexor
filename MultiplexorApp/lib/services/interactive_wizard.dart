@@ -910,11 +910,11 @@ class InteractiveWizard {
     if (!confirmed) {
       return;
     }
-    final String typed = await Ui.input(
-      'Type WIPE EVERYTHING to confirm',
-      defaultValue: '',
+    final bool reallySure = await Ui.confirm(
+      'Are you sure? This cannot be undone.',
+      defaultValue: false,
     );
-    if (typed.trim() != 'WIPE EVERYTHING') {
+    if (!reallySure) {
       Ui.note('Wipe cancelled.');
       await Ui.pause();
       return;
