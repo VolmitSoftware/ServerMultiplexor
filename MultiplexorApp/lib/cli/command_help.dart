@@ -56,13 +56,14 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
   ]),
   CommandHelpGroup('build', <String>[
-    '<paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge> [--mc <version>] [--loader <version>] [--installer <version>]',
+    '<paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge> [--mc <version>] [--loader <version>] [--installer <version>] [--force]',
     'latest <type>',
     'versions [type]',
     'cache-info [type] [--mc <version>]',
     'list',
     'list-all [type]',
     'test-latest [--spigot-mc <version>]',
+    'prune [all|type]',
   ]),
   CommandHelpGroup('repos', <String>['sync [all|paper|purpur|folia|canvas|leaf]']),
   CommandHelpGroup('plugins', <String>[

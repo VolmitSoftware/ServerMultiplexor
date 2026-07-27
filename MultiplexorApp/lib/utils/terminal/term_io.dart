@@ -156,10 +156,10 @@ class TermIo {
     }
   }
 
-  /// Reports the 1-based cursor row, or null if the terminal does not
+  /// Reports the 1-based cursor position, or null if the terminal does not
   /// answer. Other events received while waiting (clicks, keys) are queued
   /// for the next [readEvent] rather than discarded. Requires raw mode.
-  int? cursorRow() {
+  TermCursor? cursorPosition() {
     if (!hasTerminal) {
       return null;
     }
@@ -180,7 +180,7 @@ class TermIo {
       }
       for (final TermEvent event in _parser.add(byte)) {
         if (event.kind == TermEventKind.cursorReport) {
-          return event.row;
+          return TermCursor(event.row, event.col);
         }
         _queue.add(event);
       }
@@ -239,6 +239,16 @@ class TermIo {
   }
 
   int get terminalColumns => stdout.hasTerminal ? stdout.terminalColumns : 100;
+
+  int get terminalLines => stdout.hasTerminal ? stdout.terminalLines : 24;
+}
+
+/// A 1-based cursor position as reported by the terminal.
+class TermCursor {
+  const TermCursor(this.row, this.col);
+
+  final int row;
+  final int col;
 }
 
 class TermInputUnavailable implements Exception {

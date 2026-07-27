@@ -15,6 +15,7 @@ class Ansi {
   static const String gray = '\x1B[90m';
   static const String eraseLine = '\x1B[2K';
   static const String eraseToEnd = '\x1B[0K';
+  static const String eraseScreen = '\x1B[2J';
 
   /// Subtle dark background used for the selected menu row (256-color).
   static const String bgHighlight = '\x1B[48;5;236m';

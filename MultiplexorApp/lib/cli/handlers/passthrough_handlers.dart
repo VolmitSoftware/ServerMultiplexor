@@ -59,6 +59,11 @@ Future<void> handleBuildTestLatest(Map<String, dynamic> args) async {
   await _runAndExit(cmd);
 }
 
+Future<void> handleBuildPrune(Map<String, dynamic> args) async {
+  final type = _arg(args, 'type') ?? 'all';
+  await _runAndExit(<String>['build', 'prune', type]);
+}
+
 Future<void> handleBuildTarget(String type, Map<String, dynamic> args) async {
   final mc = _arg(args, 'mc');
   final loader = _arg(args, 'loader');
@@ -73,6 +78,9 @@ Future<void> handleBuildTarget(String type, Map<String, dynamic> args) async {
   }
   if (installer != null) {
     cmd.addAll(<String>['--installer', installer]);
+  }
+  if (args['force'] == true) {
+    cmd.add('--force');
   }
 
   await _runAndExit(cmd);

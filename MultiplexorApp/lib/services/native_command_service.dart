@@ -8,6 +8,7 @@ import 'package:multiplexor/cli/command_help.dart';
 import 'package:path/path.dart' as p;
 import 'package:yaml/yaml.dart';
 
+import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
 import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
@@ -1503,6 +1504,13 @@ class NativeCommandService {
         final testOptions = _parseOptions(rest);
         await _buildTestLatest(profile, testOptions, io);
         return 0;
+      case 'prune':
+        final parsed = _parseFlexibleArgs(rest);
+        final target = parsed.positionals.isEmpty
+            ? 'all'
+            : parsed.positionals.first;
+        await _buildPrune(target, io);
+        return 0;
       case 'paper':
       case 'purpur':
       case 'folia':
@@ -1518,7 +1526,7 @@ class NativeCommandService {
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: build <paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge|latest|list|list-all|versions|cache-info|test-latest>',
+          'Usage: build <paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge|latest|list|list-all|versions|cache-info|test-latest|prune>',
           2,
         );
     }
@@ -3754,25 +3762,32 @@ class NativeCommandService {
     Map<String, String> options,
     _NativeIoBuffer io,
   ) async {
-    final targets = <String>['paper', 'purpur', 'folia', 'canvas', 'leaf'];
+    // spigot is always included: it only reaches BuildTools when its upstream
+    // Jenkins build is newer than the cached jar, so covering it costs nothing
+    // on the common path. `--spigot-mc` pins it to a version of its own,
+    // because spigot lags the other platforms on a fresh Minecraft release.
+    final targets = <String>[
+      'paper',
+      'purpur',
+      'folia',
+      'canvas',
+      'leaf',
+      'spigot',
+    ];
     final failures = <String>[];
+    final spigotMc = options['spigot-mc']?.trim();
 
     for (final type in targets) {
+      final pinned = type == 'spigot' && spigotMc != null && spigotMc.isNotEmpty;
       try {
-        await _buildTarget(profile, type, const <String, String>{}, io);
+        await _buildTarget(
+          profile,
+          type,
+          pinned ? <String, String>{'mc': spigotMc} : const <String, String>{},
+          io,
+        );
       } catch (e) {
         failures.add('$type: $e');
-      }
-    }
-
-    final spigotMc = options['spigot-mc']?.trim();
-    if (spigotMc != null && spigotMc.isNotEmpty) {
-      try {
-        await _buildTarget(profile, 'spigot', <String, String>{
-          'mc': spigotMc,
-        }, io);
-      } catch (e) {
-        failures.add('spigot: $e');
       }
     }
 
@@ -3792,10 +3807,81 @@ class NativeCommandService {
   ) async {
     final normalized = type.toLowerCase();
     final requestedMc = options['mc']?.trim();
-    final mc = requestedMc != null && requestedMc.isNotEmpty
-        ? requestedMc
-        : await _resolveLatestMcVersion(normalized);
+    if (requestedMc != null && requestedMc.isNotEmpty) {
+      return _buildTargetVersion(profile, normalized, requestedMc, options, io);
+    }
 
+    final latest = await _resolveLatestMcVersion(normalized);
+    try {
+      return await _buildTargetVersion(profile, normalized, latest, options, io);
+    } on _NativeCommandException catch (firstFailure) {
+      // BuildTools compiles are minutes long and fail for reasons a different
+      // Minecraft version will not fix, so only downloaded platforms retry.
+      if (BuildCachePolicy.expensiveRebuild.contains(normalized)) {
+        rethrow;
+      }
+
+      final fallbacks = buildVersionCandidates(
+        latest: latest,
+        supported: await _buildSupportedVersions(profile, normalized),
+      ).skip(1).toList(growable: false);
+      if (fallbacks.isEmpty) {
+        rethrow;
+      }
+
+      final failures = <String>['mc=$latest: ${firstFailure.message}'];
+      var attempted = latest;
+      for (final fallback in fallbacks) {
+        io.error(
+          '[WARN] No $normalized build for mc=$attempted; '
+          'trying mc=$fallback instead',
+        );
+        attempted = fallback;
+        try {
+          return await _buildTargetVersion(
+            profile,
+            normalized,
+            fallback,
+            options,
+            io,
+          );
+        } on _NativeCommandException catch (e) {
+          failures.add('mc=$fallback: ${e.message}');
+        }
+      }
+
+      throw _NativeCommandException(
+        'No downloadable $normalized build found:\n${failures.join('\n')}',
+        1,
+      );
+    }
+  }
+
+  Future<String> _buildTargetVersion(
+    ConsumerProfile profile,
+    String normalized,
+    String mc,
+    Map<String, String> options,
+    _NativeIoBuffer io,
+  ) async {
+    final String jar = await _buildTargetJar(
+      profile,
+      normalized,
+      mc,
+      options,
+      io,
+    );
+    _pruneBuildCache(profile, normalized, io);
+    return jar;
+  }
+
+  Future<String> _buildTargetJar(
+    ConsumerProfile profile,
+    String normalized,
+    String mc,
+    Map<String, String> options,
+    _NativeIoBuffer io,
+  ) async {
     switch (normalized) {
       case 'paper':
       case 'folia':
@@ -3824,9 +3910,14 @@ class NativeCommandService {
           io,
         );
       case 'spigot':
-        return _buildWithBuildTools(profile, mc, io);
+        return _buildWithBuildTools(
+          profile,
+          mc,
+          io,
+          force: options['force'] == 'true',
+        );
       default:
-        throw _NativeCommandException('Unknown build target: $type', 2);
+        throw _NativeCommandException('Unknown build target: $normalized', 2);
     }
   }
 
@@ -4156,12 +4247,35 @@ class NativeCommandService {
   Future<String> _buildWithBuildTools(
     ConsumerProfile profile,
     String mc,
-    _NativeIoBuffer io,
-  ) async {
+    _NativeIoBuffer io, {
+    bool force = false,
+  }) async {
     final buildDir = _buildDir(profile, 'spigot');
     final toolsDir = p.join(buildDir, 'tools');
     Directory(buildDir).createSync(recursive: true);
     Directory(toolsDir).createSync(recursive: true);
+
+    // Spigot has no build API, but the version manifest carries the Jenkins
+    // build the refs point at. Naming the jar after it makes "is this the
+    // newest Spigot?" answerable without a ten-minute BuildTools compile.
+    final spigotBuild = await _resolveSpigotBuildNumber(mc);
+    final output = p.join(
+      buildDir,
+      spigotBuild == null ? 'spigot-$mc.jar' : 'spigot-$mc-$spigotBuild.jar',
+    );
+    // Only a positively resolved build number proves the cached jar is the
+    // current upstream one. If the lookup failed, compile rather than trust an
+    // unnumbered jar of unknown age — otherwise a single network hiccup pins
+    // spigot to a stale build forever.
+    if (!force && spigotBuild != null && File(output).existsSync()) {
+      _registerBuiltJar(profile, 'spigot', output);
+      io.write(
+        '[OK] spigot build $spigotBuild for mc=$mc is already the newest '
+        'upstream build; skipping BuildTools',
+      );
+      io.write('[INFO] Jar: $output');
+      return output;
+    }
 
     final buildToolsUrl =
         Platform.environment['SPIGOT_BUILDTOOLS_URL']?.trim().isNotEmpty == true
@@ -4247,12 +4361,65 @@ class NativeCommandService {
     }
 
     final newest = builtJars.last;
-    final output = p.join(buildDir, 'spigot-$mc.jar');
     newest.copySync(output);
     _registerBuiltJar(profile, 'spigot', output);
-    io.write('[OK] Cached spigot server jar for mc=$mc');
+    // A BuildTools work dir is ~700 MB of decompiled sources and git clones.
+    // Now that spigot is part of the bulk pull, leaving them behind would grow
+    // the cache by that much on every run. Failed compiles keep theirs so the
+    // logs stay inspectable.
+    _removeBuildToolsWorkDir(buildDir, workDir, io);
+    io.write(
+      '[OK] Cached spigot${spigotBuild == null ? '' : ' build $spigotBuild'} '
+      'for mc=$mc',
+    );
     io.write('[INFO] Jar: $output');
     return output;
+  }
+
+  /// Deletes one BuildTools work dir, guarding on it being a `work-*` child of
+  /// [buildDir] so a bad path can never take the jar cache with it.
+  ///
+  /// `Directory.deleteSync(recursive: true)` gives up with ENOTEMPTY partway
+  /// through a BuildTools tree (Spotlight drops `.DS_Store` files back into
+  /// directories while the walk is running), so `rm -rf` finishes the job.
+  void _removeBuildToolsWorkDir(
+    String buildDir,
+    String workDir,
+    _NativeIoBuffer io,
+  ) {
+    final resolved = p.normalize(p.absolute(workDir));
+    if (p.dirname(resolved) != p.normalize(p.absolute(buildDir)) ||
+        !p.basename(resolved).startsWith('work-')) {
+      io.error('[WARN] Refusing to remove unexpected work dir $resolved');
+      return;
+    }
+
+    try {
+      Directory(resolved).deleteSync(recursive: true);
+      return;
+    } catch (_) {
+      // Fall through to rm -rf.
+    }
+
+    final result = Process.runSync('rm', <String>['-rf', resolved]);
+    if (result.exitCode != 0 || Directory(resolved).existsSync()) {
+      io.error(
+        '[WARN] Could not remove BuildTools work dir $resolved: '
+        '${result.stderr.toString().trim()}',
+      );
+    }
+  }
+
+  Future<String?> _resolveSpigotBuildNumber(String mc) async {
+    try {
+      final payload = await _httpGetJsonObject(
+        'https://hub.spigotmc.org/versions/$mc.json',
+      );
+      final name = payload['name']?.toString().trim() ?? '';
+      return RegExp(r'^\d+$').hasMatch(name) ? name : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<String> _resolveLatestFabricLoader(String mc) async {
@@ -4519,6 +4686,167 @@ class NativeCommandService {
     } catch (_) {
       File(latest).deleteSyncSafe();
       File(absolute).copySync(latest);
+    }
+  }
+
+  /// Absolute paths of every jar an instance still launches from, across all
+  /// consumers, so pruning can never delete a server out from under itself.
+  ///
+  /// An instance is routinely pinned to an older build than the newest one
+  /// cached — it keeps running whatever it was created with until the user
+  /// updates it.
+  Set<String> _jarsInUse() {
+    final inUse = <String>{};
+    for (final profile in ConsumerProfile.values) {
+      for (final instance in _instanceNames(profile)) {
+        final source = _serverSource(profile, instance);
+        for (final key in const <String>['jar', 'installer']) {
+          final value = source[key]?.trim() ?? '';
+          if (value.isNotEmpty) {
+            inUse.add(p.normalize(p.absolute(value)));
+          }
+        }
+      }
+    }
+    return inUse;
+  }
+
+  /// Deletes jars a newer build has superseded from one platform's cache,
+  /// returning how many went away.
+  ///
+  /// Runs after every successful build. Failures only warn: a build that
+  /// produced a good jar must not be reported as failed just because cleanup
+  /// could not remove an old one.
+  int _pruneBuildCache(
+    ConsumerProfile profile,
+    String type,
+    _NativeIoBuffer io, {
+    bool qualifyConsumer = false,
+  }) {
+    final label = qualifyConsumer ? '${profile.shortName}/$type' : type;
+    final dir = Directory(_buildDir(profile, type));
+    if (!dir.existsSync()) {
+      return 0;
+    }
+
+    final jars = <CachedBuildJar>[];
+    try {
+      // followLinks: false keeps the latest.jar symlink out of the listing;
+      // when it is a copied file instead, the version parser skips it anyway.
+      for (final entity in dir.listSync(followLinks: false)) {
+        if (entity is! File || !entity.path.endsWith('.jar')) {
+          continue;
+        }
+        jars.add(
+          CachedBuildJar(
+            path: p.normalize(p.absolute(entity.path)),
+            name: p.basename(entity.path),
+            modified: entity.lastModifiedSync(),
+          ),
+        );
+      }
+    } catch (e) {
+      io.error('[WARN] Could not read the $label build cache to prune it: $e');
+      return 0;
+    }
+
+    final stale = planBuildPrune(jars: jars, keepPaths: _jarsInUse());
+    var removed = 0;
+    var freed = 0;
+    for (final jar in stale) {
+      try {
+        final file = File(jar.path);
+        final size = file.lengthSync();
+        file.deleteSync();
+        removed++;
+        freed += size;
+      } catch (e) {
+        io.error('[WARN] Could not remove superseded build ${jar.name}: $e');
+      }
+    }
+
+    if (removed > 0) {
+      io.write(
+        '[OK] Pruned $removed superseded $label build(s), '
+        'freeing ${_formatBytes(freed)}',
+      );
+    }
+    return removed;
+  }
+
+  /// Removes BuildTools work directories sitting in [type]'s build dir.
+  ///
+  /// Each holds roughly 700 MB of decompiled sources that BuildTools only
+  /// needs while it runs, and an interrupted compile leaves one behind for
+  /// good.
+  int _pruneBuildToolsWorkDirs(
+    ConsumerProfile profile,
+    String type,
+    _NativeIoBuffer io, {
+    bool qualifyConsumer = false,
+  }) {
+    final label = qualifyConsumer ? '${profile.shortName}/$type' : type;
+    final buildDir = _buildDir(profile, type);
+    final dir = Directory(buildDir);
+    if (!dir.existsSync()) {
+      return 0;
+    }
+
+    var removed = 0;
+    for (final entity in dir.listSync(followLinks: false)) {
+      if (entity is! Directory ||
+          !p.basename(entity.path).startsWith('work-')) {
+        continue;
+      }
+      _removeBuildToolsWorkDir(buildDir, entity.path, io);
+      if (!entity.existsSync()) {
+        removed++;
+      }
+    }
+
+    if (removed > 0) {
+      io.write(
+        '[OK] Removed $removed leftover BuildTools work dir(s) from $label',
+      );
+    }
+    return removed;
+  }
+
+  /// One-shot cleanup of build caches: superseded jars plus any BuildTools
+  /// work directory an interrupted spigot compile left behind.
+  ///
+  /// Unlike the automatic prune that follows a build, this sweeps every
+  /// consumer. Cleanup is a housekeeping command, and making the user cycle
+  /// the active consumer four times to reclaim their disk would be silly.
+  Future<void> _buildPrune(String target, _NativeIoBuffer io) async {
+    final normalized = target.toLowerCase();
+    if (normalized != 'all' && !_allBuildTypes.contains(normalized)) {
+      throw _NativeCommandException(
+        'Usage: build prune [all|${_allBuildTypes.join('|')}]',
+        2,
+      );
+    }
+
+    final types = normalized == 'all' ? _allBuildTypes : <String>[normalized];
+    var removed = 0;
+    for (final consumer in ConsumerProfile.values) {
+      for (final type in types) {
+        removed += _pruneBuildCache(
+          consumer,
+          type,
+          io,
+          qualifyConsumer: true,
+        );
+        removed += _pruneBuildToolsWorkDirs(
+          consumer,
+          type,
+          io,
+          qualifyConsumer: true,
+        );
+      }
+    }
+    if (removed == 0) {
+      io.write('[OK] Build caches are already clean');
     }
   }
 
@@ -5105,7 +5433,7 @@ class NativeCommandService {
       }
 
       final key = arg.substring(2);
-      if (key == 'auto-build' || key == 'isolated') {
+      if (key == 'auto-build' || key == 'isolated' || key == 'force') {
         options[key] = 'true';
         continue;
       }

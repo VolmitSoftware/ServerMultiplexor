@@ -202,7 +202,7 @@ class InteractiveWizard {
         'Pull latest builds',
         value: const _DashChoice(_Act.pullBuilds),
         shortcut: 'p',
-        detail: 'force re-download every platform jar',
+        detail: 'refresh every platform jar, spigot included',
       ),
     );
     if (stopped.length > 1) {
@@ -866,33 +866,32 @@ class InteractiveWizard {
   }
 
   /// Force re-downloads the newest build of every platform the active
-  /// consumer owns. Spigot is excluded: BuildTools compiles take many
-  /// minutes, so it is only rebuilt on explicit request.
+  /// consumer owns, spigot included. Spigot only runs BuildTools when its
+  /// upstream Jenkins build is newer than the cached jar, so the bulk pull
+  /// stays fast on the common path.
   Future<void> _refreshAllBuilds() async {
     final List<String> types = _serverTypesForActiveConsumer();
-    final List<String> pull = types
-        .where(
-          (String t) => !BuildCachePolicy.expensiveRebuild.contains(t),
-        )
-        .toList(growable: false);
-    if (pull.length != types.length) {
+    if (types.any(BuildCachePolicy.expensiveRebuild.contains)) {
       Ui.note(
-        'spigot skipped: BuildTools rebuilds take minutes — use Build & tuning → Build server jar.',
+        'spigot compiles with BuildTools when upstream moved — that step takes minutes.',
       );
     }
     int pulled = 0;
-    int failed = 0;
-    for (final String type in pull) {
+    final List<String> failed = <String>[];
+    for (final String type in types) {
       Ui.doing('Pulling latest ${_serverTypeLabel(type)} build');
       final int code = await _shellRun(<String>['build', type]);
       if (code == 0) {
         pulled++;
       } else {
-        failed++;
+        failed.add(_serverTypeLabel(type));
       }
     }
-    if (failed > 0) {
-      Ui.warn('Pulled $pulled build(s); $failed failed.');
+    if (failed.isNotEmpty) {
+      Ui.warn(
+        'Pulled $pulled build(s); failed: ${failed.join(', ')} '
+        '(see the errors above).',
+      );
     } else {
       Ui.success('All $pulled platform build(s) fresh from upstream.');
     }
@@ -1149,7 +1148,7 @@ class InteractiveWizard {
           'Pull latest builds',
           value: _BuildAct.pullAll,
           shortcut: 'p',
-          detail: 'force re-download every platform jar',
+          detail: 'refresh every platform jar, spigot included',
         ),
         const MenuEntry<_BuildAct>('Show build cache', value: _BuildAct.cache),
         const MenuEntry<_BuildAct>(

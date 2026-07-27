@@ -2,11 +2,11 @@
 
 A Dart-native Minecraft server workspace manager. One workspace holds many server instances across four isolated **consumer profiles** (plugin, forge, fabric, neoforge), each with its own build cache, dropin folder, and instance store.
 
-Everything is driven through `./start.sh` — either the interactive wizard (no args) or a direct CLI command.
+Everything is driven through `./start.sh` — either the interactive wizard (no args) or a direct CLI command. There is no separate build step: `start.sh` compiles `MultiplexorApp/` to the `multiplexor` binary whenever a `.dart` source, `pubspec.yaml`, or `pubspec.lock` is newer than the binary, then execs it. Unchanged sources skip straight to the binary. A failed compile leaves the previous binary in place and exits non-zero rather than running stale-but-working code silently. Set `MULTIPLEXOR_REBUILD=1` to force a recompile; everything `start.sh` itself prints goes to stderr, so stdout stays parseable.
 
 ## Requirements
 
-- `dart` 3.10+ (only needed if building from source — `./start.sh` runs `dart run` against `MultiplexorApp/`)
+- `dart` 3.10+ (`./start.sh` compiles `MultiplexorApp/` on demand)
 - `java` 17+ (or whatever your target server requires)
 - `git`, `tmux` (tmux is required for `runtime start` / `runtime console`)
 
@@ -29,9 +29,9 @@ Highlighted-server quick keys (act on the selected server without opening its me
 
 Use `m` for Create many. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
 
-Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the dashboard, platform picker, and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `b` → Build server jar.
+Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the dashboard, platform picker, and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `build spigot --force`.
 
-`p` (Pull latest builds, also in Build & tuning) force re-downloads the newest build of every platform the active consumer owns, skipping spigot for the same reason. The dashboard itself is live: state dots pulse and spin with each server's lifecycle, players/TPS/version and the build-freshness footer update in place, and destructive actions (wipe, delete, factory reset) are shown in red.
+`p` (Pull latest builds, also in Build & tuning) refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line. The dashboard itself is live: state dots pulse and spin with each server's lifecycle, players/TPS/version and the build-freshness footer update in place, and destructive actions (wipe, delete, factory reset) are shown in red.
 
 ## Concepts
 
@@ -181,13 +181,18 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 | Command | What it does |
 |---------|--------------|
-| `build <type> [--mc <v>] [--loader <v>] [--installer <v>]` | Build or download a server jar. Refreshes from upstream every run; spigot also refreshes `BuildTools.jar`. |
+| `build <type> [--mc <v>] [--loader <v>] [--installer <v>] [--force]` | Build or download a server jar. Refreshes from upstream every run, then prunes the builds it superseded. Without `--mc`, a platform that has no build for its newest advertised version falls back to the next-newest supported one (Folia trails Paper by a release, so this is its normal path). Spigot resolves the upstream Jenkins build first and reuses a matching cached jar instead of recompiling; if that lookup fails it compiles rather than trust a jar of unknown age, and `--force` runs BuildTools regardless. |
 | `build latest <type>` | Print the latest supported MC version for `<type>`. |
 | `build versions [type]` | Print all supported versions. |
 | `build cache-info [type] [--mc <v>]` | Machine-readable jar-cache report: one `<type>\t<jar>\t<ageSeconds>` line per cached jar, newest first. Drives the wizard's automatic refresh decisions and its "builds updated" footer. |
 | `build list` | Show what's in the active profile's cache. |
 | `build list-all [type]` | Show cache contents across profiles. |
-| `build test-latest [--spigot-mc <v>]` | Sanity-check the latest of every type. |
+| `build test-latest [--spigot-mc <v>]` | Sanity-check the latest of every type, spigot included. `--spigot-mc` pins spigot to its own version, since it lags the others on a fresh Minecraft release. |
+| `build prune [all\|type]` | Sweep every consumer's build cache: drop superseded jars and remove leftover BuildTools work directories. Builds prune themselves, so this is only needed to clean up history. |
+
+**Build caches keep one jar per Minecraft version.** Every successful build deletes the older builds of that same version, so upstream build-number churn stops accumulating. Two things are never pruned: a jar an instance still launches from (instances stay pinned to whatever they were created with until you update them), and the newest jar of every *other* Minecraft version — switching back to an older version still hits the cache instead of re-downloading or, for spigot, recompiling.
+
+BuildTools work directories are roughly 700 MB of decompiled sources each and are only needed while a spigot compile runs. A successful compile removes its own; `build prune` clears any left behind by an interrupted one.
 
 ### repos — sync upstream version metadata
 

@@ -96,6 +96,119 @@ class BuildCachePolicy {
   }
 }
 
+/// Minecraft versions a build attempt should try for one platform, newest
+/// first, starting from the resolved [latest].
+///
+/// Upstream metadata regularly advertises a version before a platform has a
+/// downloadable build for it, and version discovery falls back to Mojang's
+/// newest release whenever a platform's own API is unreachable. Folia hits
+/// both cases routinely because it trails Paper by a release. Rather than
+/// hard-failing on the first miss, a pull walks back through [supported]
+/// (ascending, as upstream version lists are sorted) until a version yields a
+/// build.
+List<String> buildVersionCandidates({
+  required String latest,
+  required List<String> supported,
+  int limit = 3,
+}) {
+  final List<String> candidates = <String>[];
+
+  void add(String value) {
+    final String trimmed = value.trim();
+    if (trimmed.isEmpty ||
+        candidates.contains(trimmed) ||
+        candidates.length >= limit) {
+      return;
+    }
+    candidates.add(trimmed);
+  }
+
+  add(latest);
+  for (final String version in supported.reversed) {
+    add(version);
+  }
+  return List<String>.unmodifiable(candidates);
+}
+
+/// One jar sitting in a platform's build directory, as the prune planner
+/// sees it.
+class CachedBuildJar {
+  const CachedBuildJar({
+    required this.path,
+    required this.name,
+    required this.modified,
+  });
+
+  final String path;
+  final String name;
+  final DateTime modified;
+}
+
+/// Matches a dotted version token (`26.2`, `1.21.11`, `26.1.2`).
+///
+/// Anchoring is deliberately absent: legacy bundler jars lead with a date
+/// stamp (`paper-20260215-162758-paper-bundler-1.21.10-...`), and a date has
+/// no dots, so the first dotted token in the name is still the game version.
+final RegExp _versionToken = RegExp(r'\d+\.\d+(?:\.\d+)*');
+
+/// The Minecraft version a cached jar belongs to, or null when the name
+/// carries no version at all (`latest.jar`, `BuildTools.jar`).
+///
+/// Only used to group jars for pruning, so it has to be conservative: an
+/// unrecognised name groups under null and is never a prune candidate.
+String? buildJarVersionKey(String fileName) {
+  final String stem = fileName.toLowerCase().endsWith('.jar')
+      ? fileName.substring(0, fileName.length - 4)
+      : fileName;
+  return _versionToken.firstMatch(stem)?.group(0);
+}
+
+/// Jars in one build directory that a newer build has superseded.
+///
+/// Build caches otherwise grow without bound — every upstream build number
+/// leaves another 60-90 MB jar behind forever. Pruning keeps the
+/// [keepPerVersion] newest jars *per Minecraft version*, so the build-number
+/// churn goes away while switching back to an older game version still hits
+/// the cache instead of re-downloading (or, for spigot, re-compiling).
+///
+/// Two things are never returned: anything in [keepPaths] (an instance still
+/// launches from it) and anything [buildJarVersionKey] cannot place.
+List<CachedBuildJar> planBuildPrune({
+  required List<CachedBuildJar> jars,
+  Set<String> keepPaths = const <String>{},
+  int keepPerVersion = 1,
+}) {
+  final Map<String, List<CachedBuildJar>> byVersion =
+      <String, List<CachedBuildJar>>{};
+  for (final CachedBuildJar jar in jars) {
+    final String? version = buildJarVersionKey(jar.name);
+    if (version == null) {
+      continue;
+    }
+    byVersion.putIfAbsent(version, () => <CachedBuildJar>[]).add(jar);
+  }
+
+  final List<CachedBuildJar> stale = <CachedBuildJar>[];
+  for (final List<CachedBuildJar> group in byVersion.values) {
+    if (group.length <= keepPerVersion) {
+      continue;
+    }
+    // Newest first; name breaks mtime ties so the result is deterministic.
+    group.sort((CachedBuildJar a, CachedBuildJar b) {
+      final int byDate = b.modified.compareTo(a.modified);
+      return byDate != 0 ? byDate : a.name.compareTo(b.name);
+    });
+    for (int i = keepPerVersion; i < group.length; i++) {
+      if (!keepPaths.contains(group[i].path)) {
+        stale.add(group[i]);
+      }
+    }
+  }
+
+  stale.sort((CachedBuildJar a, CachedBuildJar b) => a.path.compareTo(b.path));
+  return List<CachedBuildJar>.unmodifiable(stale);
+}
+
 /// Human phrasing for a cached-build age: `never`, `just now`, `12m ago`,
 /// `3h ago`, `2d ago`.
 String formatBuildAge(Duration? age) {

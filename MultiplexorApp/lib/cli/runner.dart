@@ -149,6 +149,11 @@ Future<int> _runBuild(List<String> rest) async {
         'spigot-mc': parsed.option('spigot-mc') ?? parsed.positionalOrNull(0),
       });
       return 0;
+    case 'prune':
+      await handleBuildPrune(<String, dynamic>{
+        'type': parsed.option('type') ?? parsed.positionalOrNull(0) ?? 'all',
+      });
+      return 0;
     case 'paper':
     case 'purpur':
     case 'folia':
@@ -162,11 +167,12 @@ Future<int> _runBuild(List<String> rest) async {
         'mc': parsed.option('mc') ?? parsed.positionalOrNull(0),
         'loader': parsed.option('loader'),
         'installer': parsed.option('installer'),
+        'force': parsed.flag('force'),
       });
       return 0;
     default:
       stderr.writeln(
-        'Usage: build <target|latest|list|list-all|versions|cache-info|test-latest>',
+        'Usage: build <target|latest|list|list-all|versions|cache-info|test-latest|prune>',
       );
       return 2;
   }

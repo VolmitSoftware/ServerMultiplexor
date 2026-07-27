@@ -4,6 +4,8 @@ import '../terminal/ansi.dart';
 import '../terminal/term_events.dart';
 import '../terminal/term_io.dart';
 
+part 'menu_layout.dart';
+
 /// Thrown when the user backs out of a prompt with Escape.
 class PromptBackNavigation implements Exception {
   const PromptBackNavigation();
@@ -107,119 +109,163 @@ Future<T> menuSelect<T>(
       ? initialIndex
       : selectable.first;
 
-  // Mutable so a live refresh (onTick) can recompute alignment when badge
-  // contents grow or shrink between ticks.
-  int labelWidth = entries
-      .where((MenuEntry<T> e) => e.selectable)
-      .fold(
-        0,
-        (int w, MenuEntry<T> e) => e.label.length > w ? e.label.length : w,
-      );
-  int badgeWidth = entries.fold(
-    0,
-    (int w, MenuEntry<T> e) => (e.badge?.length ?? 0) > w ? e.badge!.length : w,
-  );
-
-  final bool hasShortcuts = entries.any(
-    (MenuEntry<T> e) => e.selectable && e.shortcut != null,
-  );
-
-  String renderEntry(int index) {
-    final MenuEntry<T> entry = entries[index];
-    if (entry.isSeparator) {
-      if (entry.label.isEmpty) {
-        return '  ${Ansi.style('─' * (labelWidth + badgeWidth + 8), Ansi.gray)}';
-      }
-      return '  ${Ansi.style(entry.label.toUpperCase(), '${Ansi.gray}${Ansi.bold}')}';
-    }
-    final bool isSelected = index == selected;
-    final String marker = isSelected
-        ? Ansi.style('▸', '${Ansi.cyan}${Ansi.bold}')
-        : ' ';
-    // Shortcut keys render as small [k] button chips; menus without any
-    // shortcuts drop the column entirely.
-    final String key = !hasShortcuts
-        ? ''
-        : entry.shortcut == null
-        ? '    '
-        : ' ${Ansi.style('[', Ansi.gray)}${Ansi.style(entry.shortcut!, Ansi.cyan)}${Ansi.style(']', Ansi.gray)}';
-    final String selectedColor = '${entry.labelColor ?? Ansi.cyan}${Ansi.bold}';
-    final String label = isSelected
-        ? Ansi.style(Ansi.padVisible(entry.label, labelWidth), selectedColor)
-        : entry.labelColor == null
-        ? Ansi.padVisible(entry.label, labelWidth)
-        : Ansi.style(
-            Ansi.padVisible(entry.label, labelWidth),
-            entry.labelColor!,
-          );
-    final StringBuffer line = StringBuffer('$marker$key  $label');
-    if (entry.badge != null) {
-      line.write('  ');
-      line.write(
-        Ansi.style(
-          Ansi.padVisible(entry.badge!, badgeWidth),
-          entry.badgeColor ?? Ansi.gray,
-        ),
-      );
-    } else if (badgeWidth > 0) {
-      line.write('  ${' ' * badgeWidth}');
-    }
-    if (entry.detail != null && entry.detail!.isNotEmpty) {
-      // Details carrying their own ANSI styling render as-is; plain
-      // details get the standard dim treatment.
-      final String detail = entry.detail!;
-      line.write(
-        '  ${detail.contains('\x1B') ? detail : Ansi.style(detail, Ansi.gray)}',
-      );
-    }
-    // Clamp to the terminal width: a soft-wrapped row would break the
-    // cursor-up repaint math and leave ghost lines behind.
-    final String clipped = Ansi.clipVisible(
-      line.toString(),
-      TermIo.instance.terminalColumns,
-    );
-    if (!isSelected) {
-      return clipped;
-    }
-    // Paint the selected row as a full-width bar: re-assert the background
-    // after every inner reset, then erase-to-EOL extends it to the edge.
-    final String painted = clipped.replaceAll(
-      Ansi.reset,
-      '${Ansi.reset}${Ansi.bgHighlight}',
-    );
-    return '${Ansi.bgHighlight}$painted${Ansi.eraseToEnd}${Ansi.reset}';
-  }
-
-  final String hintLine =
-      '  ${Ansi.style(hint ?? '↑↓ move · enter select · esc back · click', Ansi.gray)}';
+  final String hintText = hint ?? '↑↓ move · enter select · esc back · click';
   String? currentFooter = footer;
   final int tailLines = footer == null ? 1 : 2;
-  final int redrawLines = entries.length + tailLines;
+  final int frameHeight = entries.length + tailLines;
 
-  void draw({required bool repaint}) {
-    if (repaint) {
-      stdout.write('\x1B[${redrawLines}A');
+  /// Screen row the frame's first line currently occupies. Null while the
+  /// terminal has not answered a cursor-position query, in which case repaints
+  /// fall back to relative cursor moves.
+  int? frameTop;
+
+  /// Where the last draw parked the cursor: column 1 of the frame's last row.
+  /// Any other position means something else wrote to the terminal since, so
+  /// the frame is no longer where it was drawn.
+  int? restingRow;
+  bool cursorReportsWork = true;
+
+  // Terminal geometry the current frame was drawn for. A resize reflows every
+  // row the terminal is holding, so nothing on screen can be trusted and the
+  // frame is redrawn on a cleared screen.
+  int lastColumns = io.terminalColumns;
+  int lastLines = io.terminalLines;
+
+  /// Writes [rows] downward from the cursor's current row and leaves the cursor
+  /// on the last one. There is deliberately no trailing newline: a newline on
+  /// the bottom screen row scrolls the terminal, which would move the frame out
+  /// from under the next repaint.
+  void writeRowsFromCursor(List<String> rows) {
+    final StringBuffer out = StringBuffer();
+    for (int i = 0; i < rows.length; i++) {
+      if (i > 0) {
+        out.write('\n');
+      }
+      out.write('\r${Ansi.eraseLine}${rows[i]}');
     }
-    for (int i = 0; i < entries.length; i++) {
-      stdout.write('\r${Ansi.eraseLine}');
-      stdout.writeln(renderEntry(i));
-    }
-    stdout.write('\r${Ansi.eraseLine}');
-    stdout.writeln(hintLine);
-    if (currentFooter != null) {
-      stdout.write('\r${Ansi.eraseLine}');
-      stdout.writeln(
-        Ansi.clipVisible('  $currentFooter', TermIo.instance.terminalColumns),
-      );
-    }
+    stdout.write(out.toString());
   }
 
-  void clear() {
-    stdout.write('\x1B[${redrawLines + 1}A');
-    for (int i = 0; i < redrawLines + 1; i++) {
-      stdout.write('\r${Ansi.eraseLine}\x1B[1B');
+  /// Cursor position, or null once the terminal has proven it does not report
+  /// one (queries are not retried after that).
+  TermCursor? queryCursor() {
+    if (!cursorReportsWork) {
+      return null;
     }
-    stdout.write('\x1B[${redrawLines + 1}A');
+    final TermCursor? at = io.cursorPosition();
+    if (at == null) {
+      cursorReportsWork = false;
+    }
+    return at;
+  }
+
+  void draw({required bool repaint}) {
+    final int columns = io.terminalColumns;
+    final List<String> rows = renderMenuRows<T>(
+      entries,
+      selected: selected,
+      hint: hintText,
+      footer: currentFooter,
+      columns: columns,
+    );
+
+    // Parking the cursor at column 1 of the last row makes the resting position
+    // exact: it does not depend on how wide the terminal renders the glyphs in
+    // that row, so a position that differs on the next query really does mean
+    // foreign output landed in the frame.
+    void park(int top) {
+      final int lastRow = top + rows.length - 1;
+      frameTop = top;
+      restingRow = lastRow;
+      stdout.write('\x1B[$lastRow;1H');
+    }
+
+    if (!repaint) {
+      writeRowsFromCursor(rows);
+      final TermCursor? at = queryCursor();
+      if (at == null) {
+        frameTop = null;
+        restingRow = null;
+        return;
+      }
+      park(at.row - rows.length + 1);
+      return;
+    }
+
+    // Re-measure on every repaint. The cursor is the only record of where the
+    // frame actually sits, so anything that wrote to the terminal in between —
+    // subprocess output, an error trace, a scroll, a resize — is absorbed here
+    // instead of smearing stale copies of the frame down the screen.
+    final TermCursor? at = queryCursor();
+    if (at == null) {
+      if (rows.length > 1) {
+        stdout.write('\x1B[${rows.length - 1}A');
+      }
+      writeRowsFromCursor(rows);
+      return;
+    }
+    final int lines = io.terminalLines;
+    final bool resized = columns != lastColumns || lines != lastLines;
+    lastColumns = columns;
+    lastLines = lines;
+    final bool displaced = resized || at.row != restingRow || at.col != 1;
+    final int top = clampFrameTop(
+      desiredTop: at.row - rows.length + 1,
+      frameHeight: rows.length,
+      terminalLines: lines,
+    );
+    final StringBuffer out = StringBuffer();
+    if (resized) {
+      out.write(Ansi.eraseScreen);
+    } else {
+      final int bandTop = staleBandTop(
+        top: top,
+        previousTop: frameTop,
+        frameHeight: rows.length,
+        displaced: displaced,
+        cursorAtBottom: at.row >= lines,
+      );
+      final int bandBottom = staleBandBottom(
+        top: top,
+        previousTop: frameTop,
+        frameHeight: rows.length,
+        terminalLines: lines,
+        displaced: displaced,
+      );
+      for (int row = bandTop; row < top; row++) {
+        out.write('\x1B[$row;1H${Ansi.eraseLine}');
+      }
+      for (int row = top + rows.length; row <= bandBottom; row++) {
+        out.write('\x1B[$row;1H${Ansi.eraseLine}');
+      }
+    }
+    for (int i = 0; i < rows.length; i++) {
+      out.write('\x1B[${top + i};1H${Ansi.eraseLine}${rows[i]}');
+    }
+    stdout.write(out.toString());
+    park(top);
+  }
+
+  /// Erases the frame and the title above it, leaving the cursor on the title's
+  /// row so the caller can print its own line in the menu's place.
+  void clear() {
+    final int? top = frameTop;
+    if (top == null) {
+      // Cursor rests on the frame's last row; the title sits one row above it.
+      stdout.write('\r\x1B[${frameHeight}A');
+      for (int i = 0; i <= frameHeight; i++) {
+        stdout.write('\r${Ansi.eraseLine}\x1B[1B');
+      }
+      stdout.write('\x1B[${frameHeight + 1}A');
+      return;
+    }
+    final int titleRow = top > 1 ? top - 1 : 1;
+    final StringBuffer out = StringBuffer();
+    for (int row = titleRow; row < top + frameHeight; row++) {
+      out.write('\x1B[$row;1H${Ansi.eraseLine}');
+    }
+    out.write('\x1B[$titleRow;1H');
+    stdout.write(out.toString());
   }
 
   void moveSelection(int delta) {
@@ -235,26 +281,14 @@ Future<T> menuSelect<T>(
   io.setRawMode(true);
   io.hideCursor();
   io.enableMouse();
-  int? firstEntryRow;
   try {
     draw(repaint: false);
-    final int? rowAfter = io.cursorRow();
-    if (rowAfter != null) {
-      firstEntryRow = rowAfter - tailLines - entries.length;
-    }
-    bool retriedRowQuery = false;
 
+    /// Entry under a mouse click, using the row the last draw measured. Null
+    /// when the terminal does not report the cursor, or when the click missed
+    /// the entries.
     int? entryAtRow(int row) {
-      if (firstEntryRow == null && !retriedRowQuery) {
-        // The init-time measurement failed; the cursor rests just below
-        // the menu between repaints, so measure again on first click.
-        retriedRowQuery = true;
-        final int? rowNow = io.cursorRow();
-        if (rowNow != null) {
-          firstEntryRow = rowNow - tailLines - entries.length;
-        }
-      }
-      final int? first = firstEntryRow;
+      final int? first = frameTop;
       if (first == null) {
         return null;
       }
@@ -310,19 +344,9 @@ Future<T> menuSelect<T>(
         }
         bool changed = false;
         if (update.entries.length == entries.length) {
+          // Column alignment is recomputed per draw, so badges that grow or
+          // shrink between ticks stay aligned.
           entries = update.entries;
-          labelWidth = entries
-              .where((MenuEntry<T> e) => e.selectable)
-              .fold(
-                0,
-                (int w, MenuEntry<T> e) =>
-                    e.label.length > w ? e.label.length : w,
-              );
-          badgeWidth = entries.fold(
-            0,
-            (int w, MenuEntry<T> e) =>
-                (e.badge?.length ?? 0) > w ? e.badge!.length : w,
-          );
           changed = true;
         }
         if (footer != null && update.footer != null) {

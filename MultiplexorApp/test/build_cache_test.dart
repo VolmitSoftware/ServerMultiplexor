@@ -49,6 +49,128 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
     });
   });
 
+  group('buildJarVersionKey', () {
+    test('reads the version out of a normal build jar', () {
+      expect(buildJarVersionKey('paper-26.2-71.jar'), '26.2');
+      expect(buildJarVersionKey('purpur-26.1.2-2591.jar'), '26.1.2');
+      expect(buildJarVersionKey('leaf-1.21.8-106.jar'), '1.21.8');
+    });
+
+    test('reads the version out of a build-less spigot jar', () {
+      expect(buildJarVersionKey('spigot-26.2.jar'), '26.2');
+    });
+
+    test('skips a leading date stamp in legacy bundler names', () {
+      expect(
+        buildJarVersionKey(
+          'paper-20260215-162758-paper-bundler-1.21.10-R0.1-SNAPSHOT-mojmap.jar',
+        ),
+        '1.21.10',
+      );
+      expect(
+        buildJarVersionKey(
+          'folia-20260215-163543-folia-server-1.21.11-R0.1-SNAPSHOT.jar',
+        ),
+        '1.21.11',
+      );
+    });
+
+    test('reads the game version, not the loader version, off an installer', () {
+      expect(buildJarVersionKey('forge-26.2-65.0.1-installer.jar'), '26.2');
+      expect(
+        buildJarVersionKey('fabric-26.2-loader.0.19.3-installer.1.1.1.jar'),
+        '26.2',
+      );
+    });
+
+    test('returns null when no version token is present', () {
+      expect(buildJarVersionKey('latest.jar'), isNull);
+      expect(buildJarVersionKey('BuildTools.jar'), isNull);
+    });
+  });
+
+  group('planBuildPrune', () {
+    CachedBuildJar jar(String name, int day) => CachedBuildJar(
+      path: '/builds/paper/$name',
+      name: name,
+      modified: DateTime.utc(2026, 7, day),
+    );
+
+    test('keeps only the newest jar of each version', () {
+      final List<CachedBuildJar> stale = planBuildPrune(
+        jars: <CachedBuildJar>[
+          jar('paper-26.2-46.jar', 3),
+          jar('paper-26.2-71.jar', 25),
+          jar('paper-26.2-62.jar', 20),
+        ],
+      );
+      expect(
+        stale.map((CachedBuildJar j) => j.name),
+        <String>['paper-26.2-46.jar', 'paper-26.2-62.jar'],
+      );
+    });
+
+    test('never prunes across Minecraft versions', () {
+      final List<CachedBuildJar> stale = planBuildPrune(
+        jars: <CachedBuildJar>[
+          jar('paper-26.2-71.jar', 25),
+          jar('paper-26.1.2-69.jar', 9),
+          jar('paper-1.21.11-69.jar', 9),
+        ],
+      );
+      expect(stale, isEmpty);
+    });
+
+    test('keeps a jar an instance still points at', () {
+      final List<CachedBuildJar> stale = planBuildPrune(
+        jars: <CachedBuildJar>[
+          jar('leaf-26.2-37.jar', 25),
+          jar('leaf-26.2-33.jar', 20),
+          jar('leaf-26.2-25.jar', 15),
+        ],
+        keepPaths: <String>{'/builds/paper/leaf-26.2-33.jar'},
+      );
+      expect(
+        stale.map((CachedBuildJar j) => j.name),
+        <String>['leaf-26.2-25.jar'],
+      );
+    });
+
+    test('never prunes latest.jar or an unversioned file', () {
+      final List<CachedBuildJar> stale = planBuildPrune(
+        jars: <CachedBuildJar>[
+          jar('latest.jar', 1),
+          jar('BuildTools.jar', 1),
+          jar('paper-26.2-71.jar', 25),
+        ],
+      );
+      expect(stale, isEmpty);
+    });
+
+    test('honours a larger keepPerVersion', () {
+      final List<CachedBuildJar> stale = planBuildPrune(
+        jars: <CachedBuildJar>[
+          jar('paper-26.2-46.jar', 3),
+          jar('paper-26.2-71.jar', 25),
+          jar('paper-26.2-62.jar', 20),
+        ],
+        keepPerVersion: 2,
+      );
+      expect(
+        stale.map((CachedBuildJar j) => j.name),
+        <String>['paper-26.2-46.jar'],
+      );
+    });
+
+    test('returns nothing for an empty or single-jar cache', () {
+      expect(planBuildPrune(jars: const <CachedBuildJar>[]), isEmpty);
+      expect(
+        planBuildPrune(jars: <CachedBuildJar>[jar('paper-26.2-71.jar', 25)]),
+        isEmpty,
+      );
+    });
+  });
+
   group('BuildCacheEntry.matchesVersion', () {
     const BuildCacheEntry entry = BuildCacheEntry(
       type: 'paper',
@@ -195,6 +317,61 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
       expect(formatBuildAgeShort(const Duration(minutes: 12)), '12m');
       expect(formatBuildAgeShort(const Duration(hours: 3)), '3h');
       expect(formatBuildAgeShort(const Duration(days: 4)), '4d');
+    });
+  });
+
+  group('buildVersionCandidates', () {
+    test('puts the resolved latest version first', () {
+      final List<String> candidates = buildVersionCandidates(
+        latest: '26.1.2',
+        supported: const <String>['1.21.8', '1.21.11', '26.1.2'],
+      );
+      expect(candidates.first, '26.1.2');
+    });
+
+    test('falls back to older supported versions, newest first', () {
+      final List<String> candidates = buildVersionCandidates(
+        latest: '26.1.2',
+        supported: const <String>['1.21.8', '1.21.11', '26.1.2'],
+      );
+      expect(candidates, <String>['26.1.2', '1.21.11', '1.21.8']);
+    });
+
+    test(
+      'keeps a latest version the platform does not list as the first try',
+      () {
+        // Folia lags Paper: when version discovery falls back to Mojang's
+        // latest release, the platform has no build for it at all.
+        final List<String> candidates = buildVersionCandidates(
+          latest: '26.2',
+          supported: const <String>['1.21.11', '26.1.2'],
+        );
+        expect(candidates, <String>['26.2', '26.1.2', '1.21.11']);
+      },
+    );
+
+    test('caps the candidate list at the requested limit', () {
+      final List<String> candidates = buildVersionCandidates(
+        latest: '26.2',
+        supported: const <String>['1.20.6', '1.21.8', '1.21.11', '26.1.2'],
+        limit: 2,
+      );
+      expect(candidates, <String>['26.2', '26.1.2']);
+    });
+
+    test('returns just the latest version when nothing else is supported', () {
+      expect(
+        buildVersionCandidates(latest: '26.2', supported: const <String>[]),
+        <String>['26.2'],
+      );
+    });
+
+    test('drops blank entries and duplicates', () {
+      final List<String> candidates = buildVersionCandidates(
+        latest: '26.1.2',
+        supported: const <String>['', '1.21.11', '26.1.2', '1.21.11'],
+      );
+      expect(candidates, <String>['26.1.2', '1.21.11']);
     });
   });
 }
