@@ -380,10 +380,11 @@ List<String> _headerPanel({
   int tpsCount = 0;
   for (final String instance in snapshot.instances) {
     final MetricSample? latest = snapshot.latestFor(instance);
-    if (latest != null && latest.state != RuntimeState.stopped) {
-      up += 1;
-    } else {
+    // Unsampled is neither up nor down, so these can sum under SERVERS.
+    if (latest?.state == RuntimeState.stopped) {
       down += 1;
+    } else if (latest != null) {
+      up += 1;
     }
     final int? instancePlayers = latest?.players;
     if (instancePlayers != null) {

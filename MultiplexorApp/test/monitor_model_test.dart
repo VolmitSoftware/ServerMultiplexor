@@ -283,6 +283,64 @@ void main() {
       expect(RegExp(r'\d\d:\d\d').hasMatch(header), isTrue);
     });
 
+    test('an unsampled instance counts as neither up nor down', () {
+      // MonitorSnapshot documents an instance with no history as "no readings
+      // yet ... never as zeros", and the row itself renders `no data`. The
+      // roll-up has to agree: an instance nothing has been heard from is not
+      // a stopped one, so counting it as DOWN invents a fact.
+      final List<String> rows = stripAll(
+        buildMonitorFrame(
+          snapshot: const MonitorSnapshot(
+            instances: <String>['alpha', 'beta', 'gamma'],
+            history: <String, List<MetricSample>>{},
+            consumerName: 'survival',
+          ),
+          selectedIndex: 0,
+          frame: 0,
+          columns: 100,
+          lines: 24,
+          theme: plain,
+          range: range,
+          now: now,
+        ),
+      );
+      final String header = rows.take(4).join('\n');
+      expect(header, contains('0 UP'));
+      expect(header, contains('0 DOWN'));
+      expect(header, contains('3 SERVERS'));
+
+      // The panel's title row, not the facts row that also says "3 SERVERS".
+      final String badge = rows.firstWhere(
+        (String row) => row.startsWith('┌') && row.contains('SERVERS'),
+      );
+      expect(badge, contains('0/3 UP'));
+    });
+
+    test('a stopped instance still counts as down', () {
+      final List<String> rows = stripAll(
+        buildMonitorFrame(
+          snapshot: MonitorSnapshot(
+            instances: const <String>['alpha', 'beta'],
+            history: <String, List<MetricSample>>{
+              'alpha': runHistory('alpha'),
+              'beta': stoppedHistory('beta'),
+            },
+            consumerName: 'survival',
+          ),
+          selectedIndex: 0,
+          frame: 0,
+          columns: 100,
+          lines: 24,
+          theme: plain,
+          range: range,
+          now: now,
+        ),
+      );
+      final String header = rows.take(4).join('\n');
+      expect(header, contains('1 UP'));
+      expect(header, contains('1 DOWN'));
+    });
+
     test('the chart axis ends on the same clock the header shows', () {
       // The header localizes `now` and the log tail carries local
       // timestamps, so a chart axis left in UTC puts two different clocks
