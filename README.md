@@ -22,17 +22,25 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 
 ## Live monitor
 
-`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. It sweeps `runtime metrics` every two seconds and keeps a per-instance ring of players, TPS, CPU, and memory, seeded at startup from the active consumer's `state/trends/` (for example `consumers/plugin-consumers/state/trends/`) so the charts survive a restart. That history is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that; retention is applied once per session, as the monitor opens, and only to a trend file that has grown past 4 MiB. The frame is a `MULTIPLEXOR` header, a `SERVERS` panel with one live row per instance, and — on a tall enough terminal — a TPS chart and a host card for the selected server.
+`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. It sweeps `runtime metrics` every two seconds and keeps a per-instance ring of players, TPS, CPU, and memory, seeded at startup from the active consumer's `state/trends/` (for example `consumers/plugin-consumers/state/trends/`) so the charts survive a restart. That history is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that; retention is applied once per session, as the monitor opens, and only to a trend file that has grown past 4 MiB.
+
+The landing view is a `MULTIPLEXOR` header, a KPI strip (`FLEET` servers-up and players, a fleet `TPS` sparkline, a `HOST` memory and CPU card), a slim `SERVERS` list, and a panel for the selected server holding its chart, memory and CPU meters, and a facts line. Under them sit two action bars — the selected server's, then the workspace's — over the key hint footer.
+
+Everything on those bars is a button. Hovering lights a chip in the accent tone; a click activates on release, so a press that drifts onto another chip before it lifts does nothing. Chips that cannot apply — `RESTART` on a stopped server, `DELETE` on a locked one — are drawn faint and are not clickable at all. The range badge on the selected panel (`running · 15m`) is a button too, and cycles the chart window.
+
+Clicking a row in `SERVERS` selects it; clicking the selected row again opens its **card**, as do `enter` and `[ MORE ]`. `[ MORE ]` on the workspace bar opens the workspace card instead: build & tuning, pull builds, create many, start all, stop all, wipe. A card is modal — click a button to run it, click elsewhere on the card for nothing, click outside it or press `esc` to dismiss. Nothing behind a card is clickable while it is up.
+
+Mouse support needs a terminal that reports SGR mouse events, which every current one does (Terminal.app, iTerm2, kitty, WezTerm, tmux, the VS Code terminal). Hover uses all-motion reporting (`?1003`); a terminal that ignores that still gets every click, just without the highlight. Reporting is turned off again on exit, so the terminal is left as it was found.
 
 | Key | What it does |
 |-----|--------------|
 | `↑` `↓`, wheel | Move the selection. The wheel outside the servers panel cycles the chart window instead. |
-| `enter`, click | Open the selected server's action menu (a second click on the selected row does the same). |
+| `enter`, click | Open the selected server's card (a second click on the selected row, or `[ MORE ]`, does the same). |
 | `d` | Detail screen for the selected server. |
 | `R` `S` `X` `O` | Restart, stop (graceful), kill (force), open console — on the selected server. Uppercase on purpose, so a slipped key can never fire one. |
 | `g` | Open every running console in a tmux grid. |
 | `n` | Create a new instance. |
-| `b` | Workspace menu: build & tuning, pull latest builds, create many, start all stopped, stop all running, wipe everything. |
+| `b` | Build & tuning, directly. The other workspace actions live on the workspace card, behind `[ MORE ]`. |
 | `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
 | `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h`. |
 | `q`, `ctrl-c` | Quit. |
@@ -43,9 +51,9 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
-`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc: Enter opens a server's state-aware action menu (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation/lock-or-unlock always), `n` runs the create flow, `b` opens the workspace menu, `c` switches consumer. Delete and factory reset are hidden while an instance is locked. Keys pressed while a build or sync runs are discarded. Without a TTY the wizard prints direct-command hints instead.
+`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc: a server's card carries its state-aware actions (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation/lock-or-unlock always), `n` runs the create flow, `b` goes straight to Build & tuning, `c` switches consumer. Delete and factory reset are drawn disabled while an instance is locked. Keys pressed while a build or sync runs are discarded. Without a TTY the wizard prints direct-command hints instead.
 
-The workspace menu (`b`) holds the actions that are not per-instance: Build & tuning, Pull latest builds, Create many, Start all stopped, Stop all running, and Wipe everything. Destructive actions (wipe, delete, factory reset) are shown in red. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
+The workspace card (`[ MORE ]` on the workspace bar) holds the actions that are not per-instance: Build & tuning, Pull latest builds, Create many, Start all stopped, Stop all running, and Wipe everything. Destructive prompts (wipe, delete, factory reset) default to no and show that default in red. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
 
 Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `build spigot --force`.
 
@@ -119,7 +127,7 @@ Single `server create` and `build <type>` commands must run under the consumer t
 
 | Command | What it does |
 |---------|--------------|
-| `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, with the wizard's flows behind `enter` / `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
+| `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, clickable action bars, and the wizard's flows behind the cards and `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
 | `runtime start [instance] [--no-console]` | Start the instance and attach its console. `--no-console` returns immediately. |
 | `runtime stop [instance] [--graceful]` | Force-stop the instance immediately (kills the tmux session, then SIGTERM/SIGKILL any tracked pids). With `--graceful`, sends `stop` to the server console and waits up to 60s for a clean world-save shutdown, falling back to a force-stop on timeout. |
 | `runtime restart [instance] [--no-console]` | Stop and start again. Attaches console unless `--no-console`. |
