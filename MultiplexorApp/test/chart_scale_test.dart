@@ -282,6 +282,49 @@ void main() {
         expect(tick.label.length, 5);
       }
     });
+
+    test('renders UTC instants in local time, not UTC', () {
+      // Samples are stamped UTC and the dashboard passes UTC window bounds,
+      // but the frame's clock and its log tail are local. An axis labelled
+      // in UTC would read hours off from both in any non-UTC zone.
+      final DateTime start = DateTime.utc(2026, 7, 29, 8, 14);
+      final DateTime end = start.add(const Duration(hours: 2));
+      final List<TimeTick> ticks = planTimeAxis(
+        start: start,
+        end: end,
+        width: 40,
+        targetTicks: 3,
+      );
+      expect(ticks.map((TimeTick t) => t.label).toList(), <String>[
+        for (final DateTime moment in <DateTime>[
+          start,
+          start.add(const Duration(hours: 1)),
+          end,
+        ])
+          '${moment.toLocal().hour.toString().padLeft(2, '0')}:'
+              '${moment.toLocal().minute.toString().padLeft(2, '0')}',
+      ]);
+    });
+
+    test('picks the date prefix from the local calendar day', () {
+      // 23:30 UTC is the previous day in the Americas and the next day in
+      // much of Asia. The prefix has to agree with the clock beside it.
+      final DateTime start = DateTime.utc(2026, 7, 29, 23, 30);
+      final DateTime end = start.add(const Duration(hours: 30));
+      final List<TimeTick> ticks = planTimeAxis(
+        start: start,
+        end: end,
+        width: 40,
+        targetTicks: 2,
+      );
+      expect(ticks.map((TimeTick t) => t.label).toList(), <String>[
+        for (final DateTime moment in <DateTime>[start, end])
+          '${moment.toLocal().month.toString().padLeft(2, '0')}-'
+              '${moment.toLocal().day.toString().padLeft(2, '0')} '
+              '${moment.toLocal().hour.toString().padLeft(2, '0')}:'
+              '${moment.toLocal().minute.toString().padLeft(2, '0')}',
+      ]);
+    });
   });
 
   group('planTimeAxis — layout', () {

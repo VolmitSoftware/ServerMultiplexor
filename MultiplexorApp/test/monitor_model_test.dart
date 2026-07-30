@@ -283,6 +283,44 @@ void main() {
       expect(RegExp(r'\d\d:\d\d').hasMatch(header), isTrue);
     });
 
+    test('the chart axis ends on the same clock the header shows', () {
+      // The header localizes `now` and the log tail carries local
+      // timestamps, so a chart axis left in UTC puts two different clocks
+      // in one frame. The right-hand tick is `now`, so it must read the
+      // same as the header.
+      final List<String> rows = stripAll(
+        buildMonitorFrame(
+          snapshot: twoServers(),
+          selectedIndex: 0,
+          frame: 0,
+          columns: 132,
+          lines: 40,
+          theme: plain,
+          range: range,
+          now: now,
+        ),
+      );
+      final DateTime local = now.toLocal();
+      final String clock =
+          '${local.hour.toString().padLeft(2, '0')}:'
+          '${local.minute.toString().padLeft(2, '0')}';
+
+      expect(rows.take(4).join('\n'), contains(clock));
+
+      final String axis = rows.lastWhere(
+        (String row) => RegExp(r'\d\d:\d\d.*\d\d:\d\d').hasMatch(row),
+        orElse: () => '',
+      );
+      expect(
+        axis,
+        isNot(isEmpty),
+        reason: 'the bottom band should have a time axis',
+      );
+      // The row runs on into the host card, so the window's end tick is the
+      // last clock on it rather than the one at the end of the line.
+      expect(RegExp(r'\d\d:\d\d').allMatches(axis).last.group(0), clock);
+    });
+
     test('marks the selected instance row with the selector glyph', () {
       final List<String> rows = stripAll(
         buildMonitorFrame(

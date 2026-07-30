@@ -239,9 +239,11 @@ class TimeTick {
 /// Plans up to [targetTicks] evenly-spaced time labels across a
 /// [width]-column horizontal axis spanning `[start, end]`.
 ///
-/// Labels render `HH:mm` in the given [DateTime]s' own time zone (24-hour,
-/// zero-padded); when the span exceeds 24 hours, each label is prefixed
-/// with `MM-dd ` (e.g. `07-29 08:14`).
+/// Labels render `HH:mm` in the **local** time zone (24-hour, zero-padded);
+/// when the span exceeds 24 hours, each label is prefixed with `MM-dd `
+/// (e.g. `07-29 08:14`). Callers pass UTC bounds because sample timestamps
+/// are UTC, but an axis is read next to a local wall clock and a local log
+/// tail, so it is localized here rather than at every call site.
 ///
 /// The first tick is left-anchored at column `0`, the last is right-anchored
 /// (`column = width - label.length`), and middle ticks are centered on
@@ -302,16 +304,20 @@ List<TimeTick> planTimeAxis({
   return ticks;
 }
 
-/// Formats [moment] as `HH:mm` (24-hour, zero-padded), prefixed with
-/// `MM-dd ` when [withDate] is true.
+/// Formats [moment] in local time as `HH:mm` (24-hour, zero-padded),
+/// prefixed with `MM-dd ` when [withDate] is true.
+///
+/// The date prefix comes from the same localized instant as the clock, so a
+/// label never pairs one zone's calendar day with another zone's hour.
 String _formatTimeLabel(DateTime moment, {required bool withDate}) {
-  final String hh = moment.hour.toString().padLeft(2, '0');
-  final String mm = moment.minute.toString().padLeft(2, '0');
+  final DateTime local = moment.toLocal();
+  final String hh = local.hour.toString().padLeft(2, '0');
+  final String mm = local.minute.toString().padLeft(2, '0');
   final String clock = '$hh:$mm';
   if (!withDate) {
     return clock;
   }
-  final String month = moment.month.toString().padLeft(2, '0');
-  final String day = moment.day.toString().padLeft(2, '0');
+  final String month = local.month.toString().padLeft(2, '0');
+  final String day = local.day.toString().padLeft(2, '0');
   return '$month-$day $clock';
 }
