@@ -24,6 +24,7 @@ enum TermEventKind {
   delete,
   mouseDown,
   mouseUp,
+  mouseMove,
   wheelUp,
   wheelDown,
   cursorReport,
@@ -352,8 +353,10 @@ class TermEventParser {
       );
     }
     if ((code & 32) != 0) {
-      // Motion/drag tracking; menus do not use it.
-      return const TermEvent(TermEventKind.unknown);
+      // Any-motion tracking (?1003): plain motion or a drag (button held).
+      // The screen distinguishes drag from hover via its own tracked
+      // pressed state, not from this packet, so both map to mouseMove.
+      return TermEvent(TermEventKind.mouseMove, row: row, col: col);
     }
     return TermEvent(
       pressed ? TermEventKind.mouseDown : TermEventKind.mouseUp,

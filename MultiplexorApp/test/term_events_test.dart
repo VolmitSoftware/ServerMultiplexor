@@ -103,10 +103,32 @@ void main() {
       );
     });
 
-    test('ignores drag motion events', () {
+    test('parses SGR motion with no button held as mouseMove', () {
       final TermEventParser parser = TermEventParser();
-      expect(feed(parser, '\x1B[<32;9;9M').single.kind, TermEventKind.unknown);
+      final TermEvent event = feed(parser, '\x1B[<35;10;5M').single;
+      expect(event.kind, TermEventKind.mouseMove);
+      expect(event.col, 10);
+      expect(event.row, 5);
     });
+
+    test('parses SGR drag motion (button held) as mouseMove', () {
+      final TermEventParser parser = TermEventParser();
+      final TermEvent event = feed(parser, '\x1B[<32;3;4M').single;
+      expect(event.kind, TermEventKind.mouseMove);
+      expect(event.col, 3);
+      expect(event.row, 4);
+    });
+
+    test(
+      'parses SGR motion with release-suffix identically to press-suffix',
+      () {
+        final TermEventParser parser = TermEventParser();
+        final TermEvent event = feed(parser, '\x1B[<35;10;5m').single;
+        expect(event.kind, TermEventKind.mouseMove);
+        expect(event.col, 10);
+        expect(event.row, 5);
+      },
+    );
   });
 
   group('TermEventParser legacy X10 mouse', () {

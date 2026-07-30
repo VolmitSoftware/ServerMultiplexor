@@ -16,6 +16,15 @@ class TermIo {
 
   static final TermIo instance = TermIo._();
 
+  /// Enables click reporting (`?1000`), any-motion tracking (`?1003`, so
+  /// mouse moves are reported even with no button held), and the SGR
+  /// extended coordinate encoding (`?1006`).
+  static const String enableMouseSequence = '\x1B[?1000h\x1B[?1003h\x1B[?1006h';
+
+  /// Tears the modes back down in reverse of [enableMouseSequence].
+  static const String disableMouseSequence =
+      '\x1B[?1006l\x1B[?1003l\x1B[?1000l';
+
   final Console _console = Console();
   final TermEventParser _parser = TermEventParser();
   final List<TermEvent> _queue = <TermEvent>[];
@@ -48,7 +57,7 @@ class TermIo {
     // attach/detach, subprocess cleanup) can reset tracking modes behind
     // our back, and the sequence is idempotent.
     _mouseEnabled = true;
-    stdout.write('\x1B[?1000h\x1B[?1006h');
+    stdout.write(enableMouseSequence);
   }
 
   void disableMouse() {
@@ -57,7 +66,7 @@ class TermIo {
     }
     _mouseEnabled = false;
     if (stdout.hasTerminal) {
-      stdout.write('\x1B[?1000l\x1B[?1006l');
+      stdout.write(disableMouseSequence);
     }
   }
 

@@ -85,6 +85,7 @@ MonitorAction monitorActionForEvent(TermEvent event) {
     case TermEventKind.delete:
     case TermEventKind.mouseDown:
     case TermEventKind.mouseUp:
+    case TermEventKind.mouseMove:
     case TermEventKind.cursorReport:
     case TermEventKind.unknown:
       return MonitorAction.none;
