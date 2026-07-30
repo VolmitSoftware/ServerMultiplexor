@@ -64,20 +64,23 @@ class ChartScale {
 /// - When only one of [forcedLow]/[forcedHigh] is given, it pins that bound
 ///   verbatim and the other is computed from the data as below.
 /// - With no data and no forced bounds, the scale is `0..1`.
-/// - Otherwise the unforced high gets 8% headroom above the data, an
-///   unforced low near zero (`dataLow >= 0 && dataLow <= 0.35 * dataHigh`)
-///   is floored to exactly `0`, and each unforced bound snaps outward to a
-///   multiple of `niceStep(high - low)`.
+/// - Otherwise an unforced low near zero (`dataLow >= 0 && dataLow <= 0.35 *
+///   dataHigh`) is floored to exactly `0`, an unforced high gets 8%
+///   headroom above the data, and — using the *same* step ticks land on
+///   (`niceStep((high - low) / desired)`, `desired = max(2, rows ~/ 3)`) —
+///   each unforced bound snaps outward to a multiple of that step. Bounds
+///   snap to the tick step itself, not a coarser whole-range step, so the
+///   axis never overshoots past the nearest tick (e.g. a `0..59` ramp
+///   resolves to `0..80`, not `0..100`).
 /// - Flat data (`dataLow == dataHigh`) is widened above before headroom so
 ///   the result never degenerates to a zero span.
 ///
-/// Ticks land on multiples of `niceStep((high - low) / desired)` (`desired
-/// = max(2, rows ~/ 3)`), each mapped to an integer plot row and
-/// deduplicated so every row holds at most one tick — the first value
-/// generated for a row wins it. The top row (value `high`) and bottom row
-/// (value `low`) are then always (re-)written, overriding whatever nice
-/// multiple a prior pass placed there, so the true bounds are always
-/// visible.
+/// Ticks land on multiples of that same step, each mapped to an integer
+/// plot row and deduplicated so every row holds at most one tick — the
+/// first value generated for a row wins it. The top row (value `high`) and
+/// bottom row (value `low`) are then always (re-)written, overriding
+/// whatever nice multiple a prior pass placed there, so the true bounds are
+/// always visible.
 ChartScale resolveChartScale({
   required double? dataLow,
   required double? dataHigh,
@@ -86,62 +89,67 @@ ChartScale resolveChartScale({
   double? forcedHigh,
 }) {
   final int safeRows = rows < 1 ? 1 : rows;
+  final int desired = math.max(2, safeRows ~/ 3);
   late final double low;
   late final double high;
+  late final double step;
 
   if (forcedLow != null && forcedHigh != null) {
     low = forcedLow;
     high = forcedHigh;
+    step = niceStep((high - low) / desired);
   } else if (dataLow == null &&
       dataHigh == null &&
       forcedLow == null &&
       forcedHigh == null) {
     low = 0.0;
     high = 1.0;
+    step = niceStep((high - low) / desired);
   } else {
     double effectiveDataLow = dataLow ?? 0.0;
     double effectiveDataHigh = dataHigh ?? 1.0;
     if (dataLow != null && dataHigh != null && dataLow == dataHigh) {
-      // Degenerate flat data: widen above so the headroom/snap math below
+      // Degenerate flat data: widen above so the headroom/step math below
       // never operates on a zero span.
       effectiveDataHigh += 1.0;
     }
 
     double resolvedLow = forcedLow ?? effectiveDataLow;
-    double resolvedHigh = forcedHigh ?? effectiveDataHigh;
+    double preSnapHigh = forcedHigh ?? effectiveDataHigh;
 
     if (forcedLow == null &&
         resolvedLow >= 0 &&
-        resolvedHigh > 0 &&
-        resolvedLow <= 0.35 * resolvedHigh) {
+        preSnapHigh > 0 &&
+        resolvedLow <= 0.35 * preSnapHigh) {
       resolvedLow = 0.0;
     }
     if (forcedHigh == null) {
-      resolvedHigh += 0.08 * (resolvedHigh - resolvedLow);
+      preSnapHigh += 0.08 * (preSnapHigh - resolvedLow);
     }
 
-    final double range = resolvedHigh - resolvedLow;
-    if (range > 0) {
-      final double boundStep = niceStep(range);
-      if (forcedHigh == null) {
-        resolvedHigh = (resolvedHigh / boundStep).ceil() * boundStep;
-      }
-      if (forcedLow == null) {
-        resolvedLow = (resolvedLow / boundStep).floor() * boundStep;
-      }
+    // Snap to the same step ticks will use below, not a coarser whole-range
+    // step (niceStep(range) alone) — the latter is what let a 0..59 ramp
+    // overshoot to 0..100 instead of landing on the nearest tick, 0..80.
+    final double tickStep = niceStep((preSnapHigh - resolvedLow) / desired);
+
+    double resolvedHigh =
+        forcedHigh ?? (preSnapHigh / tickStep).ceil() * tickStep;
+    if (forcedLow == null) {
+      resolvedLow = (resolvedLow / tickStep).floor() * tickStep;
     }
     if (resolvedHigh <= resolvedLow) {
-      resolvedHigh = resolvedLow + 1.0;
+      resolvedHigh = resolvedLow + tickStep;
     }
 
     low = resolvedLow;
     high = resolvedHigh;
+    step = tickStep;
   }
 
   return ChartScale(
     low: low,
     high: high,
-    ticks: _planTicks(low: low, high: high, rows: safeRows),
+    ticks: _planTicks(low: low, high: high, rows: safeRows, step: step),
   );
 }
 
@@ -149,6 +157,7 @@ List<ChartTick> _planTicks({
   required double low,
   required double high,
   required int rows,
+  required double step,
 }) {
   final double span = high - low;
   final Map<int, ChartTick> byRow = <int, ChartTick>{};
@@ -171,12 +180,10 @@ List<ChartTick> _planTicks({
   }
 
   if (span > 0) {
-    final int desired = math.max(2, rows ~/ 3);
-    final double tickStep = niceStep(span / desired);
-    final int first = ((low / tickStep) - 1e-9).ceil();
-    final int last = ((high / tickStep) + 1e-9).floor();
+    final int first = ((low / step) - 1e-9).ceil();
+    final int last = ((high / step) + 1e-9).floor();
     for (int multiple = first; multiple <= last; multiple++) {
-      addTick(multiple * tickStep);
+      addTick(multiple * step);
     }
     addTick(high, force: true);
     addTick(low, force: true);

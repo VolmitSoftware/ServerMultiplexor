@@ -81,7 +81,7 @@ void main() {
         rows: 12,
       );
       expect(scale.low, closeTo(0.0, 1e-9));
-      expect(scale.high, closeTo(25.0, 1e-9));
+      expect(scale.high, closeTo(30.0, 1e-9));
     });
 
     test(
@@ -92,11 +92,35 @@ void main() {
           dataHigh: 20,
           rows: 12,
         );
-        expect(scale.low, closeTo(17.5, 1e-9));
-        expect(scale.high, closeTo(22.5, 1e-9));
+        expect(scale.low, closeTo(18.0, 1e-9));
+        expect(scale.high, closeTo(21.0, 1e-9));
         expect(scale.low, isNot(closeTo(0.0, 1e-9)));
       },
     );
+
+    test('unforced high snaps to the tick step, not a coarser whole-range step '
+        '(0..59 resolves to 0..80, not 0..100)', () {
+      final ChartScale scale = resolveChartScale(
+        dataLow: 0,
+        dataHigh: 59,
+        rows: 12,
+      );
+      expect(scale.low, closeTo(0.0, 1e-9));
+      expect(scale.high, closeTo(80.0, 1e-9));
+
+      final List<double> tickValues =
+          scale.ticks.map((ChartTick t) => t.value).toList()..sort();
+      expect(tickValues, <double>[0, 20, 40, 60, 80]);
+
+      final Set<int> rows = scale.ticks.map((ChartTick t) => t.row).toSet();
+      expect(
+        rows.length,
+        scale.ticks.length,
+        reason: 'no two ticks share a row',
+      );
+      expect(rows, contains(0));
+      expect(rows, contains(11));
+    });
 
     test('a forced low bypasses the zero-floor rule entirely', () {
       final ChartScale scale = resolveChartScale(
