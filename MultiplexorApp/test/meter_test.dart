@@ -273,14 +273,17 @@ void main() {
       );
     });
 
-    test('uses the hash for both full and partial cells, hyphen for track', () {
+    test('uses the hash for both full and partial cells, dots for track', () {
       final ({String ink, String track}) fill = meterFillGlyphs(
         fraction: 0.55,
         cells: 4,
         glyphs: MonitorGlyphs.ascii,
       );
       expect(fill.ink, '###');
-      expect(fill.track, '-');
+      // Dots, not hyphens: a hyphen run is what renderMeter draws when there
+      // is no reading at all, so the unfilled part of a measured bar must not
+      // use the same character.
+      expect(fill.track, '.');
     });
 
     test('ink + track always spans exactly cells columns', () {
@@ -298,5 +301,32 @@ void main() {
         }
       }
     });
+  });
+
+  group('renderMeter — no reading is distinguishable from a measured zero', () {
+    for (final (String name, MonitorTheme theme) in <(String, MonitorTheme)>[
+      ('plain', MonitorTheme.plain()),
+      ('plainAscii', MonitorTheme.plainAscii()),
+    ]) {
+      test('$name: a null fraction does not render as a zero-filled bar', () {
+        // Both themes are colorless, so the bar itself has to carry the
+        // difference. `runtime watch --once` picks plainAscii from the
+        // locale, and a scripted reader cannot tell "no reading" from a
+        // server measured at 0% if the two strings are equal.
+        final String missing = renderMeter(
+          fraction: null,
+          cells: 12,
+          theme: theme,
+        );
+        final String measuredZero = renderMeter(
+          fraction: 0,
+          cells: 12,
+          theme: theme,
+        );
+        expect(missing, isNot(measuredZero));
+        expect(Ansi.visibleLength(missing), 12);
+        expect(Ansi.visibleLength(measuredZero), 12);
+      });
+    }
   });
 }

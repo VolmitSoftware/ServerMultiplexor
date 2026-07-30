@@ -166,6 +166,35 @@ void main() {
     });
   });
 
+  group('MonitorGlyphs — missing data never collides with a measured zero', () {
+    // The ascii set has no color to fall back on (it is only ever paired with
+    // ColorDepth.none), so these separations have to hold in the glyph itself.
+    for (final (String name, MonitorGlyphs glyphs) in <(String, MonitorGlyphs)>[
+      ('ascii', MonitorGlyphs.ascii),
+      ('unicode', MonitorGlyphs.unicode),
+    ]) {
+      test('$name: the spark gap differs from the lowest spark level', () {
+        expect(
+          glyphs.sparkGap,
+          isNot(glyphs.spark.substring(0, 1)),
+          reason:
+              'a missing sample and a measured value at the bottom of the '
+              'range would render as the same character',
+        );
+      });
+
+      test('$name: the dash differs from the meter track', () {
+        expect(
+          glyphs.meterTrack,
+          isNot(glyphs.dash),
+          reason:
+              'a meter with no reading and a measured-zero meter would render '
+              'as the same run of characters',
+        );
+      });
+    }
+  });
+
   group('MonitorGlyphs single-width invariant', () {
     test(
       'every single-width field of both glyph sets is exactly one visible column',

@@ -292,9 +292,15 @@ class MonitorGlyphs {
     bulletOff: 'o',
     sparkGap: '.',
     meterFull: '#',
-    meterTrack: '-',
+    // Not the dash: an empty meter is a *measured* zero and a dash run is
+    // "no reading at all". This set is only ever used at ColorDepth.none, so
+    // there is no color left to tell them apart.
+    meterTrack: '.',
     dash: '-',
-    spark: '._-~=+*#',
+    // Starts at '_' rather than '.' for the same reason: '.' is the gap glyph
+    // for a sample that never arrived, so it cannot also be the bottom of the
+    // measured range.
+    spark: '_-~=+*#@',
     meterPartial: <String>['#', '#', '#', '#', '#', '#', '#'],
     spinner: <String>['|', '/', '-', '\\'],
   );

@@ -429,4 +429,34 @@ void main() {
       expect(unicodeIndex, asciiIndex);
     });
   });
+
+  group('renderSparkline — gaps are distinguishable from measured lows', () {
+    for (final (String name, MonitorTheme theme) in <(String, MonitorTheme)>[
+      ('plain', MonitorTheme.plain()),
+      ('plainAscii', MonitorTheme.plainAscii()),
+    ]) {
+      test('$name: an all-null series differs from an all-zero series', () {
+        // The TPS sparkline in a server row is pinned to 0..20, so a server
+        // measured at 0 TPS lands on level 0. That is a real reading and must
+        // not look like the gap drawn for a sample that never arrived.
+        final String gaps = renderSparkline(
+          values: <double?>[null, null, null, null],
+          theme: theme,
+          width: 4,
+          min: 0,
+          max: 20,
+        );
+        final String zeros = renderSparkline(
+          values: <double?>[0, 0, 0, 0],
+          theme: theme,
+          width: 4,
+          min: 0,
+          max: 20,
+        );
+        expect(gaps, isNot(zeros));
+        expect(Ansi.visibleLength(gaps), 4);
+        expect(Ansi.visibleLength(zeros), 4);
+      });
+    }
+  });
 }
