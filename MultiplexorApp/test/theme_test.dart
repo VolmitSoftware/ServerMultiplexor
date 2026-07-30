@@ -159,6 +159,11 @@ void main() {
     test('dash is a plain ASCII hyphen', () {
       expect(MonitorGlyphs.ascii.dash, '-');
     });
+
+    test('isAscii distinguishes the ascii set from the unicode set', () {
+      expect(MonitorGlyphs.ascii.isAscii, isTrue);
+      expect(MonitorGlyphs.unicode.isAscii, isFalse);
+    });
   });
 
   group('MonitorGlyphs single-width invariant', () {
@@ -253,6 +258,35 @@ void main() {
 
     test('gradientTitle returns the raw text unchanged', () {
       expect(MonitorTheme.plain().gradientTitle('MULTIPLEXOR'), 'MULTIPLEXOR');
+    });
+  });
+
+  group('MonitorTheme.plainAscii', () {
+    test('uses ColorDepth.none', () {
+      expect(MonitorTheme.plainAscii().depth, ColorDepth.none);
+    });
+
+    test('uses the ascii glyph set', () {
+      expect(MonitorTheme.plainAscii().glyphs, same(MonitorGlyphs.ascii));
+      expect(MonitorTheme.plainAscii().glyphs.isAscii, isTrue);
+    });
+
+    test('emits zero escape bytes across every tone and glyph', () {
+      final MonitorTheme theme = MonitorTheme.plainAscii();
+      final StringBuffer everything = StringBuffer()
+        ..write(theme.frame)
+        ..write(theme.textStrong)
+        ..write(theme.faint)
+        ..write(theme.accent)
+        ..write(theme.info)
+        ..write(theme.reset)
+        ..write(theme.dim)
+        ..write(theme.gradientTitle('MULTIPLEXOR'))
+        ..write(theme.rampTone(MonitorRamp.load, 0.5))
+        ..writeAll(_singleWidthFields(theme.glyphs).values);
+      final String rendered = everything.toString();
+      expect(rendered.contains('\x1B'), isFalse);
+      expect(rendered.codeUnits.every((int code) => code < 128), isTrue);
     });
   });
 

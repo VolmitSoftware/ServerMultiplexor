@@ -246,6 +246,11 @@ class MonitorGlyphs {
   /// 4-frame busy spinner.
   final List<String> spinner;
 
+  /// Whether this is the ASCII-only glyph set. Renderers that change their
+  /// geometry (not just their characters) when unicode is unavailable — the
+  /// braille chart drops from a 2x4 sub-cell grid to 1x1 — branch on this.
+  bool get isAscii => identical(this, MonitorGlyphs.ascii);
+
   static const MonitorGlyphs unicode = MonitorGlyphs(
     frameTl: '┌',
     frameTr: '┐',
@@ -331,6 +336,11 @@ class MonitorTheme {
   /// other output that must never carry escape bytes.
   factory MonitorTheme.plain() =>
       const MonitorTheme._(ColorDepth.none, MonitorGlyphs.unicode);
+
+  /// A colorless theme with ASCII-only glyphs, for terminals (or captured
+  /// output) that can render neither escapes nor the unicode glyph set.
+  factory MonitorTheme.plainAscii() =>
+      const MonitorTheme._(ColorDepth.none, MonitorGlyphs.ascii);
 
   String get frame => _encodeTone(_Palette.frame, depth);
   String get frameActive => _encodeTone(_Palette.frameActive, depth);
