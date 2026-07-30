@@ -23,6 +23,12 @@ class TermIo {
   bool _mouseEnabled = false;
   StreamSubscription<ProcessSignal>? _sigintSub;
 
+  /// True while the app is drawing on the alternate screen buffer. Set by
+  /// whoever wrote `\x1B[?1049h` so [restoreTerminal] — and therefore the
+  /// Ctrl+C handler installed by [installSignalRestore] — hands the primary
+  /// screen back instead of leaving the user staring at a dead dashboard.
+  bool altScreenActive = false;
+
   bool get hasTerminal => stdin.hasTerminal && stdout.hasTerminal;
 
   void setRawMode(bool enabled) {
@@ -214,6 +220,15 @@ class TermIo {
     _sigintSub?.cancel();
     _sigintSub = null;
     disableMouse();
+    if (altScreenActive) {
+      // Leave the alternate screen before anything else so the restored
+      // primary screen keeps the scrollback the dashboard never touched.
+      // Clearing the flag first keeps repeat calls from re-emitting it.
+      altScreenActive = false;
+      if (stdout.hasTerminal) {
+        stdout.write('\x1B[?1049l');
+      }
+    }
     if (stdout.hasTerminal) {
       stdout.write('\x1B[0m');
       _console.showCursor();
