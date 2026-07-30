@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import '../runtime_state.dart';
-import 'monitor_frame_util.dart';
 
 /// One sampled reading of one managed server instance, as consumed by the
 /// monitoring dashboard.
@@ -333,6 +332,25 @@ String metricsTsvRow({
   ].join('\t');
 }
 
+/// The two per-instance booleans the dashboard needs but [MetricSample] does
+/// not carry: whether the instance is locked (delete and factory reset are
+/// blocked) and whether it is isolated from shared dropins.
+///
+/// They ride alongside the samples rather than on them because they are
+/// workspace facts, not readings: they do not change between sweeps and
+/// nothing charts them. The modal card is their only consumer.
+///
+/// They live here, beside the parser that reads them out of the metrics TSV,
+/// rather than beside the snapshot that carries them: the frame library
+/// already imports this one, and putting them there made the two import each
+/// other.
+class InstanceFlags {
+  const InstanceFlags({required this.locked, required this.isolated});
+
+  final bool locked;
+  final bool isolated;
+}
+
 /// The lock and isolation flags carried by one row of the `runtime metrics`
 /// TSV — the two columns [MetricSample.fromMetricsTsv] deliberately drops
 /// (column 4, `locked`/`unlocked`, and column 9, `isolated`/`shared`).
@@ -375,7 +393,7 @@ InstanceFlags? metricsTsvFlags(String line) {
 /// cells, so the sets are not identical: a row with an unreadable state name
 /// yields flags but no sample, and a row with an unexpected lock or
 /// isolation token yields a sample but no flags. Either way the instance is
-/// still listed by the sampler; it simply falls back to [MonitorSnapshot]'s
+/// still listed by the sampler; it simply falls back to the snapshot's
 /// default flags for that sweep. A repeated name keeps the last row.
 Map<String, InstanceFlags> metricsTsvFlagsByInstance(String capture) {
   final Map<String, InstanceFlags> result = <String, InstanceFlags>{};

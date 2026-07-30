@@ -24,20 +24,6 @@ import 'monitor_hitbox.dart';
 const int monitorMinColumns = 80;
 const int monitorMinLines = 24;
 
-/// The two per-instance booleans the dashboard needs but [MetricSample] does
-/// not carry: whether the instance is locked (delete and factory reset are
-/// blocked) and whether it is isolated from shared dropins.
-///
-/// They ride alongside the samples rather than on them because they are
-/// workspace facts, not readings: they do not change between sweeps and
-/// nothing charts them. The modal card is their only consumer.
-class InstanceFlags {
-  const InstanceFlags({required this.locked, required this.isolated});
-
-  final bool locked;
-  final bool isolated;
-}
-
 /// The flags of an instance nothing is known about: an instance whose row
 /// never made it into a capture is treated as neither locked nor isolated.
 ///
