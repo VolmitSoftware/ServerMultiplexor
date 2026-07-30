@@ -86,21 +86,22 @@ void main() {
     });
 
     test('maps every unbound event kind to none', () {
-      const List<TermEventKind> unbound = <TermEventKind>[
-        TermEventKind.backspace,
-        TermEventKind.tab,
-        TermEventKind.arrowLeft,
-        TermEventKind.arrowRight,
-        TermEventKind.home,
-        TermEventKind.end,
-        TermEventKind.pageUp,
-        TermEventKind.pageDown,
-        TermEventKind.delete,
-        TermEventKind.mouseDown,
-        TermEventKind.mouseUp,
-        TermEventKind.cursorReport,
-        TermEventKind.unknown,
-      ];
+      // Derived (not hardcoded) from TermEventKind.values minus the kinds
+      // bound above, so a future addition to the enum is automatically
+      // covered here instead of silently falling through untested.
+      const Set<TermEventKind> bound = <TermEventKind>{
+        TermEventKind.arrowUp,
+        TermEventKind.wheelUp,
+        TermEventKind.arrowDown,
+        TermEventKind.wheelDown,
+        TermEventKind.enter,
+        TermEventKind.escape,
+        TermEventKind.ctrlC,
+        TermEventKind.char,
+      };
+      final Iterable<TermEventKind> unbound = TermEventKind.values.where(
+        (TermEventKind kind) => !bound.contains(kind),
+      );
       for (final TermEventKind kind in unbound) {
         expect(
           monitorActionForEvent(TermEvent(kind)),
