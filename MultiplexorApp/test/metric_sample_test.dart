@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:multiplexor/services/monitor/metric_sample.dart';
+import 'package:multiplexor/services/monitor/monitor_frame_util.dart';
 import 'package:multiplexor/services/runtime_state.dart';
 import 'package:test/test.dart';
 
@@ -274,6 +275,103 @@ void main() {
       const String line =
           'survival\tbogus\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated';
       expect(MetricSample.fromMetricsTsv(line, ts), isNull);
+    });
+  });
+
+  group('metricsTsvFlags', () {
+    test('reads locked and isolated from a full 14-column row', () {
+      const String line =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
+          '\t3600\t3.5\t536870912\t/logs/survival/latest.log\t42';
+      final InstanceFlags? flags = metricsTsvFlags(line);
+      expect(flags, isNotNull);
+      expect(flags!.locked, isTrue);
+      expect(flags.isolated, isTrue);
+    });
+
+    test('reads unlocked and shared as the false half of each pair', () {
+      const String line =
+          'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-\t-';
+      final InstanceFlags? flags = metricsTsvFlags(line);
+      expect(flags, isNotNull);
+      expect(flags!.locked, isFalse);
+      expect(flags.isolated, isFalse);
+    });
+
+    test('parses a legacy 9-column row, the shortest that carries both', () {
+      const String line =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tshared';
+      final InstanceFlags? flags = metricsTsvFlags(line);
+      expect(flags, isNotNull);
+      expect(flags!.locked, isTrue);
+      expect(flags.isolated, isFalse);
+    });
+
+    test('fewer than 9 columns returns null', () {
+      const String line =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8';
+      expect(metricsTsvFlags(line), isNull);
+    });
+
+    test('a line that is not a row at all returns null', () {
+      expect(metricsTsvFlags(''), isNull);
+      expect(metricsTsvFlags('no such instance'), isNull);
+    });
+
+    test('an unknown lock token returns null rather than guessing', () {
+      const String line =
+          'survival\trunning\t25565\tmaybe\t4\t20\t1.21.1\t19.8\tisolated';
+      expect(metricsTsvFlags(line), isNull);
+    });
+
+    test('an unknown isolation token returns null rather than guessing', () {
+      const String line =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tsomewhat';
+      expect(metricsTsvFlags(line), isNull);
+    });
+  });
+
+  group('metricsTsvFlagsByInstance', () {
+    test('keys every parsed row by its instance name', () {
+      const String capture =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated\n'
+          'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared';
+      final Map<String, InstanceFlags> flags = metricsTsvFlagsByInstance(
+        capture,
+      );
+      expect(flags.keys, <String>['survival', 'lobby']);
+      expect(flags['survival']!.locked, isTrue);
+      expect(flags['survival']!.isolated, isTrue);
+      expect(flags['lobby']!.locked, isFalse);
+      expect(flags['lobby']!.isolated, isFalse);
+    });
+
+    test('skips blank lines, nameless rows, and malformed rows', () {
+      const String capture =
+          '\n'
+          '\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated\n'
+          'broken\trunning\t25565\tmaybe\t4\t20\t1.21.1\t19.8\tisolated\n'
+          'short\trunning\t25565\tlocked\n'
+          'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\n';
+      final Map<String, InstanceFlags> flags = metricsTsvFlagsByInstance(
+        capture,
+      );
+      expect(flags.keys, <String>['lobby']);
+    });
+
+    test('an empty capture yields an empty map', () {
+      expect(metricsTsvFlagsByInstance(''), isEmpty);
+    });
+
+    test('a repeated instance keeps the last row', () {
+      const String capture =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated\n'
+          'survival\trunning\t25565\tunlocked\t4\t20\t1.21.1\t19.8\tshared';
+      final Map<String, InstanceFlags> flags = metricsTsvFlagsByInstance(
+        capture,
+      );
+      expect(flags['survival']!.locked, isFalse);
+      expect(flags['survival']!.isolated, isFalse);
     });
   });
 

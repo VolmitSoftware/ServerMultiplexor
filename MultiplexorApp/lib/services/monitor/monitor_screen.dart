@@ -22,6 +22,7 @@ import 'monitor_detail_model.dart';
 import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
 import 'monitor_keymap.dart';
+import 'monitor_modal.dart';
 import 'monitor_model.dart';
 
 /// How long each iteration waits for input. Together with [_yieldWindow] this
@@ -67,8 +68,31 @@ const String _leaveAltScreen = '\x1B[?1049l\x1B[?25h';
 /// returns added before it can be written in raw mode.
 const String _fullFramePrefix = '\x1B[H\x1B[2J';
 
+/// The id prefixes and ids the selection and workspace action bars emit.
+/// `monitor_model.dart` builds the chips that carry them; this screen is what
+/// reads them back, so the two files are the only pair that has to agree.
+const String _actStartHitId = 'act:start';
+const String _actStopHitId = 'act:stop';
+const String _actRestartHitId = 'act:restart';
+const String _actConsoleHitId = 'act:console';
+const String _actDetailHitId = 'act:detail';
+const String _actMoreHitId = 'act:more';
+const String _wsNewHitId = 'ws:new';
+const String _wsBuildsHitId = 'ws:builds';
+const String _wsTuningHitId = 'ws:tuning';
+const String _wsConsumerHitId = 'ws:consumer';
+const String _wsConsolesHitId = 'ws:consoles';
+const String _wsMoreHitId = 'ws:more';
+
 /// Why the monitor screen stopped: either the user left it, or it is
 /// handing off to a flow the dashboard itself does not implement.
+///
+/// There is exactly one of the latter left. Every other hand-off the
+/// dashboard used to report — opening an instance, creating one, the build
+/// menu — is now a modal card and an injected callback run on a suspended
+/// terminal, so the session is never torn down for it. A consumer switch
+/// stays a result because it invalidates the sampler and its trend store:
+/// the caller has to build a new session, not resume this one.
 sealed class MonitorResult {
   const MonitorResult();
 }
@@ -76,23 +100,6 @@ sealed class MonitorResult {
 /// The user quit the dashboard.
 class MonitorQuit extends MonitorResult {
   const MonitorQuit();
-}
-
-/// The user opened [instance] — the caller runs the per-instance flow.
-class MonitorOpenInstance extends MonitorResult {
-  const MonitorOpenInstance(this.instance);
-
-  final String instance;
-}
-
-/// The user asked to create a new instance.
-class MonitorNewInstance extends MonitorResult {
-  const MonitorNewInstance();
-}
-
-/// The user asked for the build menu.
-class MonitorBuildMenu extends MonitorResult {
-  const MonitorBuildMenu();
 }
 
 /// The user asked to switch consumer profiles.
@@ -104,14 +111,17 @@ class MonitorSwitchConsumer extends MonitorResult {
 ///
 /// Every collaborator is injected: [sampler] supplies metric history,
 /// [loadSnapshot] rebuilds the workspace view after each sweep,
-/// [quickAction] performs a per-instance command, [readLogTail] reads a log
-/// tail for the detail view, and [suspend] runs a legacy flow while this
-/// screen is out of the way.
+/// [quickAction] performs a per-instance command bound to a key,
+/// [instanceAction] and [workspaceAction] run the flows behind the two modal
+/// cards and the action bars, [readLogTail] reads a log tail for the detail
+/// view, and [suspend] runs any of them while this screen is out of the way.
 ///
 /// [suspend] receives a flow to run and is only responsible for running it:
 /// the screen brackets the call with its own terminal transitions (leaving
 /// the alternate screen and raw mode before, reclaiming both after), so no
-/// injected callback can leave the terminal in a half-owned state.
+/// injected callback can leave the terminal in a half-owned state. Every
+/// [instanceAction] and [workspaceAction] call goes through that bracket, so
+/// those callbacks are free to prompt.
 class MonitorScreen {
   MonitorScreen({
     required this.sampler,
@@ -119,6 +129,8 @@ class MonitorScreen {
     required this.loadSnapshot,
     required this.suspend,
     required this.quickAction,
+    required this.instanceAction,
+    required this.workspaceAction,
     required this.readLogTail,
   });
 
@@ -128,6 +140,9 @@ class MonitorScreen {
   final Future<void> Function(Future<void> Function() flow) suspend;
   final Future<void> Function(String instance, MonitorAction action)
   quickAction;
+  final Future<void> Function(String instance, InstanceModalAction action)
+  instanceAction;
+  final Future<void> Function(WorkspaceModalAction action) workspaceAction;
   final Future<List<String>> Function(String logPath, int maxLines) readLogTail;
 
   MonitorSnapshot _snapshot = const MonitorSnapshot(
@@ -142,8 +157,21 @@ class MonitorScreen {
 
   /// The hitboxes from the most recently built frame — the mouse-click map.
   /// Rebuilt every [_render], including in detail mode, where it is always
-  /// empty (the detail view has no clickable regions yet).
+  /// empty (the detail view has no clickable regions yet), and while a modal
+  /// is open, where it is the modal's own three layers and nothing else.
   List<MonitorHitbox> _hitboxes = const <MonitorHitbox>[];
+
+  /// The id of the region the pointer is currently over, and the id the
+  /// pointer went down on and has not been released over yet. Both name a
+  /// hitbox from the frame on screen; either is cleared the moment the id it
+  /// names stops being part of that frame (see [_liveId]).
+  String? _hoveredId;
+  String? _pressedId;
+
+  /// The modal card on screen, or null when there is none. While it is
+  /// non-null it owns the pointer and Escape outright: nothing behind it is
+  /// clickable, and no key but Escape and quit does anything.
+  MonitorModalState? _modal;
 
   int _selectedIndex = 0;
   int _frame = 0;
@@ -219,8 +247,19 @@ class MonitorScreen {
     _detailInstance = '';
     _logLines = const <String>[];
     _logReadAt = null;
+    _modal = null;
+    _clearPointer();
     _startedAt = DateTime.now();
     _clampSelection();
+  }
+
+  /// Forgets where the pointer was. Called whenever what is on screen stops
+  /// being what the pointer was last measured against — a modal opening or
+  /// closing, a suspension, a resize — so no chip is left lit under a
+  /// pointer that is no longer over it.
+  void _clearPointer() {
+    _hoveredId = null;
+    _pressedId = null;
   }
 
   void _enterScreen(TermIo io) {
@@ -290,9 +329,12 @@ class MonitorScreen {
     if (columns != _lastColumns || lines != _lastLines) {
       // A resized terminal has already scrambled what is on screen; a
       // line-by-line patch against the old geometry would only add to it.
+      // The pointer's last position was measured against the old geometry
+      // too, so it goes with it.
       _lastColumns = columns;
       _lastLines = lines;
       _forceFull = true;
+      _clearPointer();
     }
 
     _clampSelection();
@@ -304,7 +346,13 @@ class MonitorScreen {
         wallClock.difference(_startedAt).inMilliseconds ~/
         _spinnerPeriod.inMilliseconds;
     final DateTime now = wallClock.toUtc();
-    final MonitorFrame frame = _detailMode
+    final MonitorModalState? modal = _modal;
+    // Nothing behind a modal is clickable, so nothing behind one is drawn as
+    // if it were: the base frame is built with no pointer at all and the
+    // pointer is spent on the card instead.
+    final String? baseHovered = modal == null ? _hoveredId : null;
+    final String? basePressed = modal == null ? _pressedId : null;
+    final MonitorFrame base = _detailMode
         ? buildDetailFrame(
             instance: _detailInstance,
             history: _historyFor(_detailInstance),
@@ -315,6 +363,8 @@ class MonitorScreen {
             theme: theme,
             range: _range,
             now: now,
+            hoveredId: baseHovered,
+            pressedId: basePressed,
           )
         : buildMonitorFrame(
             snapshot: _snapshot,
@@ -325,8 +375,19 @@ class MonitorScreen {
             theme: theme,
             range: _range,
             now: now,
+            hoveredId: baseHovered,
+            pressedId: basePressed,
           );
+    final MonitorFrame frame = modal == null
+        ? base
+        : _overlay(modal, base, columns, lines);
     _hitboxes = frame.hitboxes;
+    // A hovered or pressed id that this frame does not carry names a region
+    // that is no longer on screen — a chip the selection's state swapped out,
+    // a row a sweep dropped. Holding on to it would light whatever chip
+    // inherits the id next.
+    _hoveredId = _liveId(_hoveredId);
+    _pressedId = _liveId(_pressedId);
 
     final String text = frame.rows.join('\n');
     final String patch = renderTerminalPatch(
@@ -348,6 +409,48 @@ class MonitorScreen {
           ? patch.replaceAll('\n', '\r\n')
           : patch,
     );
+  }
+
+  /// Composes [modal]'s card over [base], carrying the instance's latest
+  /// reading and its flags so the card can gate the actions that depend on
+  /// them. The workspace card ignores both.
+  MonitorFrame _overlay(
+    MonitorModalState modal,
+    MonitorFrame base,
+    int columns,
+    int lines,
+  ) {
+    final String instance = switch (modal) {
+      InstanceModal(instance: final String name) => name,
+      WorkspaceModal() => '',
+    };
+    final InstanceFlags flags = _snapshot.flagsFor(instance);
+    return overlayModal(
+      base: base,
+      modal: modal,
+      latest: instance.isEmpty ? null : _latestFor(instance),
+      locked: flags.locked,
+      isolated: flags.isolated,
+      theme: theme,
+      hoveredId: _hoveredId,
+      pressedId: _pressedId,
+      columns: columns,
+      lines: lines,
+    );
+  }
+
+  /// [id] when the frame on screen still carries a hitbox with it, null
+  /// otherwise.
+  String? _liveId(String? id) {
+    if (id == null) {
+      return null;
+    }
+    for (final MonitorHitbox hitbox in _hitboxes) {
+      if (hitbox.id == id) {
+        return id;
+      }
+    }
+    return null;
   }
 
   // --- state --------------------------------------------------------------
@@ -480,8 +583,16 @@ class MonitorScreen {
 
   Future<MonitorResult?> _handleEvent(TermEvent event) async {
     _clampSelection();
+    if (event.kind == TermEventKind.mouseMove) {
+      _hoveredId = _hitAt(event);
+      return null;
+    }
     if (event.kind == TermEventKind.mouseDown) {
-      return _handleMouseDown(event);
+      _handleMouseDown(event);
+      return null;
+    }
+    if (event.kind == TermEventKind.mouseUp) {
+      return _handleMouseUp(event);
     }
     final MonitorAction action = monitorActionForEvent(event);
     if (event.kind == TermEventKind.wheelUp ||
@@ -491,33 +602,46 @@ class MonitorScreen {
     return _handleAction(action);
   }
 
-  /// A left click on a server row selects it; a second click on the row
-  /// that is already selected opens it. Clicks anywhere else are ignored.
-  MonitorResult? _handleMouseDown(TermEvent event) {
-    if (_detailMode || event.button != 0) {
+  /// The id of the region under [event]'s pointer, or null when it is over
+  /// nothing clickable. Terminal coordinates are 1-based and hitboxes are
+  /// 0-based, which is the whole of the conversion.
+  String? _hitAt(TermEvent event) =>
+      hitTest(_hitboxes, row: event.row - 1, col: event.col - 1);
+
+  /// Arms the region under the pointer. Nothing runs on the way down: an
+  /// action fires only when the button comes back up over the same region,
+  /// so a press that slides off is a press the user took back.
+  ///
+  /// The hover moves too, for the terminals that report presses but not
+  /// motion — without it the chip being pressed would never light.
+  void _handleMouseDown(TermEvent event) {
+    if (event.button != 0) {
+      return;
+    }
+    final String? id = _hitAt(event);
+    _hoveredId = id;
+    _pressedId = id;
+  }
+
+  /// Releases the armed region, and activates it when the pointer came back
+  /// up over the same one.
+  Future<MonitorResult?> _handleMouseUp(TermEvent event) async {
+    final String? pressed = _pressedId;
+    _pressedId = null;
+    final String? id = _hitAt(event);
+    _hoveredId = id;
+    if (pressed == null || id != pressed) {
       return null;
     }
-    final String? id = hitTest(_hits(), row: event.row - 1, col: event.col - 1);
-    if (id == null) {
-      return null;
-    }
-    final int index = _snapshot.instances.indexWhere(
-      (String instance) => '$serverHitPrefix$instance' == id,
-    );
-    if (index < 0) {
-      return null;
-    }
-    if (index == _selectedIndex) {
-      final String? instance = _selectedInstance;
-      return instance == null ? null : MonitorOpenInstance(instance);
-    }
-    _selectedIndex = index;
-    return null;
+    return _activate(pressed);
   }
 
   /// The wheel means "scroll the list" over the server list and "change the
   /// window" anywhere else, because everywhere else is charts. In the detail
-  /// view the whole screen is charts, so it always changes the window.
+  /// view the whole screen is charts, so it always changes the window. With
+  /// a modal open it means nothing at all: the dashboard behind the card is
+  /// not being read, and silently re-windowing its charts is not an answer
+  /// to a scroll aimed at the card.
   ///
   /// The list is no longer the full width of the frame: it is a slim panel
   /// with the selected server's chart beside it, sharing its rows. So the
@@ -529,6 +653,9 @@ class MonitorScreen {
   /// list spends that row on a `+N more` marker, which is part of the list
   /// even though it is deliberately not a click target.
   MonitorResult? _handleWheel(TermEvent event, MonitorAction action) {
+    if (_modal != null) {
+      return null;
+    }
     if (!_detailMode) {
       final List<MonitorHitbox> hits = _hits();
       if (hits.isNotEmpty) {
@@ -548,7 +675,161 @@ class MonitorScreen {
     return null;
   }
 
+  // --- activation ----------------------------------------------------------
+
+  /// Runs whatever [id] names. The modal owns every id while it is open, so
+  /// the two routes never overlap.
+  Future<MonitorResult?> _activate(String id) async {
+    final MonitorModalState? modal = _modal;
+    return modal == null ? _activateBase(id) : _activateModal(modal, id);
+  }
+
+  /// Activation on the dashboard itself: server rows, the selection bar, the
+  /// workspace bar, and the range chip.
+  Future<MonitorResult?> _activateBase(String id) async {
+    if (id.startsWith(serverHitPrefix)) {
+      _activateServerRow(id.substring(serverHitPrefix.length));
+      return null;
+    }
+    switch (id) {
+      case _actStartHitId:
+        await _runInstanceAction(InstanceModalAction.start);
+      case _actStopHitId:
+        await _runInstanceAction(InstanceModalAction.stop);
+      case _actRestartHitId:
+        await _runInstanceAction(InstanceModalAction.restart);
+      case _actConsoleHitId:
+        await _runInstanceAction(InstanceModalAction.console);
+      case _actDetailHitId:
+        _enterDetail();
+      case _actMoreHitId:
+        _openInstanceModal(_actionTarget());
+      case _wsNewHitId:
+        await _runWorkspaceAction(WorkspaceModalAction.newInstance);
+      case _wsBuildsHitId:
+        await _runWorkspaceAction(WorkspaceModalAction.pullBuilds);
+      case _wsTuningHitId:
+        await _runWorkspaceAction(WorkspaceModalAction.buildTuning);
+      case _wsConsumerHitId:
+        // The one hand-off that still ends the session: a new profile means
+        // a new sampler and a new trend store.
+        return const MonitorSwitchConsumer();
+      case _wsConsolesHitId:
+        await _runQuickAction(MonitorAction.consolesGrid);
+      case _wsMoreHitId:
+        _modal = const WorkspaceModal();
+        _clearPointer();
+      case rangeHitId:
+        _range = nextRange(_range);
+    }
+    return null;
+  }
+
+  /// A click on a server row selects it; a click on the row that is already
+  /// selected opens its card. A row naming an instance the snapshot no
+  /// longer has does nothing.
+  void _activateServerRow(String instance) {
+    final int index = _snapshot.instances.indexOf(instance);
+    if (index < 0) {
+      return;
+    }
+    if (index == _selectedIndex) {
+      _openInstanceModal(instance);
+      return;
+    }
+    _selectedIndex = index;
+  }
+
+  /// Activation inside a modal card: a button runs its action, the card
+  /// itself swallows the click, and anything outside the card dismisses.
+  ///
+  /// The card is always closed *before* the flow runs. The flow takes the
+  /// terminal, so leaving the card up would only mean redrawing it on the
+  /// way back — and the reading it was drawn from is the one the action is
+  /// about to invalidate.
+  Future<MonitorResult?> _activateModal(
+    MonitorModalState modal,
+    String id,
+  ) async {
+    if (id == modalScrimHitId) {
+      _closeModal();
+      return null;
+    }
+    if (id == modalCardHitId) {
+      return null;
+    }
+    switch (modal) {
+      case InstanceModal(instance: final String instance):
+        final InstanceModalAction? action = instanceModalActionForId(id);
+        if (action == null) {
+          return null;
+        }
+        _closeModal();
+        await _suspended(() => instanceAction(instance, action));
+      case WorkspaceModal():
+        final WorkspaceModalAction? action = workspaceModalActionForId(id);
+        if (action == null) {
+          return null;
+        }
+        _closeModal();
+        await _suspended(() => workspaceAction(action));
+    }
+    return null;
+  }
+
+  /// Runs [action] against whichever instance the view is pointed at, on a
+  /// suspended terminal. Without a target there is nothing to act on.
+  Future<void> _runInstanceAction(InstanceModalAction action) async {
+    final String? target = _actionTarget();
+    if (target == null) {
+      return;
+    }
+    await _suspended(() => instanceAction(target, action));
+  }
+
+  Future<void> _runWorkspaceAction(WorkspaceModalAction action) async {
+    await _suspended(() => workspaceAction(action));
+  }
+
+  void _openInstanceModal(String? instance) {
+    if (instance == null || instance.isEmpty) {
+      return;
+    }
+    _modal = InstanceModal(instance);
+    _clearPointer();
+  }
+
+  void _closeModal() {
+    _modal = null;
+    _clearPointer();
+  }
+
+  void _enterDetail() {
+    if (_detailMode) {
+      return;
+    }
+    final String? instance = _selectedInstance;
+    if (instance == null) {
+      return;
+    }
+    _detailMode = true;
+    _detailInstance = instance;
+    _logLines = const <String>[];
+    _logReadAt = null;
+  }
+
   Future<MonitorResult?> _handleAction(MonitorAction action) async {
+    if (_modal != null) {
+      // A modal is mouse-first: its buttons have no keys of their own yet
+      // (keyboard navigation of the card is future work). Escape takes the
+      // card down, quit still quits, and everything else is inert rather
+      // than reaching the dashboard underneath it.
+      if (action == MonitorAction.back) {
+        _closeModal();
+        return null;
+      }
+      return action == MonitorAction.quit ? const MonitorQuit() : null;
+    }
     switch (action) {
       case MonitorAction.up:
         _moveSelection(-1);
@@ -557,20 +838,12 @@ class MonitorScreen {
         _moveSelection(1);
         return null;
       case MonitorAction.open:
-        final String? target = _actionTarget();
-        return target == null ? null : MonitorOpenInstance(target);
+        // What `enter` used to hand back to the caller is now a card drawn
+        // over this frame: same actions, without leaving the dashboard.
+        _openInstanceModal(_actionTarget());
+        return null;
       case MonitorAction.detail:
-        if (_detailMode) {
-          return null;
-        }
-        final String? instance = _selectedInstance;
-        if (instance == null) {
-          return null;
-        }
-        _detailMode = true;
-        _detailInstance = instance;
-        _logLines = const <String>[];
-        _logReadAt = null;
+        _enterDetail();
         return null;
       case MonitorAction.back:
         if (!_detailMode) {
@@ -589,9 +862,11 @@ class MonitorScreen {
         await _runQuickAction(action);
         return null;
       case MonitorAction.newInstance:
-        return const MonitorNewInstance();
+        await _runWorkspaceAction(WorkspaceModalAction.newInstance);
+        return null;
       case MonitorAction.buildMenu:
-        return const MonitorBuildMenu();
+        await _runWorkspaceAction(WorkspaceModalAction.buildTuning);
+        return null;
       case MonitorAction.switchConsumer:
         return const MonitorSwitchConsumer();
       case MonitorAction.cycleRange:
@@ -641,9 +916,14 @@ class MonitorScreen {
     } finally {
       _enterScreen(io);
       // Whatever the flow drew is gone with the alternate screen swap, and
-      // anything typed at it must not reach the dashboard as commands.
+      // anything typed at it must not reach the dashboard as commands. The
+      // pointer went with it too: mouse reporting was off for the whole
+      // flow, so where it is now is not known until it next moves.
       _last = null;
       _forceFull = true;
+      _clearPointer();
+      // Picks up whatever the flow changed — state, ports, lock and
+      // isolation flags — on the next sweep's capture.
       _kickRefresh();
     }
   }

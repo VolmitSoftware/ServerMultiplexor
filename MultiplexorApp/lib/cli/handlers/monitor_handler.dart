@@ -54,9 +54,19 @@ Future<int> handleRuntimeWatch(List<String> args) async {
 
 /// Sweeps metrics once and writes one plain frame to stdout.
 Future<int> _printSnapshot() async {
-  final MetricsSampler sampler = MetricsSampler(
-    captureMetrics: _captureMetrics,
-  );
+  // The lock and isolation columns are tee'd off the sampler's own capture
+  // rather than asked for again, exactly as the live dashboard does it, so a
+  // snapshot carries the same workspace facts a frame does.
+  Map<String, InstanceFlags> flags = const <String, InstanceFlags>{};
+  Future<String> captureMetrics() async {
+    final String raw = await _captureMetrics();
+    if (raw.isNotEmpty) {
+      flags = metricsTsvFlagsByInstance(raw);
+    }
+    return raw;
+  }
+
+  final MetricsSampler sampler = MetricsSampler(captureMetrics: captureMetrics);
   await sampler.sweep();
 
   final List<String> instances = sampler.instances;
@@ -66,6 +76,7 @@ Future<int> _printSnapshot() async {
       for (final String instance in instances)
         instance: sampler.history(instance),
     },
+    flags: flags,
     consumerName: (appContext.requestedConsumer ?? consumerService.readActive())
         .shortName,
     activeInstance: await _activeInstance(),

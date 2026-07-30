@@ -106,6 +106,38 @@ String instanceModalHitId(InstanceModalAction action) =>
 String workspaceModalHitId(WorkspaceModalAction action) =>
     '$workspaceModalHitPrefix${action.name}';
 
+/// The instance action [id] names, or null when [id] is not an instance-card
+/// button id — the exact inverse of [instanceModalHitId]. A dispatcher can
+/// therefore hand it every id it hit-tests and act only on the ones that come
+/// back non-null.
+InstanceModalAction? instanceModalActionForId(String id) {
+  if (!id.startsWith(instanceModalHitPrefix)) {
+    return null;
+  }
+  final String name = id.substring(instanceModalHitPrefix.length);
+  for (final InstanceModalAction action in InstanceModalAction.values) {
+    if (action.name == name) {
+      return action;
+    }
+  }
+  return null;
+}
+
+/// The workspace action [id] names, or null when [id] is not a
+/// workspace-card button id — the exact inverse of [workspaceModalHitId].
+WorkspaceModalAction? workspaceModalActionForId(String id) {
+  if (!id.startsWith(workspaceModalHitPrefix)) {
+    return null;
+  }
+  final String name = id.substring(workspaceModalHitPrefix.length);
+  for (final WorkspaceModalAction action in WorkspaceModalAction.values) {
+    if (action.name == name) {
+      return action;
+    }
+  }
+  return null;
+}
+
 /// The card's preferred width.
 const int _cardMaxWidth = 46;
 

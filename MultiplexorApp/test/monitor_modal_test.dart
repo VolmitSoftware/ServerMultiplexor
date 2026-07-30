@@ -155,6 +155,26 @@ void main() {
         'im:factoryReset',
       );
     });
+
+    test('every hit id parses back to the action that emitted it', () {
+      for (final InstanceModalAction action in InstanceModalAction.values) {
+        expect(
+          instanceModalActionForId(instanceModalHitId(action)),
+          action,
+          reason: action.name,
+        );
+      }
+    });
+
+    test('an id from anywhere else parses to null', () {
+      expect(instanceModalActionForId('wm:wipe'), isNull);
+      expect(instanceModalActionForId('server:alpha'), isNull);
+      expect(instanceModalActionForId('act:start'), isNull);
+      expect(instanceModalActionForId('start'), isNull);
+      expect(instanceModalActionForId('im:'), isNull);
+      expect(instanceModalActionForId('im:bogus'), isNull);
+      expect(instanceModalActionForId(''), isNull);
+    });
   });
 
   group('WorkspaceModalAction', () {
@@ -173,6 +193,25 @@ void main() {
     test('hit ids are the action name behind the workspace-modal prefix', () {
       expect(workspaceModalHitPrefix, 'wm:');
       expect(workspaceModalHitId(WorkspaceModalAction.stopAll), 'wm:stopAll');
+    });
+
+    test('every hit id parses back to the action that emitted it', () {
+      for (final WorkspaceModalAction action in WorkspaceModalAction.values) {
+        expect(
+          workspaceModalActionForId(workspaceModalHitId(action)),
+          action,
+          reason: action.name,
+        );
+      }
+    });
+
+    test('an id from anywhere else parses to null', () {
+      expect(workspaceModalActionForId('im:start'), isNull);
+      expect(workspaceModalActionForId('ws:new'), isNull);
+      expect(workspaceModalActionForId('wipe'), isNull);
+      expect(workspaceModalActionForId('wm:'), isNull);
+      expect(workspaceModalActionForId('wm:bogus'), isNull);
+      expect(workspaceModalActionForId(''), isNull);
     });
   });
 

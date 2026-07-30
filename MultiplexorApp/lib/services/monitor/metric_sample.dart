@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../runtime_state.dart';
+import 'monitor_frame_util.dart';
 
 /// One sampled reading of one managed server instance, as consumed by the
 /// monitoring dashboard.
@@ -330,6 +331,62 @@ String metricsTsvRow({
     _tsvTextCell(logPath),
     _tsvNumberCell(latencyMs),
   ].join('\t');
+}
+
+/// The lock and isolation flags carried by one row of the `runtime metrics`
+/// TSV — the two columns [MetricSample.fromMetricsTsv] deliberately drops
+/// (column 4, `locked`/`unlocked`, and column 9, `isolated`/`shared`).
+///
+/// Returns null for anything that is not a well-formed row: fewer than the 9
+/// columns that carry both flags, or a token in either column that is not one
+/// of the two words that column can hold. A row is either trusted for both
+/// flags or not trusted at all — guessing would silently offer LOCK on a
+/// locked instance.
+///
+/// The instance name is not returned: see [metricsTsvFlagsByInstance] for the
+/// keyed form.
+InstanceFlags? metricsTsvFlags(String line) {
+  final List<String> cols = line.split('\t');
+  if (cols.length < 9) {
+    return null;
+  }
+  final bool? locked = switch (cols[3]) {
+    'locked' => true,
+    'unlocked' => false,
+    _ => null,
+  };
+  final bool? isolated = switch (cols[8]) {
+    'isolated' => true,
+    'shared' => false,
+    _ => null,
+  };
+  if (locked == null || isolated == null) {
+    return null;
+  }
+  return InstanceFlags(locked: locked, isolated: isolated);
+}
+
+/// Every instance's flags from a whole `runtime metrics` capture, keyed by
+/// instance name and in row order.
+///
+/// Rows [metricsTsvFlags] rejects are skipped, as are rows with an empty name
+/// — the same discipline [MetricSample.fromMetricsTsv] applies, so a capture
+/// parses to the same set of instances either way. A repeated name keeps the
+/// last row.
+Map<String, InstanceFlags> metricsTsvFlagsByInstance(String capture) {
+  final Map<String, InstanceFlags> result = <String, InstanceFlags>{};
+  for (final String line in capture.split('\n')) {
+    final InstanceFlags? flags = metricsTsvFlags(line);
+    if (flags == null) {
+      continue;
+    }
+    final String name = line.split('\t').first;
+    if (name.isEmpty) {
+      continue;
+    }
+    result[name] = flags;
+  }
+  return result;
 }
 
 RuntimeState? _runtimeStateFromName(String name) {

@@ -24,14 +24,38 @@ import 'monitor_hitbox.dart';
 const int monitorMinColumns = 80;
 const int monitorMinLines = 24;
 
+/// The two per-instance booleans the dashboard needs but [MetricSample] does
+/// not carry: whether the instance is locked (delete and factory reset are
+/// blocked) and whether it is isolated from shared dropins.
+///
+/// They ride alongside the samples rather than on them because they are
+/// workspace facts, not readings: they do not change between sweeps and
+/// nothing charts them. The modal card is their only consumer.
+class InstanceFlags {
+  const InstanceFlags({required this.locked, required this.isolated});
+
+  final bool locked;
+  final bool isolated;
+}
+
+/// The flags of an instance nothing is known about: an instance whose row
+/// never made it into a capture is neither locked nor isolated, which is
+/// exactly what the card should offer to change.
+const InstanceFlags _defaultFlags = InstanceFlags(
+  locked: false,
+  isolated: false,
+);
+
 /// Everything the dashboard needs to draw one frame: which instances exist,
-/// their metric history (chronological, oldest first), the active consumer
-/// profile's name, and which instance is the active one.
+/// their metric history (chronological, oldest first), their lock/isolation
+/// flags, the active consumer profile's name, and which instance is the
+/// active one.
 class MonitorSnapshot {
   const MonitorSnapshot({
     required this.instances,
     required this.history,
     required this.consumerName,
+    this.flags = const <String, InstanceFlags>{},
     this.activeInstance,
   });
 
@@ -46,12 +70,19 @@ class MonitorSnapshot {
   /// Name of the consumer profile the workspace is pointed at.
   final String consumerName;
 
+  /// Lock and isolation flags per instance. An instance with no entry has no
+  /// known flags and reads as unlocked and shared — see [flagsFor].
+  final Map<String, InstanceFlags> flags;
+
   /// The instance marked active in the workspace, if any.
   final String? activeInstance;
 
   /// [instance]'s history, or an empty list when it has none.
   List<MetricSample> historyFor(String instance) =>
       history[instance] ?? const <MetricSample>[];
+
+  /// [instance]'s flags, or unlocked-and-shared when none are known.
+  InstanceFlags flagsFor(String instance) => flags[instance] ?? _defaultFlags;
 
   /// [instance]'s most recent sample, or null when it has none.
   MetricSample? latestFor(String instance) {

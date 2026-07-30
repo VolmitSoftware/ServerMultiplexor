@@ -8,12 +8,12 @@ import '../utils/process_runner.dart';
 import '../utils/terminal/theme.dart';
 import '../utils/user_prompt.dart';
 import 'consumer_service.dart';
-import 'dashboard_glyphs.dart';
 import 'monitor/log_tail.dart';
 import 'monitor/metric_sample.dart';
 import 'monitor/metrics_sampler.dart';
 import 'monitor/monitor_frame_util.dart';
 import 'monitor/monitor_keymap.dart';
+import 'monitor/monitor_modal.dart';
 import 'monitor/monitor_screen.dart';
 import 'monitor/trend_store.dart';
 import 'passthrough_service.dart';
@@ -21,12 +21,14 @@ import 'runtime_state.dart';
 
 /// Monitor-driven interactive wizard.
 ///
-/// The landing view is the full-screen monitor ([MonitorScreen]): it owns
-/// the dashboard, the charts, and the per-instance quick keys. Everything it
-/// cannot do itself it hands back here — opening an instance, creating one,
-/// the workspace menu, switching consumers — and each of those runs as a
-/// flat, state-aware menu flow on a suspended terminal. All background
-/// commands run shielded so stray keystrokes cannot corrupt the UI.
+/// The landing view is the full-screen monitor ([MonitorScreen]): it owns the
+/// dashboard, the charts, the modal cards, and the per-instance quick keys.
+/// The flows behind those cards live here and are injected into the screen,
+/// which runs each one on a suspended terminal — so a card button and a key
+/// reach the same command by the same route. The one hand-off that still ends
+/// a session is the consumer switch, which invalidates the sampler and its
+/// trend store. All background commands run shielded so stray keystrokes
+/// cannot corrupt the UI.
 class InteractiveWizard {
   InteractiveWizard({
     required this.consumerService,
@@ -108,8 +110,24 @@ class InteractiveWizard {
   /// the user switched consumers, so every sample taken so far — and the
   /// trend directory they were written to — belongs to the old profile.
   Future<bool> _monitorSession() async {
+    // The sampler drops the lock and isolation columns — they are workspace
+    // facts, not readings — but the modal card needs them, and asking for
+    // them separately would mean a second capture per sweep. So the feed is
+    // tee'd on the way past: one `runtime metrics` call, samples to the
+    // sampler and flags to the snapshot.
+    Map<String, InstanceFlags> flags = const <String, InstanceFlags>{};
+    Future<String> captureMetrics() async {
+      final String raw = await _captureMetrics();
+      if (raw.isNotEmpty) {
+        // An empty capture is a failed one; the last good flags outlive it,
+        // the same way the last good readings do.
+        flags = metricsTsvFlagsByInstance(raw);
+      }
+      return raw;
+    }
+
     final MetricsSampler sampler = MetricsSampler(
-      captureMetrics: _captureMetrics,
+      captureMetrics: captureMetrics,
       store: await _trendStore(),
     );
     // Swept and seeded before the screen opens so the first frame carries
@@ -129,9 +147,11 @@ class InteractiveWizard {
     final MonitorScreen screen = MonitorScreen(
       sampler: sampler,
       theme: MonitorTheme.detect(),
-      loadSnapshot: () => _monitorSnapshot(sampler),
+      loadSnapshot: () => _monitorSnapshot(sampler, flags),
       suspend: _suspendedFlow,
       quickAction: _monitorQuickAction,
+      instanceAction: _monitorInstanceAction,
+      workspaceAction: _monitorWorkspaceAction,
       readLogTail: readLogTail,
     );
 
@@ -147,25 +167,12 @@ class InteractiveWizard {
           if (await _monitorFlowChanged(_switchConsumer)) {
             return true;
           }
-        case MonitorOpenInstance(:final String instance):
-          await _monitorFlow(() => _instanceMenu(instance));
-        case MonitorNewInstance():
-          await _monitorFlow(_createInstance);
-        case MonitorBuildMenu():
-          await _monitorFlow(_workspaceMenu);
       }
     }
   }
 
-  /// Runs a hand-off flow on a cleared screen. The monitor has already given
-  /// the terminal back by the time this runs.
-  Future<void> _monitorFlow(Future<void> Function() flow) async {
-    Ui.clearScreen();
-    await _guardedFlow(flow);
-  }
-
-  /// The same, for a hand-off that reports whether it changed anything. A
-  /// flow that backs out or fails reports no change.
+  /// Runs a hand-off flow on a cleared screen that reports whether it changed
+  /// anything. A flow that backs out or fails reports no change.
   Future<bool> _monitorFlowChanged(Future<bool> Function() flow) async {
     Ui.clearScreen();
     bool changed = false;
@@ -245,6 +252,98 @@ class InteractiveWizard {
     }
   }
 
+  /// Every per-instance action a card button or an action-bar chip can
+  /// dispatch, on the same commands the flat menus ran. The screen has
+  /// already suspended itself and cleared the screen, so a flow here is free
+  /// to prompt.
+  ///
+  /// The isolation pair carries its own answer: the card only ever offers
+  /// ISOLATE for a shared instance and SHARE for an isolated one, both read
+  /// from the same capture the frame was drawn from, so which button was
+  /// pressed *is* the current state.
+  Future<void> _monitorInstanceAction(
+    String name,
+    InstanceModalAction action,
+  ) async {
+    switch (action) {
+      case InstanceModalAction.start:
+        Ui.doing('Starting $name in background');
+        final int code = await _shellRun(<String>[
+          'runtime',
+          'start',
+          name,
+          '--no-console',
+        ]);
+        if (code != 0) {
+          await Ui.pause();
+        }
+      case InstanceModalAction.stop:
+        await _quickStop(name);
+      case InstanceModalAction.restart:
+        await _quickRestart(name);
+      case InstanceModalAction.console:
+        await _quickConsole(name);
+      case InstanceModalAction.setPort:
+        await _setInstancePort(name);
+      case InstanceModalAction.makeActive:
+        await _shellRun(<String>['instance', 'activate', name]);
+      case InstanceModalAction.motd:
+        await _shellRun(<String>['instance', 'motd-style', name]);
+        await Ui.pause();
+      case InstanceModalAction.lock:
+        await _lockInstance(name);
+      case InstanceModalAction.unlock:
+        await _unlockInstance(name);
+      case InstanceModalAction.isolated:
+        await _toggleIsolated(name, currentlyIsolated: false);
+      case InstanceModalAction.shared:
+        await _toggleIsolated(name, currentlyIsolated: true);
+      case InstanceModalAction.folder:
+        await _shellRun(<String>['instance', 'open', name]);
+      case InstanceModalAction.update:
+        await _updateInstance(name);
+      case InstanceModalAction.factoryReset:
+        final bool confirmed = await Ui.confirm(
+          'Factory reset $name? Worlds, config, and dropins are wiped.',
+          defaultValue: false,
+        );
+        if (confirmed) {
+          await _shellRun(<String>['instance', 'reset', name]);
+          await Ui.pause();
+        }
+      case InstanceModalAction.delete:
+        final bool confirmed = await Ui.confirm(
+          'Delete instance $name permanently?',
+          defaultValue: false,
+        );
+        if (confirmed) {
+          await _shellRun(<String>['instance', 'delete', name]);
+        }
+    }
+  }
+
+  /// Every workspace action the card, the workspace bar, and the `n`/`b`
+  /// keys can dispatch. Same suspension contract as
+  /// [_monitorInstanceAction].
+  Future<void> _monitorWorkspaceAction(WorkspaceModalAction action) async {
+    switch (action) {
+      case WorkspaceModalAction.buildTuning:
+        await _buildAndTuningMenu();
+      case WorkspaceModalAction.pullBuilds:
+        await _refreshAllBuilds();
+      case WorkspaceModalAction.createMany:
+        await _createMany();
+      case WorkspaceModalAction.startAll:
+        await _startAllStopped(await Ui.shielded(_loadInstanceRows));
+      case WorkspaceModalAction.stopAll:
+        await _stopAllRunning(await Ui.shielded(_loadInstanceRows));
+      case WorkspaceModalAction.wipe:
+        await _wipeEverything();
+      case WorkspaceModalAction.newInstance:
+        await _createInstance();
+    }
+  }
+
   /// The metrics feed behind the sampler: one `runtime metrics` capture per
   /// sweep. A failed capture yields no rows rather than an error, so the
   /// dashboard keeps its last good readings and tries again next sweep.
@@ -257,9 +356,13 @@ class InteractiveWizard {
   }
 
   /// Assembles the workspace view around the rings the sampler already
-  /// holds. Capturing metrics is the sampler's job; this only adds the two
-  /// workspace facts the frame needs on top of them.
-  Future<MonitorSnapshot> _monitorSnapshot(MetricsSampler sampler) async {
+  /// holds. Capturing metrics is the sampler's job; this only adds the
+  /// workspace facts the frame needs on top of them — [flags] among them,
+  /// tee'd off the same capture the sampler parsed.
+  Future<MonitorSnapshot> _monitorSnapshot(
+    MetricsSampler sampler,
+    Map<String, InstanceFlags> flags,
+  ) async {
     final List<String> instances = sampler.instances;
     return MonitorSnapshot(
       instances: instances,
@@ -267,6 +370,7 @@ class InteractiveWizard {
         for (final String instance in instances)
           instance: sampler.history(instance),
       },
+      flags: flags,
       consumerName: _activeConsumer().shortName,
       activeInstance: await _activeInstance(),
     );
@@ -287,321 +391,7 @@ class InteractiveWizard {
     return TrendStore(Directory(p.join(trimmed, 'state', 'trends')));
   }
 
-  /// Workspace-level actions the monitor has no key of its own for. Reached
-  /// with `b` from the dashboard.
-  Future<void> _workspaceMenu() async {
-    while (true) {
-      final List<_InstanceRow> rows = await Ui.spin(
-        'Loading servers',
-        _loadInstanceRows,
-      );
-      final int stopped = rows
-          .where((_InstanceRow r) => r.state == RuntimeState.stopped)
-          .length;
-      final int running = rows.length - stopped;
-
-      final List<MenuEntry<_WorkspaceAct>> entries = <MenuEntry<_WorkspaceAct>>[
-        const MenuEntry<_WorkspaceAct>(
-          'Build & tuning',
-          value: _WorkspaceAct.buildMenu,
-          shortcut: 'b',
-          detail: 'jars, repos, sync, JVM',
-        ),
-        const MenuEntry<_WorkspaceAct>(
-          'Pull latest builds',
-          value: _WorkspaceAct.pullBuilds,
-          shortcut: 'p',
-          detail: 'refresh every platform jar, spigot included',
-        ),
-        const MenuEntry<_WorkspaceAct>(
-          'Create many',
-          value: _WorkspaceAct.createMany,
-          shortcut: 'm',
-          detail: 'one server per type, all at once',
-        ),
-        if (stopped > 1)
-          MenuEntry<_WorkspaceAct>(
-            'Start all stopped',
-            value: _WorkspaceAct.startAll,
-            shortcut: 's',
-            detail: '$stopped instances',
-          ),
-        if (running > 1)
-          MenuEntry<_WorkspaceAct>(
-            'Stop all running',
-            value: _WorkspaceAct.stopAll,
-            shortcut: 'k',
-            detail: '$running instances',
-          ),
-        const MenuEntry<_WorkspaceAct>.separator(),
-        const MenuEntry<_WorkspaceAct>(
-          'Wipe everything',
-          value: _WorkspaceAct.wipeEverything,
-          labelColor: Ansi.red,
-          detail: 'delete all instances across all consumers',
-        ),
-        const MenuEntry<_WorkspaceAct>('Back', value: _WorkspaceAct.back),
-      ];
-
-      _WorkspaceAct action;
-      try {
-        action = await menuSelect<_WorkspaceAct>('Workspace', entries);
-      } on PromptBackNavigation {
-        return;
-      }
-
-      switch (action) {
-        case _WorkspaceAct.buildMenu:
-          await _runStep(_buildAndTuningMenu);
-        case _WorkspaceAct.pullBuilds:
-          await _runStep(_refreshAllBuilds);
-        case _WorkspaceAct.createMany:
-          await _runStep(_createMany);
-        case _WorkspaceAct.startAll:
-          await _runStep(
-            () async => _startAllStopped(await Ui.shielded(_loadInstanceRows)),
-          );
-        case _WorkspaceAct.stopAll:
-          await _runStep(
-            () async => _stopAllRunning(await Ui.shielded(_loadInstanceRows)),
-          );
-        case _WorkspaceAct.wipeEverything:
-          await _runStep(_wipeEverything);
-        case _WorkspaceAct.back:
-          return;
-      }
-    }
-  }
-
   // ─── Instance actions ────────────────────────────────────────────────
-
-  Future<void> _instanceMenu(String name) async {
-    final _InstanceRow? row = await Ui.shielded(() => _loadInstanceRow(name));
-    if (row == null) {
-      return;
-    }
-    final String? active = await Ui.shielded(_activeInstance);
-    final bool isActive = name == active;
-    final bool isStopped = row.state == RuntimeState.stopped;
-    final bool isRunning = row.state == RuntimeState.running;
-    final bool isolated = await Ui.shielded(() => _isolated(name));
-    final bool locked = await Ui.shielded(() => _locked(name));
-
-    final List<MenuEntry<_InstanceAct>> entries = <MenuEntry<_InstanceAct>>[];
-    if (isStopped) {
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Start',
-          value: _InstanceAct.startWithConsole,
-          shortcut: 'o',
-          detail: 'opens console',
-        ),
-      );
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Start in background',
-          value: _InstanceAct.startBackground,
-        ),
-      );
-    } else {
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Open console',
-          value: _InstanceAct.console,
-          shortcut: 'o',
-          detail: 'esc detaches, server keeps running',
-        ),
-      );
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Restart',
-          value: _InstanceAct.restart,
-          shortcut: 't',
-        ),
-      );
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Stop',
-          value: _InstanceAct.stop,
-          shortcut: 'x',
-        ),
-      );
-    }
-    entries.add(const MenuEntry<_InstanceAct>.separator());
-    if (!isActive) {
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Make active',
-          value: _InstanceAct.activate,
-        ),
-      );
-    }
-    entries.add(
-      const MenuEntry<_InstanceAct>('Set port', value: _InstanceAct.port),
-    );
-    entries.add(
-      const MenuEntry<_InstanceAct>(
-        'Apply styled MOTD',
-        value: _InstanceAct.motd,
-      ),
-    );
-    entries.add(
-      const MenuEntry<_InstanceAct>(
-        'Open folder',
-        value: _InstanceAct.openFolder,
-        shortcut: 'f',
-        detail: 'opens the instance directory',
-      ),
-    );
-    if (isStopped) {
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Update game version',
-          value: _InstanceAct.update,
-          shortcut: 'u',
-          detail: 'pick a new MC version (risky)',
-        ),
-      );
-    }
-    entries.add(
-      MenuEntry<_InstanceAct>(
-        isolated ? 'Mark as shared' : 'Mark as isolated',
-        value: _InstanceAct.toggleIsolated,
-        detail: isolated
-            ? 'rewire dropins, iris, shared ops'
-            : 'unsubscribe from dropins, iris, shared ops',
-      ),
-    );
-    entries.add(
-      locked
-          ? const MenuEntry<_InstanceAct>(
-              'Unlock (PIN)',
-              value: _InstanceAct.unlock,
-              detail: 're-enable delete and factory reset',
-            )
-          : const MenuEntry<_InstanceAct>(
-              'Lock (set PIN)',
-              value: _InstanceAct.lock,
-              detail: 'block delete and factory reset',
-            ),
-    );
-    if (isStopped && !locked) {
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Factory reset',
-          value: _InstanceAct.reset,
-          labelColor: Ansi.red,
-          detail: 'wipes worlds, config, dropins',
-        ),
-      );
-      entries.add(
-        const MenuEntry<_InstanceAct>(
-          'Delete',
-          value: _InstanceAct.delete,
-          labelColor: Ansi.red,
-          detail: 'removes the instance entirely',
-        ),
-      );
-    }
-    entries.add(const MenuEntry<_InstanceAct>.separator());
-    entries.add(
-      const MenuEntry<_InstanceAct>('Back', value: _InstanceAct.back),
-    );
-
-    final String badge =
-        '${animatedStateGlyph(row.state, 1)} ${row.state.name} on :${row.port}'
-        '${isActive ? ' · active' : ''}'
-        '${isolated ? ' · isolated' : ''}'
-        '${locked ? ' · locked' : ''}';
-    if (!isRunning && !isStopped) {
-      Ui.note('Server is ${row.state.name}; the dashboard updates on refresh.');
-    }
-    final _InstanceAct action = await menuSelect<_InstanceAct>(
-      '$name  ${Ansi.style(badge, _stateColor(row.state))}',
-      entries,
-    );
-
-    switch (action) {
-      case _InstanceAct.startWithConsole:
-        await _shellRun(<String>['runtime', 'start', name]);
-        return;
-      case _InstanceAct.startBackground:
-        Ui.doing('Starting $name in background');
-        final int code = await _shellRun(<String>[
-          'runtime',
-          'start',
-          name,
-          '--no-console',
-        ]);
-        if (code != 0) {
-          await Ui.pause();
-        }
-        return;
-      case _InstanceAct.console:
-        await _shellRun(<String>['runtime', 'console', name]);
-        return;
-      case _InstanceAct.restart:
-        Ui.doing('Restarting $name');
-        // runtime restart stops, starts, and attaches the console; if start
-        // fails the user gets a chance to read the error instead of being
-        // bounced straight back to the dashboard.
-        final int code = await _shellRun(<String>['runtime', 'restart', name]);
-        if (code != 0) {
-          await Ui.pause();
-        }
-        return;
-      case _InstanceAct.stop:
-        Ui.doing('Stopping $name');
-        await _shellRun(<String>['runtime', 'stop', name]);
-        return;
-      case _InstanceAct.activate:
-        await _shellRun(<String>['instance', 'activate', name]);
-        return;
-      case _InstanceAct.port:
-        await _setInstancePort(name);
-        return;
-      case _InstanceAct.motd:
-        await _shellRun(<String>['instance', 'motd-style', name]);
-        await Ui.pause();
-        return;
-      case _InstanceAct.openFolder:
-        await _shellRun(<String>['instance', 'open', name]);
-        return;
-      case _InstanceAct.update:
-        await _updateInstance(name);
-        return;
-      case _InstanceAct.toggleIsolated:
-        await _toggleIsolated(name, currentlyIsolated: isolated);
-        return;
-      case _InstanceAct.lock:
-        await _lockInstance(name);
-        return;
-      case _InstanceAct.unlock:
-        await _unlockInstance(name);
-        return;
-      case _InstanceAct.reset:
-        final bool confirmed = await Ui.confirm(
-          'Factory reset $name? Worlds, config, and dropins are wiped.',
-          defaultValue: false,
-        );
-        if (confirmed) {
-          await _shellRun(<String>['instance', 'reset', name]);
-          await Ui.pause();
-        }
-        return;
-      case _InstanceAct.delete:
-        final bool confirmed = await Ui.confirm(
-          'Delete instance $name permanently?',
-          defaultValue: false,
-        );
-        if (confirmed) {
-          await _shellRun(<String>['instance', 'delete', name]);
-        }
-        return;
-      case _InstanceAct.back:
-        return;
-    }
-  }
 
   Future<void> _quickRestart(String name) async {
     final _InstanceRow? row = await Ui.shielded(() => _loadInstanceRow(name));
@@ -899,24 +689,6 @@ class InteractiveWizard {
       '--force',
     ]);
     await Ui.pause();
-  }
-
-  Future<bool> _isolated(String name) async {
-    final String? raw = await passthrough.captureStdoutLine(<String>[
-      'instance',
-      'isolated',
-      name,
-    ]);
-    return (raw ?? '').trim().toLowerCase() == 'true';
-  }
-
-  Future<bool> _locked(String name) async {
-    final String? raw = await passthrough.captureStdoutLine(<String>[
-      'instance',
-      'locked',
-      name,
-    ]);
-    return (raw ?? '').trim().toLowerCase() == 'true';
   }
 
   Future<void> _lockInstance(String name) async {
@@ -1721,46 +1493,6 @@ class InteractiveWizard {
       _ => type,
     };
   }
-
-  String _stateColor(RuntimeState state) {
-    return switch (state) {
-      RuntimeState.running => Ansi.green,
-      RuntimeState.starting ||
-      RuntimeState.stopping ||
-      RuntimeState.restarting => Ansi.yellow,
-      RuntimeState.stopped => Ansi.gray,
-    };
-  }
-}
-
-enum _InstanceAct {
-  startWithConsole,
-  startBackground,
-  console,
-  restart,
-  stop,
-  activate,
-  port,
-  motd,
-  openFolder,
-  update,
-  toggleIsolated,
-  lock,
-  unlock,
-  reset,
-  delete,
-  back,
-}
-
-/// Workspace-level actions the monitor has no key of its own for.
-enum _WorkspaceAct {
-  buildMenu,
-  pullBuilds,
-  createMany,
-  startAll,
-  stopAll,
-  wipeEverything,
-  back,
 }
 
 enum _BuildAct {
