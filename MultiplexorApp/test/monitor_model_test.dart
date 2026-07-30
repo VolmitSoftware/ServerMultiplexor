@@ -734,6 +734,7 @@ void main() {
         'g consoles',
         'n new',
         'b build',
+        'w workspace',
         'c consumer',
         'r range',
         'q quit',
@@ -751,10 +752,20 @@ void main() {
     });
 
     test('shows every footer hint once the terminal is wide enough', () {
-      final List<String> rows = stripAll(frameOf(columns: 132).rows);
+      final List<String> rows = stripAll(frameOf(columns: 200).rows);
       expect(rows.last, contains('g consoles'));
       expect(rows.last, contains('b build'));
+      expect(rows.last, contains('w workspace'));
       expect(rows.last, contains('r range'));
+    });
+
+    test('keeps the workspace card hint at the reference width', () {
+      // 132x40 is the width the dashboard is designed against, and `w` is
+      // the only key that reaches the workspace card — it outranks `b build`,
+      // which the card itself carries.
+      final List<String> rows = stripAll(frameOf(columns: 132).rows);
+      expect(rows.last, contains('w workspace'));
+      expect(rows.last, isNot(contains('b build')));
     });
 
     test('inlays the wordmark as a gradient run under a truecolor theme', () {

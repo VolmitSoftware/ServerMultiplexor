@@ -28,7 +28,7 @@ The landing view is a `MULTIPLEXOR` header, a KPI strip (`FLEET` servers-up and 
 
 Everything on those bars is a button. Hovering lights a chip in the accent tone; a click activates on release, so a press that drifts onto another chip before it lifts does nothing. Chips that cannot apply — `RESTART` on a stopped server, `DELETE` on a locked one — are drawn faint and are not clickable at all. The range badge on the selected panel (`running · 15m`) is a button too, and cycles the chart window.
 
-Clicking a row in `SERVERS` selects it; clicking the selected row again opens its **card**, as do `enter` and `[ MORE ]`. `[ MORE ]` on the workspace bar opens the workspace card instead: build & tuning, pull builds, create many, start all, stop all, wipe. A card is modal — click a button to run it, click elsewhere on the card for nothing, click outside it or press `esc` to dismiss. Nothing behind a card is clickable while it is up.
+Clicking a row in `SERVERS` selects it; clicking the selected row again opens its **card**, as do `enter` and `[ MORE ]`. `[ MORE ]` on the workspace bar, or `w`, opens the workspace card instead: build & tuning, pull builds, create many, start all, stop all, wipe. A card is modal — click a button to run it, click elsewhere on the card for nothing, click outside it or press `esc` to dismiss. Nothing behind a card is clickable while it is up.
 
 Mouse support needs a terminal that reports SGR mouse events, which every current one does (Terminal.app, iTerm2, kitty, WezTerm, tmux, the VS Code terminal). Hover uses all-motion reporting (`?1003`); a terminal that ignores that still gets every click, just without the highlight. Reporting is turned off again on exit, so the terminal is left as it was found.
 
@@ -41,6 +41,7 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 | `g` | Open every running console in a tmux grid. |
 | `n` | Create a new instance. |
 | `b` | Build & tuning, directly. The other workspace actions live on the workspace card, behind `[ MORE ]`. |
+| `w` | Open the workspace card — the keyboard twin of `[ MORE ]` on the workspace bar. Landing view only. |
 | `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
 | `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h`. |
 | `q`, `ctrl-c` | Quit. |

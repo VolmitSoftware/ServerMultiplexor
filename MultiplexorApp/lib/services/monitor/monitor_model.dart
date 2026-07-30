@@ -34,15 +34,21 @@ const String _hintSeparator = ' · ';
 /// a terminal wide enough for all of it.
 const String _monitorFooterHints =
     '[enter] open · d detail · R restart · S stop · X kill · O console · '
-    'g consoles · n new · b build · c consumer · r range · q quit';
+    'g consoles · n new · b build · w workspace · c consumer · r range · '
+    'q quit';
 
 /// The order hints are given up in when the terminal is too narrow for all
 /// of them (comma-separated). A hint always leaves whole — a footer clipped
 /// mid-word hides a binding without admitting to it — and the three absent
 /// here (`[enter] open`, `d detail`, `q quit`) are never dropped at all.
+///
+/// `b build` goes first even though `w workspace` was added after it: the
+/// workspace card `w` raises carries Build & tuning itself, so giving up the
+/// shortcut costs a keystroke, while giving up `w` would leave the card
+/// reachable by mouse alone.
 const String _footerDropOrder =
-    'b build,c consumer,n new,g consoles,O console,X kill,S stop,'
-    'R restart,r range';
+    'b build,w workspace,c consumer,n new,g consoles,O console,X kill,'
+    'S stop,R restart,r range';
 
 /// The selection action bar's chips. Which set is drawn follows the
 /// selection's own state: you cannot stop what is not running, and starting

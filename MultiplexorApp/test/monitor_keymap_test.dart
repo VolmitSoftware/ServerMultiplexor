@@ -58,6 +58,10 @@ void main() {
       expect(monitorActionForEvent(typed('q')), MonitorAction.quit);
     });
 
+    test('maps w to the workspace card, the keyboard twin of [ MORE ]', () {
+      expect(monitorActionForEvent(typed('w')), MonitorAction.workspaceCard);
+    });
+
     test('maps ctrl+c to quit so the loop can exit cleanly in raw mode', () {
       expect(
         monitorActionForEvent(const TermEvent(TermEventKind.ctrlC)),
@@ -73,6 +77,7 @@ void main() {
       expect(monitorActionForEvent(typed('B')), MonitorAction.none);
       expect(monitorActionForEvent(typed('C')), MonitorAction.none);
       expect(monitorActionForEvent(typed('Q')), MonitorAction.none);
+      expect(monitorActionForEvent(typed('W')), MonitorAction.none);
       expect(monitorActionForEvent(typed('s')), MonitorAction.none);
       expect(monitorActionForEvent(typed('x')), MonitorAction.none);
       expect(monitorActionForEvent(typed('o')), MonitorAction.none);

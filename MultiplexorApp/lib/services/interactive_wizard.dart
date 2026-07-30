@@ -247,6 +247,7 @@ class InteractiveWizard {
       case MonitorAction.detail:
       case MonitorAction.newInstance:
       case MonitorAction.buildMenu:
+      case MonitorAction.workspaceCard:
       case MonitorAction.switchConsumer:
       case MonitorAction.cycleRange:
       case MonitorAction.refresh:

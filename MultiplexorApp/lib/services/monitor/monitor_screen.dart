@@ -856,6 +856,16 @@ class MonitorScreen {
       case MonitorAction.buildMenu:
         await _runWorkspaceAction(WorkspaceModalAction.buildTuning);
         return null;
+      case MonitorAction.workspaceCard:
+        // The keyboard twin of `[ MORE ]` on the workspace bar — and, like
+        // that chip, a landing-view affordance. The detail view draws no
+        // workspace bar, so `w` there would raise a card over a frame that
+        // offers no way to reach it by mouse.
+        if (!_detailMode) {
+          _modal = const WorkspaceModal();
+          _clearPointer();
+        }
+        return null;
       case MonitorAction.switchConsumer:
         return const MonitorSwitchConsumer();
       case MonitorAction.cycleRange:
