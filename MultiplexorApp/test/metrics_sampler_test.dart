@@ -100,48 +100,54 @@ void main() {
       },
     );
 
-    test('a second sweep appends to history rather than replacing it', () async {
-      int sweepCount = 0;
-      final MetricsSampler sampler = MetricsSampler(
-        captureMetrics: () async {
-          sweepCount++;
-          return tsvRow(name: 'survival', players: sweepCount);
-        },
-        clock: () => DateTime.utc(2026, 7, 30, 12, 0, 0),
-      );
+    test(
+      'a second sweep appends to history rather than replacing it',
+      () async {
+        int sweepCount = 0;
+        final MetricsSampler sampler = MetricsSampler(
+          captureMetrics: () async {
+            sweepCount++;
+            return tsvRow(name: 'survival', players: sweepCount);
+          },
+          clock: () => DateTime.utc(2026, 7, 30, 12, 0, 0),
+        );
 
-      await sampler.sweep();
-      await sampler.sweep();
-
-      final List<MetricSample> history = sampler.history('survival');
-      expect(history, hasLength(2));
-      expect(history[0].players, 1);
-      expect(history[1].players, 2);
-    });
-
-    test('ring truncates to ringCapacity, keeping only the newest samples', () async {
-      int sweepCount = 0;
-      final MetricsSampler sampler = MetricsSampler(
-        captureMetrics: () async {
-          sweepCount++;
-          return tsvRow(name: 'survival', players: sweepCount);
-        },
-        ringCapacity: 3,
-        clock: () => DateTime.utc(2026, 7, 30, 12, 0, 0),
-      );
-
-      for (int i = 0; i < 5; i++) {
         await sampler.sweep();
-      }
+        await sampler.sweep();
 
-      final List<MetricSample> history = sampler.history('survival');
-      expect(history, hasLength(3));
-      expect(history.map((MetricSample s) => s.players).toList(), <int>[
-        3,
-        4,
-        5,
-      ]);
-    });
+        final List<MetricSample> history = sampler.history('survival');
+        expect(history, hasLength(2));
+        expect(history[0].players, 1);
+        expect(history[1].players, 2);
+      },
+    );
+
+    test(
+      'ring truncates to ringCapacity, keeping only the newest samples',
+      () async {
+        int sweepCount = 0;
+        final MetricsSampler sampler = MetricsSampler(
+          captureMetrics: () async {
+            sweepCount++;
+            return tsvRow(name: 'survival', players: sweepCount);
+          },
+          ringCapacity: 3,
+          clock: () => DateTime.utc(2026, 7, 30, 12, 0, 0),
+        );
+
+        for (int i = 0; i < 5; i++) {
+          await sampler.sweep();
+        }
+
+        final List<MetricSample> history = sampler.history('survival');
+        expect(history, hasLength(3));
+        expect(history.map((MetricSample s) => s.players).toList(), <int>[
+          3,
+          4,
+          5,
+        ]);
+      },
+    );
 
     test(
       'an instance missing from a later sweep drops out of instances but keeps its history',
@@ -239,15 +245,18 @@ void main() {
       },
     );
 
-    test('the default clock stamps samples in UTC when clock is omitted', () async {
-      final MetricsSampler sampler = MetricsSampler(
-        captureMetrics: () async => tsvRow(name: 'survival'),
-      );
+    test(
+      'the default clock stamps samples in UTC when clock is omitted',
+      () async {
+        final MetricsSampler sampler = MetricsSampler(
+          captureMetrics: () async => tsvRow(name: 'survival'),
+        );
 
-      await sampler.sweep();
+        await sampler.sweep();
 
-      expect(sampler.latest('survival')!.ts.isUtc, isTrue);
-    });
+        expect(sampler.latest('survival')!.ts.isUtc, isTrue);
+      },
+    );
   });
 
   group('history', () {
@@ -444,10 +453,7 @@ void main() {
           'survival',
           rawSample(ts: outsideWindow, players: 1),
         );
-        await store.append(
-          'survival',
-          rawSample(ts: withinWindow, players: 2),
-        );
+        await store.append('survival', rawSample(ts: withinWindow, players: 2));
 
         final MetricsSampler sampler = MetricsSampler(
           captureMetrics: () async => '',
@@ -473,7 +479,10 @@ void main() {
         for (int i = 0; i < 5; i++) {
           await store.append(
             'survival',
-            rawSample(ts: base.add(Duration(minutes: i)), players: i),
+            rawSample(
+              ts: base.add(Duration(minutes: i)),
+              players: i,
+            ),
           );
         }
 
