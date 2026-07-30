@@ -247,6 +247,7 @@ class MonitorGlyphs {
     required this.meterFull,
     required this.meterTrack,
     required this.dash,
+    required this.check,
     required this.spark,
     required this.meterPartial,
     required this.spinner,
@@ -272,6 +273,10 @@ class MonitorGlyphs {
 
   /// Placeholder for a missing value in meters and rows.
   final String dash;
+
+  /// Marker for a settled answer — the leading glyph of every finished
+  /// prompt line.
+  final String check;
 
   /// 8-step sparkline intensity ramp, low to high.
   final String spark;
@@ -306,6 +311,9 @@ class MonitorGlyphs {
     meterFull: '█',
     meterTrack: '─',
     dash: '–',
+    // The light check, not the heavy '✔': the heavy one is emoji-presentation
+    // in several fonts and lands as two columns there.
+    check: '✓',
     spark: '▁▂▃▄▅▆▇█',
     meterPartial: <String>['▏', '▎', '▍', '▌', '▋', '▊', '▉'],
     spinner: <String>['◴', '◷', '◶', '◵'],
@@ -333,6 +341,7 @@ class MonitorGlyphs {
     // there is no color left to tell them apart.
     meterTrack: '.',
     dash: '-',
+    check: '*',
     // Starts at '_' rather than '.' for the same reason: '.' is the gap glyph
     // for a sample that never arrived, so it cannot also be the bottom of the
     // measured range.

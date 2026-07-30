@@ -24,6 +24,7 @@ Map<String, String> _singleWidthFields(MonitorGlyphs glyphs) =>
       'meterFull': glyphs.meterFull,
       'meterTrack': glyphs.meterTrack,
       'dash': glyphs.dash,
+      'check': glyphs.check,
     };
 
 void main() {
@@ -160,6 +161,10 @@ void main() {
       expect(MonitorGlyphs.ascii.dash, '-');
     });
 
+    test('check is an asterisk, not a check mark', () {
+      expect(MonitorGlyphs.ascii.check, '*');
+    });
+
     test('isAscii distinguishes the ascii set from the unicode set', () {
       expect(MonitorGlyphs.ascii.isAscii, isTrue);
       expect(MonitorGlyphs.unicode.isAscii, isFalse);
@@ -242,6 +247,10 @@ void main() {
     test('bullets distinguish on/off state', () {
       expect(MonitorGlyphs.unicode.bulletOn, '●');
       expect(MonitorGlyphs.unicode.bulletOff, '○');
+    });
+
+    test('check is a light check mark', () {
+      expect(MonitorGlyphs.unicode.check, '✓');
     });
   });
 

@@ -138,7 +138,18 @@ void main() {
         value: 'Paper',
         theme: colorTheme(),
       );
-      expect(Ansi.strip(line), '✔ Server platform · Paper');
+      expect(Ansi.strip(line), '✓ Server platform · Paper');
+    });
+
+    test('marks the answer with the theme glyph, not a hardcoded check', () {
+      final MonitorTheme ascii = MonitorTheme.plainAscii();
+      final String line = renderPromptResult(
+        prompt: 'Server platform',
+        value: 'Paper',
+        theme: ascii,
+      );
+      expect(line, '${ascii.glyphs.check} Server platform · Paper');
+      expect(line.startsWith('*'), isTrue);
     });
 
     test('tones the value with the theme, or with an override', () {
@@ -164,7 +175,7 @@ void main() {
         value: 'paper-26.2',
         theme: MonitorTheme.plain(),
       );
-      expect(line, '✔ Instance name · paper-26.2');
+      expect(line, '✓ Instance name · paper-26.2');
       expect(line, isNot(contains('\x1B')));
     });
 
@@ -176,7 +187,7 @@ void main() {
         theme: theme,
         valueTone: theme.faint,
       );
-      expect(line, '✔ Wipe every instance? · no');
+      expect(line, '✓ Wipe every instance? · no');
       expect(line, isNot(contains('\x1B')));
     });
   });

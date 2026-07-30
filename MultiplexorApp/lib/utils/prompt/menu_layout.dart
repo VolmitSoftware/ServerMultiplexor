@@ -238,19 +238,21 @@ String _menuCallerText(String text, MonitorTheme theme) {
   return text.contains('\x1B') ? text : theme.paint(text, theme.faint);
 }
 
-/// The line a finished prompt leaves in its place: `✔ Prompt · value`.
+/// The line a finished prompt leaves in its place: `✓ Prompt · value`.
 ///
 /// Shared by every prompt that answers in a line — the menu, line input,
 /// secrets, confirmations — so they all report the same shape. [valueTone]
 /// overrides the tone of [value] (a declined confirmation is faint, not ok).
-/// A colorless theme emits the same text with no escape bytes at all.
+/// A colorless theme emits the same text with no escape bytes at all, and an
+/// ascii theme swaps the check for `*` rather than emitting a rune the
+/// terminal cannot draw.
 String renderPromptResult({
   required String prompt,
   required String value,
   required MonitorTheme theme,
   String? valueTone,
 }) =>
-    '${theme.paint('✔', theme.ok)} '
+    '${theme.paint(theme.glyphs.check, theme.ok)} '
     '${theme.paint(prompt, '${theme.bold}${theme.text}')} '
     '${theme.paint('·', theme.faint)} '
     '${theme.paint(value, valueTone ?? theme.ok)}';
