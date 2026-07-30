@@ -6749,12 +6749,19 @@ class NativeCommandService {
       }
     }
 
+    // A concurrent `runtime stop` deletes the pid file, so it can vanish
+    // between the existence check and the mtime read. Uptime is best-effort
+    // telemetry: losing that race degrades to "unknown" instead of throwing.
     final pidFile = File(_runtimeServerPidFile(profile, instance));
-    if (pidFile.existsSync()) {
-      final delta = DateTime.now().difference(pidFile.lastModifiedSync());
-      if (!delta.isNegative) {
-        return delta;
+    try {
+      if (pidFile.existsSync()) {
+        final delta = DateTime.now().difference(pidFile.lastModifiedSync());
+        if (!delta.isNegative) {
+          return delta;
+        }
       }
+    } on FileSystemException {
+      return null;
     }
     return null;
   }
@@ -8767,9 +8774,16 @@ class NativeCommandService {
         // Anything that is not stopped may still own a server process, so
         // uptime and the pid are worth resolving for those states too.
         final stopped = state == RuntimeState.stopped;
-        final uptimeFuture = stopped
+        // Launched here but awaited after the ping, so it may complete while
+        // nothing is listening. An error at that moment goes to the root zone
+        // and tears down the isolate, which would kill the wizard polling this
+        // once a second, so it is consumed at the launch site.
+        final Future<Duration?> uptimeFuture = stopped
             ? Future<Duration?>.value()
-            : _runtimeUptime(profile, name);
+            : _runtimeUptime(
+                profile,
+                name,
+              ).catchError((Object _) => null);
         MinecraftPingResult? ping;
         double? tps;
         if (live) {
