@@ -1,5 +1,6 @@
 import 'package:multiplexor/services/monitor/metric_sample.dart';
 import 'package:multiplexor/services/monitor/monitor_detail_model.dart';
+import 'package:multiplexor/services/monitor/monitor_frame_util.dart';
 import 'package:multiplexor/services/monitor/monitor_model.dart';
 import 'package:multiplexor/services/runtime_state.dart';
 import 'package:multiplexor/utils/terminal/ansi.dart';

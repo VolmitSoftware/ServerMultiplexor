@@ -4,7 +4,7 @@ import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
 import 'metric_sample.dart';
-import 'monitor_model.dart';
+import 'monitor_frame_util.dart';
 
 /// Rows the detail header panel occupies: one content row plus its borders.
 const int _headerRows = 3;

@@ -13,6 +13,7 @@ import '../../services/app_context.dart';
 import '../../services/interactive_wizard.dart';
 import '../../services/monitor/metric_sample.dart';
 import '../../services/monitor/metrics_sampler.dart';
+import '../../services/monitor/monitor_frame_util.dart';
 import '../../services/monitor/monitor_keymap.dart';
 import '../../services/monitor/monitor_model.dart';
 import '../../utils/process_runner.dart';

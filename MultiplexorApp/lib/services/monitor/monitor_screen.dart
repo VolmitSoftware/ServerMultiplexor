@@ -1,8 +1,9 @@
 /// The full-screen monitoring dashboard's event loop.
 ///
 /// Everything that can be pure lives elsewhere — key bindings in
-/// `monitor_keymap.dart`, frame layout in `monitor_model.dart` and
-/// `monitor_detail_model.dart`, sampling in `metrics_sampler.dart`. What is
+/// `monitor_keymap.dart`, frame layout in `monitor_model.dart`,
+/// `monitor_detail_model.dart` and their shared `monitor_frame_util.dart`,
+/// sampling in `metrics_sampler.dart`. What is
 /// left here is the part that cannot be: owning the terminal (alternate
 /// screen, raw mode, mouse reporting), driving a 250 ms heartbeat, and
 /// handing the terminal back to legacy flows and reclaiming it afterwards.
