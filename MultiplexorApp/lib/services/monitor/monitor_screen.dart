@@ -21,12 +21,28 @@ import 'monitor_detail_model.dart';
 import 'monitor_keymap.dart';
 import 'monitor_model.dart';
 
-/// The event-loop heartbeat. Also the input poll timeout: no [Timer] drives
-/// this screen, the blocking read's own deadline does.
-const Duration _tick = Duration(milliseconds: 250);
+/// How long each iteration waits for input. Together with [_yieldWindow] this
+/// is the heartbeat: no [Timer] drives this screen, the blocking read's own
+/// deadline does.
+const Duration _readTimeout = Duration(milliseconds: 240);
 
-/// Metrics are swept every eighth heartbeat, i.e. about every two seconds.
-const int _sweepEveryTicks = 8;
+/// The slice of each iteration handed back to the VM's event loop. It has to
+/// be non-zero: a zero-duration delay resumes this loop at the head of the
+/// event queue, which advances a pending async chain by only one step per
+/// tick, so a sweep of N instances would need N-plus ticks to finish. A 10 ms
+/// window lets those chains run to completion while keeping the tick at the
+/// intended ~250 ms.
+const Duration _yieldWindow = Duration(milliseconds: 10);
+
+/// How often metrics are swept, measured on the wall clock rather than in
+/// iterations: held keys and trackpad scrolling produce iterations, and
+/// neither should turn into a sweep storm.
+const Duration _sweepInterval = Duration(seconds: 2);
+
+/// How long each spinner glyph is shown. The spinner index comes from
+/// elapsed time for the same reason the sweep does — so it animates at a
+/// steady rate no matter how much input arrives.
+const Duration _spinnerPeriod = Duration(milliseconds: 250);
 
 /// The detail view re-reads its log tail no more than once per second,
 /// however fast frames are drawn.
@@ -128,6 +144,13 @@ class MonitorScreen {
   int _lastColumns = -1;
   int _lastLines = -1;
 
+  /// When this run started, the origin the spinner's phase is measured from.
+  DateTime _startedAt = DateTime.now();
+
+  /// When a sweep was last asked for — the wall clock the sweep cadence is
+  /// paced against.
+  DateTime _lastSweepKick = DateTime.fromMillisecondsSinceEpoch(0);
+
   bool _detailMode = false;
   String _detailInstance = '';
   List<String> _logLines = const <String>[];
@@ -157,13 +180,21 @@ class MonitorScreen {
     _snapshot = await loadSnapshot();
     _resetViewState();
 
-    io.installSignalRestore();
-    _enterScreen(io);
     try {
+      // Inside the try: taking the terminal is itself a sequence of writes
+      // and mode changes, and one of them throwing must still leave the
+      // restore path to run.
+      _enterScreen(io);
       return await _loop(io);
     } finally {
-      _leaveScreen(io);
-      io.restoreTerminal();
+      // restoreTerminal() is the backstop for the whole session (echo, line
+      // mode, SGR, the signal watch), so a failure while stepping off the
+      // alternate screen must not be allowed to skip it.
+      try {
+        _leaveScreen(io);
+      } finally {
+        io.restoreTerminal();
+      }
     }
   }
 
@@ -180,10 +211,18 @@ class MonitorScreen {
     _detailInstance = '';
     _logLines = const <String>[];
     _logReadAt = null;
+    _startedAt = DateTime.now();
     _clampSelection();
   }
 
   void _enterScreen(TermIo io) {
+    // Re-armed on every entry, not once per run: the legacy flows a
+    // suspension hands the terminal to call restoreTerminal() in their own
+    // cleanup, which cancels this watch. Without re-arming, the dashboard
+    // would come back from its first suspension with no way to step off the
+    // alternate screen on a signal. The install is `??=`-guarded, so
+    // repeating it costs nothing.
+    io.installSignalRestore();
     io.setRawMode(true);
     stdout.write(_enterAltScreen);
     io.altScreenActive = true;
@@ -205,15 +244,14 @@ class MonitorScreen {
     while (true) {
       TermEvent? event;
       try {
-        event = io.readEventTimeout(_tick);
+        event = io.readEventTimeout(_readTimeout);
       } on TermInputUnavailable {
         // stdin died under us (terminal closed, session detached): there is
         // no dashboard left to drive.
         return const MonitorQuit();
       }
 
-      _frame += 1;
-      if (_frame % _sweepEveryTicks == 0) {
+      if (DateTime.now().difference(_lastSweepKick) >= _sweepInterval) {
         _kickRefresh();
       }
 
@@ -230,9 +268,9 @@ class MonitorScreen {
       // The read and the render are both synchronous, so an idle dashboard
       // would spin here without ever handing control back to the VM: no
       // sweep would ever complete, no snapshot would ever land, and the
-      // SIGINT watcher would never fire. One zero-duration delay per tick
-      // drains everything the event loop has queued up.
-      await Future<void>.delayed(Duration.zero);
+      // SIGINT watcher would never fire. This window is what lets all of
+      // them run — see [_yieldWindow] for why it is not zero.
+      await Future<void>.delayed(_yieldWindow);
     }
   }
 
@@ -250,7 +288,14 @@ class MonitorScreen {
     }
 
     _clampSelection();
-    final DateTime now = DateTime.now().toUtc();
+    final DateTime wallClock = DateTime.now();
+    // Phase from elapsed time, not from an iteration count: a held key or a
+    // trackpad flick produces iterations far faster than 250 ms and would
+    // otherwise spin the spinner at input rate.
+    _frame =
+        wallClock.difference(_startedAt).inMilliseconds ~/
+        _spinnerPeriod.inMilliseconds;
+    final DateTime now = wallClock.toUtc();
     final List<String> rows = _detailMode
         ? buildDetailFrame(
             instance: _detailInstance,
@@ -355,7 +400,12 @@ class MonitorScreen {
   /// Fires a sweep and a snapshot reload without waiting for either: a slow
   /// capture must not stall the heartbeat. Both are dropped if a refresh is
   /// already running.
+  ///
+  /// The cadence timestamp moves even on a dropped kick, so a capture that
+  /// runs longer than [_sweepInterval] is followed by a gap rather than
+  /// being re-fired on the very next tick.
   void _kickRefresh() {
+    _lastSweepKick = DateTime.now();
     if (_refreshing) {
       return;
     }
@@ -390,18 +440,25 @@ class MonitorScreen {
     }
     _logReadAt = now;
 
-    final String? logPath = _latestFor(_detailInstance)?.logPath;
+    final String instance = _detailInstance;
+    final String? logPath = _latestFor(instance)?.logPath;
     if (logPath == null || logPath.isEmpty) {
       _logLines = const <String>['no log yet'];
       return;
     }
     _readingLog = true;
-    unawaited(_readLogTailInto(logPath));
+    unawaited(_readLogTailInto(instance, logPath));
   }
 
-  Future<void> _readLogTailInto(String logPath) async {
+  Future<void> _readLogTailInto(String instance, String logPath) async {
     try {
-      _logLines = await readLogTail(logPath, _logTailLines);
+      final List<String> lines = await readLogTail(logPath, _logTailLines);
+      if (!_detailMode || _detailInstance != instance) {
+        // The view moved on while the read was in flight. Publishing now
+        // would put one server's log under another server's header.
+        return;
+      }
+      _logLines = lines;
     } catch (_) {
       // Unreadable right now (rotated, permissions): keep showing the last
       // tail we got rather than blanking the panel.
@@ -536,10 +593,14 @@ class MonitorScreen {
 
   Future<void> _runQuickAction(MonitorAction action) async {
     final String? target = _actionTarget();
-    if (target == null) {
+    // The consoles grid is a workspace-level view, not a per-instance
+    // command: it opens with or without a selection, and the name is only a
+    // hint about which pane to focus. Every other quick action needs a
+    // target and does nothing without one.
+    if (target == null && action != MonitorAction.consolesGrid) {
       return;
     }
-    await _suspended(() => quickAction(target, action));
+    await _suspended(() => quickAction(target ?? '', action));
   }
 
   /// Hands the terminal back for [flow] and takes it again afterwards.
