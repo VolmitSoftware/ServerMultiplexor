@@ -78,6 +78,46 @@ MonitorSnapshot twoServers({String? active = 'alpha'}) => MonitorSnapshot(
 List<String> stripAll(List<String> rows) =>
     rows.map(Ansi.strip).toList(growable: false);
 
+/// Asserts [hits] and the rendered [rows] agree in both directions: every
+/// hit points at the row its own instance was drawn on (name starting at
+/// column 4, right after the panel rule and the selector), and every server
+/// row that carries an instance name has exactly one hit.
+void expectHitsMatchRows(
+  List<String> rows,
+  List<MonitorHitRow> hits,
+  List<String> instances,
+) {
+  final Set<int> hitRows = <int>{};
+  for (final MonitorHitRow hit in hits) {
+    final String name = instances[hit.instanceIndex];
+    expect(
+      rows[hit.row].substring(4),
+      startsWith(name),
+      reason: 'hit row ${hit.row} should start instance $name at column 4',
+    );
+    expect(hitRows.add(hit.row), isTrue, reason: 'duplicate hit row');
+  }
+  expect(
+    hits.map((MonitorHitRow hit) => hit.instanceIndex).toList(),
+    List<int>.generate(hits.length, (int index) => index),
+    reason: 'hits are the first N instances, in order',
+  );
+
+  // The reverse direction: no instance row was rendered without a hit.
+  for (int row = 0; row < rows.length; row++) {
+    if (hitRows.contains(row) || rows[row].length < 5) {
+      continue;
+    }
+    for (final String name in instances) {
+      expect(
+        rows[row].substring(4),
+        isNot(startsWith(name)),
+        reason: 'row $row renders $name but has no hit',
+      );
+    }
+  }
+}
+
 void expectExactFrame(List<String> rows, int columns, int lines) {
   expect(rows.length, lines, reason: 'row count for ${columns}x$lines');
   for (int index = 0; index < rows.length; index++) {
@@ -106,6 +146,47 @@ void main() {
 
     test('falls back to a compact duration for an off-cycle range', () {
       expect(rangeLabel(const Duration(minutes: 90)), '1h 30m');
+    });
+  });
+
+  group('padMonitorFrame', () {
+    test('pads short rows and a short row list to the exact frame size', () {
+      final List<String> rows = padMonitorFrame(
+        rows: <String>['abc', ''],
+        columns: 6,
+        lines: 4,
+      );
+      expect(rows, <String>['abc   ', '      ', '      ', '      ']);
+    });
+
+    test('clips long rows and drops rows past the frame height', () {
+      final List<String> rows = padMonitorFrame(
+        rows: <String>['abcdefgh', 'ij', 'kl'],
+        columns: 4,
+        lines: 2,
+      );
+      expect(rows, <String>['abcd', 'ij  ']);
+    });
+
+    test('keeps escapes intact while measuring only visible width', () {
+      final List<String> rows = padMonitorFrame(
+        rows: <String>['\x1B[31mred\x1B[0m'],
+        columns: 5,
+        lines: 1,
+      );
+      expect(Ansi.visibleLength(rows.single), 5);
+      expect(rows.single, contains('\x1B[31m'));
+    });
+
+    test('treats negative sizes as empty rather than throwing', () {
+      expect(
+        padMonitorFrame(rows: <String>['abc'], columns: -4, lines: 2),
+        <String>['', ''],
+      );
+      expect(
+        padMonitorFrame(rows: <String>['abc'], columns: 4, lines: -1),
+        isEmpty,
+      );
     });
   });
 
@@ -302,6 +383,107 @@ void main() {
       expect(joined, contains('PING'));
     });
 
+    test('caps the bottom band so the servers panel absorbs the slack', () {
+      final List<String> rows = stripAll(
+        buildMonitorFrame(
+          snapshot: twoServers(),
+          selectedIndex: 0,
+          frame: 0,
+          columns: 132,
+          lines: 40,
+          theme: plain,
+          range: range,
+          now: now,
+        ),
+      );
+      final int bandTop = rows.indexWhere(
+        (String row) => row.contains('· TPS '),
+      );
+      expect(bandTop, greaterThan(0));
+      // Band + footer fill the rest of the frame, and the band stops at 16.
+      expect(rows.length - 1 - bandTop, 16);
+      // Everything above it belongs to the header (4) and servers panel.
+      expect(bandTop, 4 + 19);
+      expect(rows[bandTop - 1], startsWith('└'));
+    });
+
+    test('drops whole footer hints instead of clipping them at 80 columns', () {
+      const List<String> allHints = <String>[
+        '[enter] open',
+        'd detail',
+        'R restart',
+        'S stop',
+        'X kill',
+        'O console',
+        'g consoles',
+        'n new',
+        'b build',
+        'c consumer',
+        'r range',
+        'q quit',
+      ];
+      for (final int columns in <int>[80, 100, 132, 200]) {
+        final List<String> rows = stripAll(
+          buildMonitorFrame(
+            snapshot: twoServers(),
+            selectedIndex: 0,
+            frame: 0,
+            columns: columns,
+            lines: 24,
+            theme: plain,
+            range: range,
+            now: now,
+          ),
+        );
+        final String footer = rows.last.trimRight();
+        expect(footer, contains('[enter] open'), reason: 'at $columns');
+        expect(footer, contains('d detail'), reason: 'at $columns');
+        expect(footer, endsWith('q quit'), reason: 'at $columns');
+        for (final String hint in footer.split(' · ')) {
+          expect(allHints, contains(hint), reason: 'partial hint at $columns');
+        }
+      }
+    });
+
+    test('shows every footer hint once the terminal is wide enough', () {
+      final List<String> rows = stripAll(
+        buildMonitorFrame(
+          snapshot: twoServers(),
+          selectedIndex: 0,
+          frame: 0,
+          columns: 132,
+          lines: 24,
+          theme: plain,
+          range: range,
+          now: now,
+        ),
+      );
+      expect(rows.last, contains('g consoles'));
+      expect(rows.last, contains('b build'));
+      expect(rows.last, contains('r range'));
+    });
+
+    test('inlays the wordmark as a gradient run under a truecolor theme', () {
+      final List<String> rows = buildMonitorFrame(
+        snapshot: twoServers(),
+        selectedIndex: 0,
+        frame: 0,
+        columns: 132,
+        lines: 24,
+        theme: color,
+        range: range,
+        now: now,
+      );
+      expect(Ansi.strip(rows.first), contains('MULTIPLEXOR'));
+      expect(Ansi.visibleLength(rows.first), 132);
+      // A gradient is several colour runs, not the single run a plain
+      // panel title would emit.
+      expect(
+        RegExp(r'\x1B\[38;2;').allMatches(rows.first).length,
+        greaterThan(3),
+      );
+    });
+
     test('is exactly the requested size across a spread of terminal sizes', () {
       for (final List<int> size in const <List<int>>[
         <int>[80, 24],
@@ -436,19 +618,11 @@ void main() {
           now: now,
         ),
       );
-      final List<MonitorHitRow> hits = monitorServerRowHits(
-        snapshot: snapshot,
-        columns: 80,
-        lines: 24,
+      expectHitsMatchRows(
+        rows,
+        monitorServerRowHits(snapshot: snapshot, columns: 80, lines: 24),
+        snapshot.instances,
       );
-      expect(hits.length, 2);
-      for (final MonitorHitRow hit in hits) {
-        expect(
-          rows[hit.row],
-          contains(snapshot.instances[hit.instanceIndex]),
-          reason: 'hit row ${hit.row} -> ${hit.instanceIndex}',
-        );
-      }
     });
 
     test('maps rows to the instance rendered on them at 132x40', () {
@@ -465,15 +639,11 @@ void main() {
           now: now,
         ),
       );
-      final List<MonitorHitRow> hits = monitorServerRowHits(
-        snapshot: snapshot,
-        columns: 132,
-        lines: 40,
+      expectHitsMatchRows(
+        rows,
+        monitorServerRowHits(snapshot: snapshot, columns: 132, lines: 40),
+        snapshot.instances,
       );
-      expect(hits.length, 2);
-      for (final MonitorHitRow hit in hits) {
-        expect(rows[hit.row], contains(snapshot.instances[hit.instanceIndex]));
-      }
     });
 
     test('only maps the instance rows the panel actually rendered', () {
@@ -507,9 +677,7 @@ void main() {
       );
       expect(hits, isNotEmpty);
       expect(hits.length, lessThan(names.length));
-      for (final MonitorHitRow hit in hits) {
-        expect(rows[hit.row], contains(names[hit.instanceIndex]));
-      }
+      expectHitsMatchRows(rows, hits, names);
     });
 
     test('returns no hits below the floor or with no instances', () {

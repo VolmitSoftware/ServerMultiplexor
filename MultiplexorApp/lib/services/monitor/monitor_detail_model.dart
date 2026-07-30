@@ -394,8 +394,10 @@ List<String> _logPanel({
       content.add(theme.paint(logLines[index], theme.faint));
     }
   }
+  // Bottom-aligned: a short tail sits on the floor of the panel, where the
+  // newest line always is, instead of floating at its ceiling.
   while (content.length < inner) {
-    content.add('');
+    content.insert(0, '');
   }
 
   return renderPanel(

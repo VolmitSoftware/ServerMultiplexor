@@ -99,24 +99,21 @@ void main() {
       },
     );
 
-    test(
-      'when even the bare title overflows, the title itself is clipped',
-      () {
-        const String title = 'AN EXTREMELY LONG PANEL TITLE THAT CANNOT FIT';
-        final List<String> rows = renderPanel(
-          title: title,
-          content: <String>[],
-          width: 20,
-          theme: plain,
-        );
-        final String top = rows.first;
-        expect(Ansi.visibleLength(top), 20);
-        expect(top, isNot(contains(title)));
-        // Clipped title budget is width - 6.
-        final String expectedClip = Ansi.clipVisible(title, 20 - 6);
-        expect(top, contains(Ansi.strip(expectedClip)));
-      },
-    );
+    test('when even the bare title overflows, the title itself is clipped', () {
+      const String title = 'AN EXTREMELY LONG PANEL TITLE THAT CANNOT FIT';
+      final List<String> rows = renderPanel(
+        title: title,
+        content: <String>[],
+        width: 20,
+        theme: plain,
+      );
+      final String top = rows.first;
+      expect(Ansi.visibleLength(top), 20);
+      expect(top, isNot(contains(title)));
+      // Clipped title budget is width - 6.
+      final String expectedClip = Ansi.clipVisible(title, 20 - 6);
+      expect(top, contains(Ansi.strip(expectedClip)));
+    });
 
     test('content rows are wrapped and clipped/padded to width - 4', () {
       final List<String> rows = renderPanel(
@@ -302,6 +299,92 @@ void main() {
       final List<String> joined = joinBlocks(blocks);
       expect(joined[0], 'a   X');
       expect(joined[1], 'bbb  ');
+    });
+  });
+
+  group('renderPanel styledTitle', () {
+    final MonitorTheme color = MonitorTheme.detect(
+      env: const <String, String>{'COLORTERM': 'truecolor'},
+      isTty: true,
+    );
+
+    test('a styled title is inlaid verbatim, keeping its own escapes', () {
+      final String styled = color.gradientTitle('MULTIPLEXOR');
+      final List<String> rows = renderPanel(
+        title: 'MULTIPLEXOR',
+        styledTitle: styled,
+        content: <String>['body'],
+        width: 40,
+        theme: color,
+      );
+      expect(rows.first, contains(styled));
+      expect(
+        Ansi.strip(rows.first),
+        '┌─ MULTIPLEXOR ────────────────────────┐',
+      );
+    });
+
+    test(
+      'a styled title holds the width invariant, with and without a badge',
+      () {
+        for (final int width in <int>[8, 12, 20, 40, 132]) {
+          for (final String? badge in <String?>[null, '3/5 UP']) {
+            final List<String> rows = renderPanel(
+              title: 'MULTIPLEXOR',
+              styledTitle: color.gradientTitle('MULTIPLEXOR'),
+              badge: badge,
+              content: <String>['body'],
+              width: width,
+              theme: color,
+            );
+            for (final String row in rows) {
+              expect(
+                Ansi.visibleLength(row),
+                width,
+                reason: 'width=$width badge=$badge',
+              );
+            }
+          }
+        }
+      },
+    );
+
+    test('an overlong styled title is clipped by visible width', () {
+      final List<String> rows = renderPanel(
+        title: 'MULTIPLEXOR',
+        styledTitle: color.gradientTitle('MULTIPLEXOR'),
+        content: <String>[],
+        width: 12,
+        theme: color,
+      );
+      expect(Ansi.visibleLength(rows.first), 12);
+      expect(Ansi.strip(rows.first), startsWith('┌─ MULTIP'));
+    });
+
+    test('a plain theme still emits no escape bytes through styledTitle', () {
+      final List<String> rows = renderPanel(
+        title: 'MULTIPLEXOR',
+        styledTitle: plain.gradientTitle('MULTIPLEXOR'),
+        badge: '2/2 UP',
+        content: <String>['body'],
+        width: 40,
+        theme: plain,
+      );
+      expect(rows.any((String row) => row.contains('\x1B')), isFalse);
+      expect(rows.first, contains('MULTIPLEXOR'));
+    });
+
+    test('omitting styledTitle leaves the panel styling the title itself', () {
+      final List<String> styledByPanel = renderPanel(
+        title: 'HOSTS',
+        content: <String>['body'],
+        width: 30,
+        theme: color,
+      );
+      expect(
+        styledByPanel.first,
+        contains('${color.bold}${color.textStrong}HOSTS'),
+      );
     });
   });
 

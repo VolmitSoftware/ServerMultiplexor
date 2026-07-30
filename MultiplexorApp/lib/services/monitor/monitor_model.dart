@@ -8,25 +8,25 @@ import '../../utils/terminal/theme.dart';
 import '../runtime_state.dart';
 import 'metric_sample.dart';
 
-/// Narrowest terminal the dashboard will render into. Below this the frame
-/// degrades to [buildResizeRequiredFrame] rather than emitting a squeezed,
-/// misleading layout.
+/// The smallest terminal the dashboard will render into. Below either bound
+/// the frame degrades to [buildResizeRequiredFrame] rather than emitting a
+/// squeezed, misleading layout.
 const int monitorMinColumns = 80;
-
-/// Shortest terminal the dashboard will render into.
 const int monitorMinLines = 24;
 
-/// Rows the header panel occupies (two content rows plus borders) and the
-/// bare footer hint row.
+/// Rows for the header panel (two content rows plus borders) and the footer.
 const int _headerRows = 4;
 const int _footerRows = 1;
 
 /// Terminal height at or above which the bottom band (chart + host card) is
-/// drawn, and the smallest band that can carry a readable chart (two panel
-/// borders plus five plot rows). Below either the servers panel grows to
-/// fill the frame instead.
+/// drawn, the smallest band that can carry a readable chart (two panel
+/// borders plus five plot rows), and the tallest band worth drawing. Below
+/// [_bandMinRows] the servers panel takes the frame instead; above
+/// [_bandMaxRows] the extra rows go to the servers panel, where blank rows
+/// read as room for more servers rather than as a stretched host card.
 const int _bandMinLines = 30;
 const int _bandMinRows = 7;
+const int _bandMaxRows = 16;
 
 /// Bounds on a server row's elastic TPS trend, and the cells in the host
 /// card's MEM and CPU meters. The trend absorbs the slack a wide terminal
@@ -52,10 +52,22 @@ const int _tpsColumn = 4;
 const int _rowFixedColumns =
     1 + 1 + 1 + 1 + 1 + _stateColumn + 1 + _portColumn + 1 + _playersColumn;
 
-/// The footer key hints, in the order the wizard binds them.
-const String _monitorFooterHint =
+/// Separator between footer hints.
+const String _hintSeparator = ' · ';
+
+/// The footer key hints in display order — the row exactly as it renders on
+/// a terminal wide enough for all of it.
+const String _monitorFooterHints =
     '[enter] open · d detail · R restart · S stop · X kill · O console · '
-    'g grid · n new · b build · c consumer · r range · q quit';
+    'g consoles · n new · b build · c consumer · r range · q quit';
+
+/// The order hints are given up in when the terminal is too narrow for all
+/// of them (comma-separated). A hint always leaves whole — a footer clipped
+/// mid-word hides a binding without admitting to it — and the three absent
+/// here (`[enter] open`, `d detail`, `q quit`) are never dropped at all.
+const String _footerDropOrder =
+    'b build,c consumer,n new,g consoles,O console,X kill,S stop,'
+    'R restart,r range';
 
 /// Everything the dashboard needs to draw one frame: which instances exist,
 /// their metric history (chronological, oldest first), the active consumer
@@ -104,21 +116,13 @@ class MonitorHitRow {
 
 /// The short label for a chart/window [range]: the four cycled ranges get
 /// their canonical names, anything else falls back to a compact duration.
-String rangeLabel(Duration range) {
-  if (range == const Duration(minutes: 15)) {
-    return '15m';
-  }
-  if (range == const Duration(hours: 1)) {
-    return '1h';
-  }
-  if (range == const Duration(hours: 6)) {
-    return '6h';
-  }
-  if (range == const Duration(hours: 24)) {
-    return '24h';
-  }
-  return formatCompactDuration(range);
-}
+String rangeLabel(Duration range) => switch (range.inMinutes) {
+  15 => '15m',
+  60 => '1h',
+  360 => '6h',
+  1440 => '24h',
+  _ => formatCompactDuration(range),
+};
 
 /// The busy-spinner glyph for [frame] from [theme]'s glyph set.
 String monitorSpinner(MonitorTheme theme, int frame) {
@@ -136,13 +140,12 @@ List<String> padMonitorFrame({
   required int lines,
 }) {
   final int width = columns < 0 ? 0 : columns;
-  final int height = lines < 0 ? 0 : lines;
-  return List<String>.generate(height, (int index) {
-    if (index >= rows.length) {
-      return ' ' * width;
-    }
-    return Ansi.padVisible(Ansi.clipVisible(rows[index], width), width);
-  });
+  return List<String>.generate(
+    lines < 0 ? 0 : lines,
+    (int index) => index >= rows.length
+        ? ' ' * width
+        : Ansi.padVisible(Ansi.clipVisible(rows[index], width), width),
+  );
 }
 
 /// The state name for [sample], or `no data` when nothing has been sampled
@@ -199,7 +202,9 @@ class _MonitorLayout {
 
 /// Splits [lines] between the servers panel and the bottom band. The band
 /// only appears at [_bandMinLines] and above, with at least one instance,
-/// and only when both it and a non-degenerate servers panel fit.
+/// and only when both it and a non-degenerate servers panel fit. It is
+/// capped at [_bandMaxRows]: the servers panel absorbs whatever a tall
+/// terminal leaves over.
 _MonitorLayout _resolveLayout({
   required int instanceCount,
   required int lines,
@@ -212,10 +217,15 @@ _MonitorLayout _resolveLayout({
   if (lines >= _bandMinLines && instanceCount > 0) {
     final int natural = instanceCount + 2;
     final int capped = body - _bandMinRows;
-    final int panel = natural < capped ? natural : capped;
+    int panel = natural < capped ? natural : capped;
     if (panel >= 3) {
+      int band = body - panel;
+      if (band > _bandMaxRows) {
+        band = _bandMaxRows;
+        panel = body - band;
+      }
       serverPanelRows = panel;
-      bandRows = body - panel;
+      bandRows = band;
     }
   }
 
@@ -298,7 +308,7 @@ List<String> buildMonitorFrame({
         range: range,
         now: now,
       ),
-    theme.paint(_monitorFooterHint, theme.faint),
+    theme.paint(_footerHints(columns), theme.faint),
   ];
 
   return padMonitorFrame(rows: rows, columns: columns, lines: lines);
@@ -330,6 +340,20 @@ List<MonitorHitRow> monitorServerRowHits({
       instanceIndex: index,
     ),
   );
+}
+
+/// The footer hint row for a [columns]-wide frame: as many of
+/// [_monitorFooterHints] as fit, dropped whole and highest rank first, so
+/// the row never ends mid-hint and never hides `q quit`.
+String _footerHints(int columns) {
+  final List<String> shown = _monitorFooterHints.split(_hintSeparator);
+  for (final String hint in _footerDropOrder.split(',')) {
+    if (shown.join(_hintSeparator).length <= columns) {
+      break;
+    }
+    shown.remove(hint);
+  }
+  return shown.join(_hintSeparator);
 }
 
 /// The header panel: brand wordmark, spinner/consumer/clock badge, a
@@ -388,9 +412,12 @@ List<String> _headerPanel({
       '${snapshot.instances.length} SERVERS';
 
   return renderPanel(
-    // Passed plain: renderPanel styles the title itself, and double-styling
-    // would nest escapes inside the border run.
+    // The wordmark is the one title the panel does not style itself: the
+    // gradient is a caller-owned run, inlaid verbatim. At ColorDepth.none
+    // gradientTitle returns the plain text, so a plain frame stays free of
+    // escape bytes.
     title: 'MULTIPLEXOR',
+    styledTitle: theme.gradientTitle('MULTIPLEXOR'),
     badge: '${monitorSpinner(theme, frame)} ${snapshot.consumerName} $clock',
     content: <String>[summary, theme.paint(facts, theme.faint)],
     width: columns,
@@ -412,8 +439,9 @@ List<String> _serversPanel({
   final int contentRows = layout.serverContentRows;
   final List<String> content = <String>[];
 
-  // Counted the same way the header counts UP, so the badge and the
-  // roll-up row can never disagree about the same fleet.
+  // UP means non-stopped here, exactly as the header roll-up counts it, so
+  // the badge and the row above it can never disagree about the same fleet.
+  // A starting or restarting server is not down.
   int up = 0;
   for (final String instance in snapshot.instances) {
     final MetricSample? latest = snapshot.latestFor(instance);
@@ -528,14 +556,12 @@ String _serverRow({
     selected || active ? theme.textStrong : theme.text,
   );
 
-  final String glyph;
-  if (state == RuntimeState.running) {
-    glyph = theme.paint(glyphs.bulletOn, theme.ok);
-  } else if (live) {
-    glyph = theme.paint(glyphs.bulletOn, theme.warn);
-  } else {
-    glyph = theme.paint(glyphs.bulletOff, theme.faint);
-  }
+  final String glyph = live
+      ? theme.paint(
+          glyphs.bulletOn,
+          state == RuntimeState.running ? theme.ok : theme.warn,
+        )
+      : theme.paint(glyphs.bulletOff, theme.faint);
   final String stateText = theme.paint(
     _fit(monitorStateText(latest), _stateColumn),
     state == null ? theme.faint : theme.statusTone(state),
@@ -559,29 +585,23 @@ String _serverRow({
     theme.tpsTone(tps),
   );
 
-  final StringBuffer right = StringBuffer();
+  String right = tpsText;
   if (sparkCells > 0) {
-    if (live) {
-      right.write(
-        renderSparkline(
-          values: _tpsWindow(history, windowStart, windowEnd),
-          width: sparkCells,
-          theme: theme,
-          min: 0,
-          max: 20,
-        ),
-      );
-    } else {
-      right.write(theme.paint(glyphs.dash * sparkCells, theme.faint));
-    }
-    right.write(' ');
+    final String trend = live
+        ? renderSparkline(
+            values: _tpsWindow(history, windowStart, windowEnd),
+            width: sparkCells,
+            theme: theme,
+            min: 0,
+            max: 20,
+          )
+        : theme.paint(glyphs.dash * sparkCells, theme.faint);
+    right = '$trend $right';
   }
-  right.write(tpsText);
 
   final String left =
       '$selector $name $glyph $stateText $portText $playersText';
-  final int rightWidth = Ansi.visibleLength(right.toString());
-  final int leftWidth = inner - rightWidth - 1;
+  final int leftWidth = inner - Ansi.visibleLength(right) - 1;
   if (leftWidth <= 0) {
     return Ansi.clipVisible(left, inner);
   }
@@ -664,9 +684,9 @@ List<String> _hostCard({
 }) {
   int? peakRss;
   for (final MetricSample sample in history) {
-    final int? rss = sample.rssBytes;
-    if (rss != null && (peakRss == null || rss > peakRss)) {
-      peakRss = rss;
+    final int? seen = sample.rssBytes;
+    if (seen != null && (peakRss == null || seen > peakRss)) {
+      peakRss = seen;
     }
   }
   final int? rss = latest?.rssBytes;
@@ -679,6 +699,11 @@ List<String> _hostCard({
       : (cpu / 100).clamp(0.0, 1.0).toDouble();
   final int? uptime = latest?.uptimeSeconds;
   final int? latency = latest?.latencyMs;
+  // A blank version string is missing data, not a version.
+  final String? version = latest?.version;
+  final String versionText = version == null || version.isEmpty
+      ? theme.glyphs.dash
+      : version;
 
   final List<String> content = <String>[
     'MEM  ${renderMeter(fraction: memFraction, cells: _hostMeterCells, theme: theme)} '
@@ -691,18 +716,15 @@ List<String> _hostCard({
       theme.muted,
     ),
     theme.paint(
-      'PING ${latency == null ? 'n/a' : '${latency}ms'}'
-      ' · ${latest?.version ?? theme.glyphs.dash}',
+      'PING ${latency == null ? 'n/a' : '${latency}ms'} · $versionText',
       theme.muted,
     ),
   ];
-  while (content.length > rows) {
-    content.removeLast();
+  final List<String> sized = content.take(rows < 0 ? 0 : rows).toList();
+  while (sized.length < rows) {
+    sized.add('');
   }
-  while (content.length < rows) {
-    content.add('');
-  }
-  return content;
+  return sized;
 }
 
 /// The `n/a`-safe TPS series for the sparkline: every in-window sample in
@@ -711,16 +733,10 @@ List<double?> _tpsWindow(
   List<MetricSample> history,
   DateTime start,
   DateTime end,
-) {
-  final List<double?> values = <double?>[];
-  for (final MetricSample sample in history) {
-    if (sample.ts.isBefore(start) || sample.ts.isAfter(end)) {
-      continue;
-    }
-    values.add(sample.tps);
-  }
-  return values;
-}
+) => <double?>[
+  for (final MetricSample sample in history)
+    if (!sample.ts.isBefore(start) && !sample.ts.isAfter(end)) sample.tps,
+];
 
 /// A framed, centered card telling the user the terminal is too small.
 /// Never throws at any size: when even the card cannot fit, the three lines
@@ -735,14 +751,8 @@ List<String> buildResizeRequiredFrame({
     'CURRENT ${columns}x$lines',
     'MINIMUM ${monitorMinColumns}x$monitorMinLines',
   ];
-  int longest = 0;
-  for (final String fact in facts) {
-    if (fact.length > longest) {
-      longest = fact.length;
-    }
-  }
-
-  final int cardWidth = longest + 4;
+  final int cardWidth =
+      facts.fold<int>(0, (int a, String f) => f.length > a ? f.length : a) + 4;
   if (columns < cardWidth || lines < facts.length + 2) {
     final int top = (lines - facts.length) ~/ 2;
     return padMonitorFrame(
@@ -780,17 +790,9 @@ List<String> buildResizeRequiredFrame({
 }
 
 /// Clips or pads the already-plain [text] to exactly [width] columns.
-String _fit(String text, int width) {
-  if (text.length > width) {
-    return text.substring(0, width);
-  }
-  return text.padRight(width);
-}
+String _fit(String text, int width) =>
+    text.length > width ? text.substring(0, width) : text.padRight(width);
 
 /// Centers [painted] (whose visible width is [visible]) in [width] columns.
-String _center(String painted, int visible, int width) {
-  if (visible >= width) {
-    return painted;
-  }
-  return '${' ' * ((width - visible) ~/ 2)}$painted';
-}
+String _center(String painted, int visible, int width) =>
+    visible >= width ? painted : '${' ' * ((width - visible) ~/ 2)}$painted';

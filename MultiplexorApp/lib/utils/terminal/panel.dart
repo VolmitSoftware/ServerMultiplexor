@@ -17,7 +17,8 @@ String _borderTone(MonitorTheme theme, PanelEmphasis emphasis) {
 }
 
 /// Clips [text] to at most [width] visible columns (never negative).
-String _clip(String text, int width) => Ansi.clipVisible(text, width < 0 ? 0 : width);
+String _clip(String text, int width) =>
+    Ansi.clipVisible(text, width < 0 ? 0 : width);
 
 /// Forces [text] to exactly [width] visible columns, clipping or padding as
 /// needed. A defensive final step so every emitted row satisfies the width
@@ -32,12 +33,18 @@ String _forceWidth(String text, int width) {
 /// - with badge:    `┌─ TITLE ` + `─`*fill + ` BADGE ─┐`
 /// - without badge: `┌─ TITLE ` + `─`*fill + `┐`
 ///
+/// [styledTitle], when given, is inlaid verbatim in place of the panel's
+/// own styling of [title] — it is measured with [Ansi.visibleLength] and
+/// clipped with [Ansi.clipVisible], so a caller-owned run (a gradient
+/// wordmark, say) keeps its escapes without breaking the width invariant.
+///
 /// If title and badge together overflow [width], the badge is dropped
 /// first. If the title alone still overflows, it is clipped to fit
 /// `width - 6`. Below width 8 there is no room for a readable inlaid title
 /// at all, so a solid border is rendered instead.
 String _buildTopBorder({
   required String title,
+  required String? styledTitle,
   required String? badge,
   required int width,
   required MonitorTheme theme,
@@ -52,13 +59,15 @@ String _buildTopBorder({
   }
 
   final String titleTone = '${theme.bold}${theme.textStrong}';
+  final String inlay = styledTitle ?? theme.paint(title, titleTone);
 
   if (badge != null) {
-    final int fill = width - 8 - Ansi.visibleLength(title) - Ansi.visibleLength(badge);
+    final int fill =
+        width - 8 - Ansi.visibleLength(inlay) - Ansi.visibleLength(badge);
     if (fill >= 0) {
       final StringBuffer buffer = StringBuffer()
         ..write(theme.paint('${glyphs.frameTl}${glyphs.frameH} ', borderTone))
-        ..write(theme.paint(title, titleTone))
+        ..write(inlay)
         ..write(theme.paint(' ${glyphs.frameH * fill} ', borderTone))
         ..write(theme.paint(badge, theme.faint))
         ..write(theme.paint(' ${glyphs.frameH}${glyphs.frameTr}', borderTone));
@@ -66,12 +75,14 @@ String _buildTopBorder({
     }
   }
 
-  final String clippedTitle = _clip(title, width - 6);
+  final String clippedTitle = _clip(inlay, width - 6);
   final int fill = width - 5 - Ansi.visibleLength(clippedTitle);
   final StringBuffer buffer = StringBuffer()
     ..write(theme.paint('${glyphs.frameTl}${glyphs.frameH} ', borderTone))
-    ..write(theme.paint(clippedTitle, titleTone))
-    ..write(theme.paint(' ${glyphs.frameH * (fill < 0 ? 0 : fill)}', borderTone))
+    ..write(clippedTitle)
+    ..write(
+      theme.paint(' ${glyphs.frameH * (fill < 0 ? 0 : fill)}', borderTone),
+    )
     ..write(theme.paint(glyphs.frameTr, borderTone));
   return _forceWidth(buffer.toString(), width);
 }
@@ -81,11 +92,18 @@ String _buildTopBorder({
 /// plain bottom border. Every row of the result is exactly [width] visible
 /// columns; the result always has `content.length + 2` rows.
 ///
+/// [title] is styled by the panel (bold + [MonitorTheme.textStrong]). Pass
+/// [styledTitle] to inlay a caller-styled run instead — a gradient wordmark,
+/// for example — in which case [title] is still required as the plain
+/// fallback text and the styled run is measured and clipped by visible
+/// width so the invariant holds.
+///
 /// At `width <= 2` there is no room for corners or an inlaid title at all,
 /// so every row (including content rows) collapses to a solid run of the
 /// horizontal frame glyph.
 List<String> renderPanel({
   required String title,
+  String? styledTitle,
   String? badge,
   required List<String> content,
   required int width,
@@ -107,6 +125,7 @@ List<String> renderPanel({
   final List<String> rows = <String>[
     _buildTopBorder(
       title: title,
+      styledTitle: styledTitle,
       badge: badge,
       width: safeWidth,
       theme: theme,
