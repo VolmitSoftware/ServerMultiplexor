@@ -11,6 +11,7 @@ import 'prompt/menu.dart';
 import 'terminal/ansi.dart';
 import 'terminal/term_events.dart';
 import 'terminal/term_io.dart';
+import 'terminal/theme.dart';
 
 export 'prompt/menu.dart';
 export 'terminal/ansi.dart';
@@ -20,6 +21,19 @@ class Ui {
   Ui._();
 
   static final Console _console = Console();
+
+  static MonitorTheme? _themeOverride;
+  static MonitorTheme? _detectedTheme;
+
+  /// The theme every prompt and menu renders with. Detection reads the
+  /// environment, so it is resolved once and reused; a test can pin it with
+  /// [themeOverride].
+  static MonitorTheme get theme =>
+      _themeOverride ?? (_detectedTheme ??= MonitorTheme.detect());
+
+  /// Pins [theme] to a fixed value, or restores detection when set to null.
+  /// For tests: production code only reads [theme].
+  static set themeOverride(MonitorTheme? value) => _themeOverride = value;
 
   static bool get hasTerminal => TermIo.instance.hasTerminal;
 
@@ -212,11 +226,13 @@ class Ui {
   }
 
   static String _inputPrompt(String message, {String? hint}) {
+    final MonitorTheme theme = Ui.theme;
     final String hintPart = hint == null || hint.isEmpty
         ? ''
-        : ' ${Ansi.style('($hint)', Ansi.gray)}';
-    return '${Ansi.style('?', Ansi.yellow)} ${Ansi.style(message, Ansi.bold)}'
-        '$hintPart ${Ansi.style('›', Ansi.gray)} ';
+        : ' ${theme.paint('($hint)', theme.faint)}';
+    return '${theme.paint('?', '${theme.bold}${theme.accent}')} '
+        '${theme.paint(message, '${theme.bold}${theme.text}')}'
+        '$hintPart ${theme.paint('›', theme.faint)} ';
   }
 
   static void _inputAccepted(
@@ -373,13 +389,24 @@ class Ui {
 
     final TermIo io = TermIo.instance;
     io.drainInput();
-    // Button-style chips: the default answer is a filled key, the other dim.
-    final String chips = defaultValue
-        ? '${Ansi.style(' Y ', '${Ansi.inverse}${Ansi.green}')} ${Ansi.style(' n ', Ansi.gray)}'
-        : '${Ansi.style(' y ', Ansi.gray)} ${Ansi.style(' N ', '${Ansi.inverse}${Ansi.red}')}';
+    // Button-style chips: the default answer is a filled key, the other
+    // faint. The fill carries the accent tone, except on a prompt that
+    // defaults to no — every one of those is destructive, so the chip stays
+    // in the crit tone rather than reading like an ordinary default. A
+    // colorless terminal gets neither the fill nor the tone, so the chips
+    // fall back to their bare `Y`/`n` text.
+    final MonitorTheme theme = Ui.theme;
+    final String fill = theme.depth == ColorDepth.none ? '' : Ansi.inverse;
+    final String chosen = theme.paint(
+      defaultValue ? ' Y ' : ' N ',
+      '$fill${defaultValue ? theme.accent : theme.crit}',
+    );
+    final String other = theme.paint(defaultValue ? ' n ' : ' y ', theme.faint);
+    final String chips = defaultValue ? '$chosen $other' : '$other $chosen';
     stdout.write(
-      '${Ansi.style('?', Ansi.yellow)} ${Ansi.style(prompt, Ansi.bold)} '
-      '$chips ${Ansi.style('›', Ansi.gray)} ',
+      '${theme.paint('?', '${theme.bold}${theme.accent}')} '
+      '${theme.paint(prompt, '${theme.bold}${theme.text}')} '
+      '$chips ${theme.paint('›', theme.faint)} ',
     );
     io.setRawMode(true);
 

@@ -3,6 +3,10 @@ import 'dart:io';
 import '../terminal/ansi.dart';
 import '../terminal/term_events.dart';
 import '../terminal/term_io.dart';
+import '../terminal/theme.dart';
+// Only for the shared, lazily detected prompt theme; `show` keeps this back
+// edge to the Ui facade from shadowing the imports above it.
+import '../user_prompt.dart' show Ui;
 
 part 'menu_layout.dart';
 
@@ -111,7 +115,9 @@ Future<T> menuSelect<T>(
 
   final String hintText = hint ?? '↑↓ move · enter select · esc back · click';
   String? currentFooter = footer;
-  final int tailLines = footer == null ? 1 : 2;
+  // Two border rows carry the title and the hint; a footer, when the menu has
+  // one, is a content row just above the bottom border.
+  final int tailLines = footer == null ? 2 : 3;
   final int frameHeight = entries.length + tailLines;
 
   /// Screen row the frame's first line currently occupies. Null while the
@@ -164,9 +170,11 @@ Future<T> menuSelect<T>(
     final List<String> rows = renderMenuRows<T>(
       entries,
       selected: selected,
+      title: title,
       hint: hintText,
       footer: currentFooter,
       columns: columns,
+      theme: Ui.theme,
     );
 
     // Parking the cursor at column 1 of the last row makes the resting position
@@ -246,25 +254,27 @@ Future<T> menuSelect<T>(
     park(top);
   }
 
-  /// Erases the frame and the title above it, leaving the cursor on the title's
-  /// row so the caller can print its own line in the menu's place.
+  /// Erases the frame, leaving the cursor on the row its top border occupied
+  /// so the caller can print its own line in the menu's place.
   void clear() {
     final int? top = frameTop;
     if (top == null) {
-      // Cursor rests on the frame's last row; the title sits one row above it.
-      stdout.write('\r\x1B[${frameHeight}A');
-      for (int i = 0; i <= frameHeight; i++) {
+      // Cursor rests on the frame's last row; the top border sits
+      // frameHeight - 1 rows above it.
+      if (frameHeight > 1) {
+        stdout.write('\r\x1B[${frameHeight - 1}A');
+      }
+      for (int i = 0; i < frameHeight; i++) {
         stdout.write('\r${Ansi.eraseLine}\x1B[1B');
       }
-      stdout.write('\x1B[${frameHeight + 1}A');
+      stdout.write('\x1B[${frameHeight}A');
       return;
     }
-    final int titleRow = top > 1 ? top - 1 : 1;
     final StringBuffer out = StringBuffer();
-    for (int row = titleRow; row < top + frameHeight; row++) {
+    for (int row = top; row < top + frameHeight; row++) {
       out.write('\x1B[$row;1H${Ansi.eraseLine}');
     }
-    out.write('\x1B[$titleRow;1H');
+    out.write('\x1B[$top;1H');
     stdout.write(out.toString());
   }
 
@@ -274,10 +284,9 @@ Future<T> menuSelect<T>(
     selected = selectable[next];
   }
 
-  stdout.writeln(
-    '${Ansi.style('◆', Ansi.cyan)} ${Ansi.style(title, Ansi.bold)}',
-  );
-
+  // No prompt line above the frame: the title is inlaid in the box's top
+  // border, which — unlike a line printed once — is redrawn with every
+  // repaint and so survives interleaved subprocess output.
   io.setRawMode(true);
   io.hideCursor();
   io.enableMouse();
@@ -286,13 +295,14 @@ Future<T> menuSelect<T>(
 
     /// Entry under a mouse click, using the row the last draw measured. Null
     /// when the terminal does not report the cursor, or when the click missed
-    /// the entries.
+    /// the entries — the borders and the footer are not clickable.
     int? entryAtRow(int row) {
       final int? first = frameTop;
       if (first == null) {
         return null;
       }
-      final int index = row - first;
+      // The frame's first row is the top border, so entries start one below.
+      final int index = row - first - 1;
       if (index < 0 || index >= entries.length) {
         return null;
       }
