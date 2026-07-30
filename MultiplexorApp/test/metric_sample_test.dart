@@ -322,6 +322,134 @@ void main() {
     });
   });
 
+  group('metricsTsvRow', () {
+    test('emits 13 tab-separated columns in the documented order', () {
+      final String row = metricsTsvRow(
+        name: 'survival',
+        state: RuntimeState.running,
+        port: 25565,
+        locked: true,
+        players: 4,
+        maxPlayers: 20,
+        version: '1.21.1',
+        tps: 19.75,
+        isolated: true,
+        uptimeSeconds: 3600,
+        cpuPercent: 3.54,
+        rssBytes: 536870912,
+        logPath: '/logs/survival/latest.log',
+      );
+      expect(
+        row,
+        'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
+        '\t3600\t3.5\t536870912\t/logs/survival/latest.log',
+      );
+      expect(row.split('\t'), hasLength(13));
+    });
+
+    test('renders every unavailable value as a dash, never zero', () {
+      final String row = metricsTsvRow(
+        name: 'lobby',
+        state: RuntimeState.stopped,
+        port: null,
+        locked: false,
+        players: null,
+        maxPlayers: null,
+        version: null,
+        tps: null,
+        isolated: false,
+        uptimeSeconds: null,
+        cpuPercent: null,
+        rssBytes: null,
+        logPath: null,
+      );
+      expect(
+        row,
+        'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-',
+      );
+    });
+
+    test('treats a blank text cell as unavailable', () {
+      final String row = metricsTsvRow(
+        name: 'lobby',
+        state: RuntimeState.stopped,
+        locked: false,
+        version: '',
+        isolated: false,
+        logPath: '',
+      );
+      final List<String> cols = row.split('\t');
+      expect(cols[6], '-');
+      expect(cols[12], '-');
+    });
+
+    test('replaces embedded tabs and newlines in text cells with spaces', () {
+      final String row = metricsTsvRow(
+        name: 'survival',
+        state: RuntimeState.running,
+        locked: false,
+        version: 'Paper\t1.21\nbeta',
+        isolated: false,
+        logPath: '/logs/a\tb.log',
+      );
+      final List<String> cols = row.split('\t');
+      expect(cols, hasLength(13));
+      expect(cols[6], 'Paper 1.21 beta');
+      expect(cols[12], '/logs/a b.log');
+    });
+
+    test('round-trips through MetricSample.fromMetricsTsv', () {
+      final String row = metricsTsvRow(
+        name: 'survival',
+        state: RuntimeState.running,
+        port: 25565,
+        locked: true,
+        players: 4,
+        maxPlayers: 20,
+        version: '1.21.1',
+        tps: 19.8,
+        isolated: true,
+        uptimeSeconds: 3600,
+        cpuPercent: 3.5,
+        rssBytes: 536870912,
+        logPath: '/logs/survival/latest.log',
+      );
+      final MetricSample? sample = MetricSample.fromMetricsTsv(row, ts);
+      expect(sample, isNotNull);
+      expect(sample!.instance, 'survival');
+      expect(sample.state, RuntimeState.running);
+      expect(sample.port, 25565);
+      expect(sample.players, 4);
+      expect(sample.maxPlayers, 20);
+      expect(sample.version, '1.21.1');
+      expect(sample.tps, 19.8);
+      expect(sample.uptimeSeconds, 3600);
+      expect(sample.cpuPercent, 3.5);
+      expect(sample.rssBytes, 536870912);
+      expect(sample.logPath, '/logs/survival/latest.log');
+    });
+
+    test('a fully-unavailable row round-trips back to nulls', () {
+      final String row = metricsTsvRow(
+        name: 'lobby',
+        state: RuntimeState.stopped,
+        locked: false,
+        isolated: false,
+      );
+      final MetricSample? sample = MetricSample.fromMetricsTsv(row, ts);
+      expect(sample, isNotNull);
+      expect(sample!.instance, 'lobby');
+      expect(sample.state, RuntimeState.stopped);
+      expect(sample.port, isNull);
+      expect(sample.players, isNull);
+      expect(sample.tps, isNull);
+      expect(sample.uptimeSeconds, isNull);
+      expect(sample.cpuPercent, isNull);
+      expect(sample.rssBytes, isNull);
+      expect(sample.logPath, isNull);
+    });
+  });
+
   group('MetricSample.copyWith', () {
     test('overrides only the requested fields', () {
       final MetricSample original = fullSample();

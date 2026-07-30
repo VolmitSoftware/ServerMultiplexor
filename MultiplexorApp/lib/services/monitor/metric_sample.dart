@@ -269,6 +269,47 @@ List<String> psArgsForPids(List<int> pids) {
   return args;
 }
 
+/// Renders one row of the extended `runtime metrics` TSV — the exact
+/// inverse of [MetricSample.fromMetricsTsv]. Columns, in order:
+/// `name state port locked players max version tps isolated uptimeSeconds
+/// cpuPercent rssBytes logPath`.
+///
+/// Every unavailable value renders as `-`, never as a zero. [tps] and
+/// [cpuPercent] render with one decimal place. [version] and [logPath] are
+/// treated as unavailable when blank, and any tab or newline they contain is
+/// replaced with a space so a single row can never span or split columns.
+String metricsTsvRow({
+  required String name,
+  required RuntimeState state,
+  required bool locked,
+  required bool isolated,
+  int? port,
+  int? players,
+  int? maxPlayers,
+  String? version,
+  double? tps,
+  int? uptimeSeconds,
+  double? cpuPercent,
+  int? rssBytes,
+  String? logPath,
+}) {
+  return <String>[
+    _tsvSanitize(name),
+    state.name,
+    _tsvNumberCell(port),
+    locked ? 'locked' : 'unlocked',
+    _tsvNumberCell(players),
+    _tsvNumberCell(maxPlayers),
+    _tsvTextCell(version),
+    _tsvDecimalCell(tps),
+    isolated ? 'isolated' : 'shared',
+    _tsvNumberCell(uptimeSeconds),
+    _tsvDecimalCell(cpuPercent),
+    _tsvNumberCell(rssBytes),
+    _tsvTextCell(logPath),
+  ].join('\t');
+}
+
 RuntimeState? _runtimeStateFromName(String name) {
   for (final RuntimeState state in RuntimeState.values) {
     if (state.name == name) {
@@ -287,3 +328,15 @@ int? _tsvInt(String cell) => cell == '-' ? null : int.tryParse(cell);
 double? _tsvDouble(String cell) => cell == '-' ? null : double.tryParse(cell);
 
 String? _tsvString(String cell) => cell == '-' ? null : cell;
+
+/// Replaces every tab, carriage return, and newline in [text] with a single
+/// space so a value can neither split a column nor break a row.
+String _tsvSanitize(String text) => text.replaceAll(RegExp(r'[\t\r\n]'), ' ');
+
+String _tsvNumberCell(num? value) => value == null ? '-' : '$value';
+
+String _tsvDecimalCell(double? value) =>
+    value == null ? '-' : value.toStringAsFixed(1);
+
+String _tsvTextCell(String? value) =>
+    value == null || value.isEmpty ? '-' : _tsvSanitize(value);

@@ -59,6 +59,18 @@ void main() {
     });
   });
 
+  group('formatCpuPercent', () {
+    test('renders n/a for null', () {
+      expect(formatCpuPercent(null), 'n/a');
+    });
+
+    test('renders one decimal place with a percent suffix', () {
+      expect(formatCpuPercent(4.24), '4.2%');
+      expect(formatCpuPercent(0), '0.0%');
+      expect(formatCpuPercent(137.5), '137.5%');
+    });
+  });
+
   group('formatCompactNumber', () {
     test('renders n/a for null', () {
       expect(formatCompactNumber(null), 'n/a');

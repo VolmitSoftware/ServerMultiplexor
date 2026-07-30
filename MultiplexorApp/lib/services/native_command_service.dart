@@ -12,9 +12,11 @@ import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
 import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
+import '../utils/table.dart';
 import '../utils/terminal/ansi.dart';
 import 'consumer_service.dart';
 import 'manager_context.dart';
+import 'monitor/metric_sample.dart';
 import 'rcon_client.dart';
 import 'runtime_state.dart';
 import 'server_ping.dart';
@@ -6554,12 +6556,15 @@ class NativeCommandService {
     io.write('log:          ${_runtimeLogFile(profile, instance)}');
   }
 
-  /// Shows live stats (player counts, version, uptime) for running servers.
+  /// Shows live stats (player counts, version, CPU, memory, uptime) for
+  /// running servers.
   ///
   /// With no [inputInstance], scans every consumer for running instances so
   /// the user sees all live servers at once. Player counts come from a Server
   /// List Ping against each server's `server-port`, which needs neither query
   /// nor rcon enabled. Uptime is derived from the tmux session start time.
+  /// CPU and memory come from one batched `ps` over the tracked server pids;
+  /// anything unavailable renders as `n/a` rather than a fabricated zero.
   Future<void> _runtimeStats(
     ConsumerProfile profile,
     String? inputInstance,
@@ -6607,9 +6612,15 @@ class NativeCommandService {
           port: port,
           uptime: uptime,
           ping: ping,
+          pid: _readPid(_runtimeServerPidFile(consumer, instance)),
         );
       }),
     );
+
+    final psStats = await _sampleProcessStats(<int>[
+      for (final row in rows)
+        if (row.pid != null) row.pid!,
+    ]);
 
     final useColor =
         io.stream &&
@@ -6619,55 +6630,46 @@ class NativeCommandService {
     io.write('[OK] ${rows.length} server(s) running');
     io.write('');
 
-    const headers = <String>[
-      'SERVER',
-      'CONSUMER',
-      'STATE',
-      'PLAYERS',
-      'UPTIME',
-      'PORT',
-      'VERSION',
+    // Column indices are load-bearing: _statsColorCell paints STATE (2) and
+    // PLAYERS (3), so new columns go after them.
+    const columns = <TableColumn>[
+      TableColumn(header: 'SERVER'),
+      TableColumn(header: 'CONSUMER'),
+      TableColumn(header: 'STATE'),
+      TableColumn(header: 'PLAYERS'),
+      TableColumn(header: 'CPU'),
+      TableColumn(header: 'MEM'),
+      TableColumn(header: 'UPTIME'),
+      TableColumn(header: 'PORT'),
+      TableColumn(header: 'VERSION'),
     ];
-    final cells = rows
-        .map(
-          (r) => <String>[
-            r.instance,
-            r.consumer,
-            r.state.name,
-            _statsPlayersCell(r.ping, r.state),
-            r.uptime != null ? formatCompactDuration(r.uptime!) : '-',
-            '${r.port}',
-            r.ping?.versionName ?? '-',
-          ],
-        )
-        .toList(growable: false);
+    final cells = rows.map((r) {
+      final pid = r.pid;
+      final stat = pid != null ? psStats[pid] : null;
+      return <String>[
+        r.instance,
+        r.consumer,
+        r.state.name,
+        _statsPlayersCell(r.ping, r.state),
+        formatCpuPercent(stat?.cpuPercent),
+        formatBytes(stat?.rssBytes),
+        r.uptime != null ? formatCompactDuration(r.uptime!) : 'n/a',
+        '${r.port}',
+        r.ping?.versionName ?? '-',
+      ];
+    }).toList(growable: false);
 
-    final widths = List<int>.generate(headers.length, (col) {
-      var width = headers[col].length;
-      for (final row in cells) {
-        if (row[col].length > width) {
-          width = row[col].length;
-        }
-      }
-      return width;
-    });
-
-    final headerLine = <String>[
-      for (var col = 0; col < headers.length; col++)
-        headers[col].padRight(widths[col]),
-    ].join('  ').trimRight();
-    io.write(useColor ? '${Ansi.bold}$headerLine${Ansi.reset}' : headerLine);
-
-    for (var i = 0; i < rows.length; i++) {
-      final row = rows[i];
-      final parts = <String>[];
-      for (var col = 0; col < headers.length; col++) {
-        final padded = cells[i][col].padRight(widths[col]);
-        parts.add(
-          useColor ? _statsColorCell(col, padded, row.state, row.ping) : padded,
-        );
-      }
-      io.write(parts.join('  ').trimRight());
+    final lines = renderTable(
+      columns: columns,
+      rows: cells,
+      bold: useColor,
+      paintCell: useColor
+          ? (int col, int row, String cell) =>
+                _statsColorCell(col, cell, rows[row].state, rows[row].ping)
+          : null,
+    );
+    for (final line in lines) {
+      io.write(line);
     }
 
     final withPlayers = rows
@@ -8744,23 +8746,30 @@ class NativeCommandService {
 
   /// Emits one tab-separated line per instance with live metrics for the
   /// dashboard: name, state, port, locked, players, max, version, tps,
-  /// isolation. Running servers are pinged (and RCON-queried for TPS)
-  /// concurrently with short timeouts so the whole sweep stays within ~1s.
+  /// isolation, uptimeSeconds, cpuPercent, rssBytes, logPath. Running servers
+  /// are pinged (and RCON-queried for TPS) concurrently with short timeouts,
+  /// and every live server's resident set and CPU share come from a single
+  /// batched `ps`, so the whole sweep stays within ~1s.
   Future<int> _runtimeMetrics(
     ConsumerProfile profile,
     _NativeIoBuffer io,
   ) async {
     final names = _instanceNames(profile);
-    final lines = await Future.wait(
+    final samples = await Future.wait(
       names.map((name) async {
         final state = await _runtimeStateOf(profile, name);
         final port = _instanceGetServerPort(profile, name);
-        final locked = _instanceLocked(profile, name) ? 'locked' : 'unlocked';
         // Probe only fully-started servers. A starting server's accept
         // queue is stalled during world load, so probes just time out and
         // every abandoned connection surfaces as Netty setsockopt noise in
         // its console the moment it begins accepting.
         final live = state == RuntimeState.running;
+        // Anything that is not stopped may still own a server process, so
+        // uptime and the pid are worth resolving for those states too.
+        final stopped = state == RuntimeState.stopped;
+        final uptimeFuture = stopped
+            ? Future<Duration?>.value()
+            : _runtimeUptime(profile, name);
         MinecraftPingResult? ping;
         double? tps;
         if (live) {
@@ -8774,21 +8783,78 @@ class NativeCommandService {
           ping = await pingFuture;
           tps = await tpsFuture;
         }
-        final players = ping != null ? '${ping.online}' : '-';
-        final max = ping != null ? '${ping.max}' : '-';
-        final version = ping?.versionName ?? '-';
-        final tpsCell = tps != null ? tps.toStringAsFixed(1) : '-';
-        final isolated = _instanceIsolated(profile, name)
-            ? 'isolated'
-            : 'shared';
-        return '$name\t${state.name}\t$port\t$locked\t$players\t$max'
-            '\t$version\t$tpsCell\t$isolated';
+        final uptime = await uptimeFuture;
+        return (
+          name: name,
+          state: state,
+          port: port,
+          locked: _instanceLocked(profile, name),
+          isolated: _instanceIsolated(profile, name),
+          ping: ping,
+          tps: tps,
+          uptime: uptime,
+          pid: stopped ? null : _readPid(_runtimeServerPidFile(profile, name)),
+          logPath: _runtimeLogFile(profile, name),
+        );
       }),
     );
-    for (final line in lines) {
-      io.write(line);
+
+    final psStats = await _sampleProcessStats(<int>[
+      for (final sample in samples)
+        if (sample.pid != null) sample.pid!,
+    ]);
+
+    for (final sample in samples) {
+      final pid = sample.pid;
+      final stat = pid != null ? psStats[pid] : null;
+      final ping = sample.ping;
+      io.write(
+        metricsTsvRow(
+          name: sample.name,
+          state: sample.state,
+          locked: sample.locked,
+          isolated: sample.isolated,
+          port: sample.port,
+          players: ping?.online,
+          maxPlayers: ping?.max,
+          version: ping?.versionName,
+          tps: sample.tps,
+          uptimeSeconds: sample.uptime?.inSeconds,
+          cpuPercent: stat?.cpuPercent,
+          rssBytes: stat?.rssBytes,
+          logPath: sample.logPath,
+        ),
+      );
     }
     return 0;
+  }
+
+  /// Samples resident set size and CPU share for [pids] with a single
+  /// batched `ps` call.
+  ///
+  /// Returns an empty map when there is nothing to sample, when `ps` writes
+  /// nothing usable, or when the call does not finish within 900 ms. The
+  /// timeout deliberately abandons the process rather than killing it: `ps`
+  /// is a short-lived local read, so an orphan is harmless, and metrics must
+  /// never be able to stall a dashboard refresh.
+  Future<Map<int, PsStat>> _sampleProcessStats(List<int> pids) async {
+    if (pids.isEmpty) {
+      return const <int, PsStat>{};
+    }
+    try {
+      final result = await Process.run(
+        'ps',
+        psArgsForPids(pids),
+      ).timeout(const Duration(milliseconds: 900));
+      // Exit code is ignored on purpose: BSD `ps` reports failure when any
+      // requested pid has already exited, yet still prints the ones that
+      // are alive. Parsing stdout keeps those readings.
+      return parsePsOutput((result.stdout ?? '').toString());
+    } on TimeoutException {
+      return const <int, PsStat>{};
+    } on ProcessException {
+      return const <int, PsStat>{};
+    }
   }
 
   void _instanceSetServerPort(

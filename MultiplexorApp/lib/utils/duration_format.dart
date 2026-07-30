@@ -45,6 +45,17 @@ String formatBytes(int? bytes) {
   return '${_formatScaled(scaled)}${units[magnitude]}';
 }
 
+/// Formats [percent] as a CPU-load string with one decimal place and a
+/// trailing `%`: `0.0%`, `4.2%`, `137.5%`. Values above 100 are legitimate
+/// (a multi-threaded process can exceed one core) and are never clamped.
+/// Returns `n/a` when [percent] is null.
+String formatCpuPercent(double? percent) {
+  if (percent == null) {
+    return 'n/a';
+  }
+  return '${percent.toStringAsFixed(1)}%';
+}
+
 /// Formats [value] as a compact number string, at most 5 characters, using
 /// a base-1000 ladder: `999`, `1.2k`, `12k`, `88M`. Values below 10 in the
 /// chosen magnitude render with one decimal place; values at or above 10

@@ -1585,9 +1585,12 @@ class InteractiveWizard {
 
     final List<_InstanceRow> rows = <_InstanceRow>[];
     for (final String line in result.stdout.split('\n')) {
-      // name, state, port, locked, players, max, version, tps, isolation
+      // name, state, port, locked, players, max, version, tps, isolation,
+      // then the metrics-only tail the monitor consumes: uptimeSeconds,
+      // cpuPercent, rssBytes, logPath. Only the first nine are read here, so
+      // both the 9-column and the extended 13-column form parse.
       final List<String> parts = line.trim().split('\t');
-      if (parts.length < 8 || parts[0].isEmpty) {
+      if (parts.length < 9 || parts[0].isEmpty) {
         continue;
       }
       rows.add(
@@ -1599,7 +1602,7 @@ class InteractiveWizard {
           ),
           port: parts[2],
           locked: parts[3] == 'locked',
-          isolated: parts.length > 8 && parts[8] == 'isolated',
+          isolated: parts[8] == 'isolated',
           players: int.tryParse(parts[4]),
           maxPlayers: int.tryParse(parts[5]),
           version: parts[6] == '-' ? null : parts[6],
