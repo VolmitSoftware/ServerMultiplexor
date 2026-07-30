@@ -6668,7 +6668,7 @@ class NativeCommandService {
             formatBytes(stat?.rssBytes),
             r.uptime != null ? formatCompactDuration(r.uptime!) : 'n/a',
             '${r.port}',
-            r.ping?.versionName ?? '-',
+            _statsVersionCell(r.ping),
           ];
         })
         .toList(growable: false);
@@ -6698,11 +6698,21 @@ class NativeCommandService {
     }
   }
 
+  /// PLAYERS cell. Unavailable reads `n/a`, matching every other cell in
+  /// this table; a running server that did not answer its ping keeps the
+  /// distinct `?`, which says the count should have been there.
   String _statsPlayersCell(MinecraftPingResult? ping, RuntimeState state) {
     if (ping != null) {
       return '${ping.online}/${ping.max}';
     }
-    return state == RuntimeState.running ? '?' : '-';
+    return state == RuntimeState.running ? '?' : 'n/a';
+  }
+
+  /// VERSION cell: the version the ping reported, or `n/a` when there was no
+  /// ping or the server named no version.
+  String _statsVersionCell(MinecraftPingResult? ping) {
+    final version = ping?.versionName ?? '';
+    return version.isEmpty ? 'n/a' : version;
   }
 
   String _statsColorCell(
