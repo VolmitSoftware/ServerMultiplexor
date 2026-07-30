@@ -5,6 +5,7 @@ import 'package:multiplexor/services/monitor/metric_sample.dart';
 import 'package:multiplexor/services/monitor/metrics_sampler.dart';
 import 'package:multiplexor/services/monitor/trend_store.dart';
 import 'package:multiplexor/services/runtime_state.dart';
+import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
@@ -525,6 +526,128 @@ void main() {
       ], window: const Duration(hours: 6));
 
       expect(sampler.instances, isEmpty);
+    });
+  });
+
+  group('compactStore', () {
+    late Directory tempDir;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('metrics_sampler_test_');
+    });
+
+    tearDown(() {
+      if (tempDir.existsSync()) {
+        tempDir.deleteSync(recursive: true);
+      }
+    });
+
+    MetricSample rawSample({
+      required DateTime ts,
+      String instance = 'survival',
+      int players = 0,
+    }) => MetricSample(
+      ts: ts,
+      instance: instance,
+      state: RuntimeState.running,
+      players: players,
+    );
+
+    // Every byte written is over the threshold, so compaction is exercised
+    // without having to write a real 4 MiB file.
+    const TrendRetention alwaysCompact = TrendRetention(compactAfterBytes: 0);
+
+    test('is a no-op when the sampler has no store', () async {
+      final MetricsSampler sampler = MetricsSampler(
+        captureMetrics: () async => '',
+      );
+      await expectLater(sampler.compactStore(<String>['survival']), completes);
+    });
+
+    test('drops samples older than the retention window from disk', () async {
+      final DateTime now = DateTime.utc(2026, 7, 30, 12, 0, 0);
+      final TrendStore store = TrendStore(tempDir, retention: alwaysCompact);
+      await store.append(
+        'survival',
+        rawSample(ts: now.subtract(const Duration(days: 30)), players: 1),
+      );
+      await store.append('survival', rawSample(ts: now, players: 2));
+
+      final MetricsSampler sampler = MetricsSampler(
+        captureMetrics: () async => '',
+        store: store,
+        clock: () => now,
+      );
+      await sampler.compactStore(<String>['survival']);
+
+      final List<MetricSample> after = await store.read('survival', now: now);
+      expect(after, hasLength(1));
+      expect(after.single.players, 2);
+    });
+
+    test('compacts every named instance, not just the first', () async {
+      final DateTime now = DateTime.utc(2026, 7, 30, 12, 0, 0);
+      final DateTime ancient = now.subtract(const Duration(days: 30));
+      final TrendStore store = TrendStore(tempDir, retention: alwaysCompact);
+      for (final String instance in <String>['survival', 'creative']) {
+        await store.append(
+          instance,
+          rawSample(ts: ancient, instance: instance, players: 1),
+        );
+        await store.append(
+          instance,
+          rawSample(ts: now, instance: instance, players: 2),
+        );
+      }
+
+      final MetricsSampler sampler = MetricsSampler(
+        captureMetrics: () async => '',
+        store: store,
+        clock: () => now,
+      );
+      await sampler.compactStore(<String>['survival', 'creative']);
+
+      for (final String instance in <String>['survival', 'creative']) {
+        expect(await store.read(instance, now: now), hasLength(1));
+      }
+    });
+
+    test('leaves a file under the size threshold untouched', () async {
+      final DateTime now = DateTime.utc(2026, 7, 30, 12, 0, 0);
+      final TrendStore store = TrendStore(tempDir);
+      await store.append(
+        'survival',
+        rawSample(ts: now.subtract(const Duration(days: 30)), players: 1),
+      );
+      await store.append('survival', rawSample(ts: now, players: 2));
+
+      final MetricsSampler sampler = MetricsSampler(
+        captureMetrics: () async => '',
+        store: store,
+        clock: () => now,
+      );
+      await sampler.compactStore(<String>['survival']);
+
+      // The default 4 MiB threshold is nowhere near reached, so the ancient
+      // sample is still on disk: compaction pays for itself only in bulk.
+      expect(await store.read('survival', now: now), hasLength(2));
+    });
+
+    test('never throws when the store directory is unusable', () async {
+      // A file where the trend directory should be: every write fails.
+      final File blocker = File(p.join(tempDir.path, 'blocked'));
+      await blocker.writeAsString('not a directory');
+      final TrendStore store = TrendStore(
+        Directory(p.join(blocker.path, 'trends')),
+        retention: alwaysCompact,
+      );
+      final MetricsSampler sampler = MetricsSampler(
+        captureMetrics: () async => '',
+        store: store,
+        clock: () => DateTime.utc(2026, 7, 30, 12, 0, 0),
+      );
+
+      await expectLater(sampler.compactStore(<String>['survival']), completes);
     });
   });
 }

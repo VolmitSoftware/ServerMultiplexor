@@ -117,6 +117,13 @@ class InteractiveWizard {
     await Ui.spin('Loading servers', () async {
       await sampler.sweep();
       await sampler.seedFromStore(sampler.instances, window: _trendSeedWindow);
+      // Session start is the one moment retention can be applied without
+      // stealing time from a frame, and it has to happen after the seed so
+      // this session still charts full-resolution history before the older
+      // half of it is rolled up. Awaited rather than fired and forgotten: an
+      // unawaited failure here would reach the root zone and take the
+      // isolate — and the dashboard — with it.
+      await sampler.compactStore(sampler.instances);
     });
 
     final MonitorScreen screen = MonitorScreen(

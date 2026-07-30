@@ -147,6 +147,36 @@ class MetricsSampler {
     }
   }
 
+  /// Applies the [TrendStore]'s retention policy to each named instance's
+  /// file. A no-op when this sampler has no store.
+  ///
+  /// Nothing else calls [TrendStore.compactIfNeeded], so without this a
+  /// trend file only ever grows: at the dashboard's two-second cadence one
+  /// instance writes on the order of ten megabytes a day, all of which the
+  /// next session's [seedFromStore] would read back. Call it once per
+  /// session, off the frame path — the store itself skips any file still
+  /// under [TrendRetention.compactAfterBytes], so the usual cost is one
+  /// `stat` per instance.
+  ///
+  /// Never throws. The store already degrades on [IOException] by disabling
+  /// writes, and anything it does not catch is swallowed here for the same
+  /// reason [sweep] swallows a failed capture: history is a convenience, and
+  /// losing it must not take down the session that was about to be drawn.
+  Future<void> compactStore(List<String> instances) async {
+    final TrendStore? store = _store;
+    if (store == null) {
+      return;
+    }
+    final DateTime now = _clock();
+    for (final String instance in instances) {
+      try {
+        await store.compactIfNeeded(instance, now);
+      } catch (_) {
+        // Trend compaction is best-effort; see the doc comment above.
+      }
+    }
+  }
+
   /// This instance's samples, oldest-first. Empty for an instance that has
   /// never been swept or seeded.
   List<MetricSample> history(String instance) {
