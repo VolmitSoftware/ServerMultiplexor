@@ -614,12 +614,21 @@ void main() {
   });
 
   group('TrendStore write failure handling', () {
+    late Directory tempDir;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('trend_store_test_');
+    });
+
+    tearDown(() {
+      if (tempDir.existsSync()) {
+        tempDir.deleteSync(recursive: true);
+      }
+    });
+
     test(
       'a directory that cannot be created disables writes after one failure, without throwing',
       () async {
-        final Directory tempDir = Directory.systemTemp.createTempSync(
-          'trend_store_test_',
-        );
         final String blockedPath = p.join(tempDir.path, 'blocked');
         // Create a plain file where the store expects to create a directory,
         // so the recursive directory creation fails.
@@ -634,8 +643,6 @@ void main() {
         // Second call must silently no-op rather than throw again.
         await store.append('survival', sample(ts: DateTime.utc(2026, 7, 30)));
         expect(store.writeFailed, isTrue);
-
-        tempDir.deleteSync(recursive: true);
       },
     );
   });
