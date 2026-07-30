@@ -69,19 +69,38 @@ Future<int> _printSnapshot() async {
     activeInstance: await _activeInstance(),
   );
 
-  final bool measurable = stdout.hasTerminal;
+  final (int columns, int lines) = _snapshotSize();
   final List<String> rows = buildMonitorFrame(
     snapshot: snapshot,
     selectedIndex: 0,
     frame: 0,
-    columns: measurable ? stdout.terminalColumns : _snapshotColumns,
-    lines: measurable ? stdout.terminalLines : _snapshotLines,
+    columns: columns,
+    lines: lines,
     theme: _snapshotTheme(),
     range: monitorRanges.first,
     now: DateTime.now().toUtc(),
   );
   stdout.writeln(rows.join('\n'));
   return 0;
+}
+
+/// Geometry for the snapshot: the real terminal when there is one big enough
+/// to hold a frame, the default otherwise.
+///
+/// A snapshot is read by scripts and logs, not by whoever's window happens to
+/// be open, so a terminal under the dashboard's minimum falls back to the
+/// default rather than emitting the resize placeholder where the data should
+/// be. `--once` always produces a data frame.
+(int, int) _snapshotSize() {
+  if (!stdout.hasTerminal) {
+    return (_snapshotColumns, _snapshotLines);
+  }
+  final int columns = stdout.terminalColumns;
+  final int lines = stdout.terminalLines;
+  if (columns < monitorMinColumns || lines < monitorMinLines) {
+    return (_snapshotColumns, _snapshotLines);
+  }
+  return (columns, lines);
 }
 
 /// A colorless theme for the snapshot, ASCII-only unless the locale says the

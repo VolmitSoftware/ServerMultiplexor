@@ -134,8 +134,12 @@ class InteractiveWizard {
         case MonitorQuit():
           return false;
         case MonitorSwitchConsumer():
-          await _monitorFlow(_switchConsumer);
-          return true;
+          // Only an actual profile change invalidates this session. Backing
+          // out of the picker, or re-picking the profile already in use,
+          // leaves the sampler and its trend directory correct.
+          if (await _monitorFlowChanged(_switchConsumer)) {
+            return true;
+          }
         case MonitorOpenInstance(:final String instance):
           await _monitorFlow(() => _instanceMenu(instance));
         case MonitorNewInstance():
@@ -146,28 +150,56 @@ class InteractiveWizard {
     }
   }
 
-  /// Runs a hand-off flow on a cleared screen, absorbing an Escape as a
-  /// return to the dashboard. The monitor has already given the terminal
-  /// back by the time this runs.
+  /// Runs a hand-off flow on a cleared screen. The monitor has already given
+  /// the terminal back by the time this runs.
   Future<void> _monitorFlow(Future<void> Function() flow) async {
     Ui.clearScreen();
-    await _runStep(flow);
+    await _guardedFlow(flow);
   }
 
-  /// The monitor's suspension callback. The screen brackets the call with
-  /// its own terminal transitions, so all this adds is a clean canvas and a
-  /// guarantee that nothing escapes: an exception thrown here propagates out
-  /// of [MonitorScreen.run] and would end the session, so a failed quick
-  /// action reports itself and returns to the dashboard instead.
-  Future<void> _suspendedFlow(Future<void> Function() flow) async {
+  /// The same, for a hand-off that reports whether it changed anything. A
+  /// flow that backs out or fails reports no change.
+  Future<bool> _monitorFlowChanged(Future<bool> Function() flow) async {
     Ui.clearScreen();
+    bool changed = false;
+    await _guardedFlow(() async {
+      changed = await flow();
+    });
+    return changed;
+  }
+
+  /// Runs [flow], absorbing an Escape and reporting-then-swallowing any
+  /// failure, so a broken flow returns to the dashboard instead of unwinding
+  /// the whole wizard for one failed command.
+  ///
+  /// A lost stdin is the one thing that propagates: there is no dashboard
+  /// left to return to, and [runMonitor]'s handler closes the session down
+  /// cleanly instead of spinning on a terminal that cannot answer.
+  Future<void> _guardedFlow(Future<void> Function() flow) async {
     try {
       await flow();
     } on PromptBackNavigation {
       // Escape backs out of the flow, not out of the dashboard.
+    } on PromptInputUnavailable {
+      rethrow;
     } catch (error) {
       Ui.error('$error');
       await Ui.pause();
+    }
+  }
+
+  /// The monitor's suspension callback. The screen brackets the call with
+  /// its own terminal transitions, so all this adds is a clean canvas and an
+  /// absolute guarantee that nothing escapes: an exception thrown here
+  /// propagates out of [MonitorScreen.run] and would end the session, so
+  /// even a lost stdin is reported rather than rethrown. Quick actions do
+  /// not prompt, so that last case is belt and braces.
+  Future<void> _suspendedFlow(Future<void> Function() flow) async {
+    Ui.clearScreen();
+    try {
+      await _guardedFlow(flow);
+    } on PromptInputUnavailable catch (error) {
+      Ui.error('Input stream lost: $error');
     }
   }
 
@@ -1025,16 +1057,29 @@ class InteractiveWizard {
     await _shellRun(<String>['instance', 'port', name, '$port']);
   }
 
-  Future<void> _switchConsumer() async {
+  /// Picks a consumer profile and points the session at it. Returns whether
+  /// the active profile actually changed, so a caller holding per-profile
+  /// state (the monitor's sampler and trend store) only rebuilds when it has
+  /// to. Escaping the picker throws and never reaches the return.
+  Future<bool> _switchConsumer() async {
+    final ConsumerProfile before = _activeConsumer();
     final List<String> options = consumerService
         .listProfiles()
         .map((ConsumerProfile e) => e.shortName)
         .toList(growable: false);
-    final String selected = await Ui.pick('Consumer profile', options);
+    final int initialIndex = options
+        .indexOf(before.shortName)
+        .clamp(0, options.isEmpty ? 0 : options.length - 1);
+    final String selected = await Ui.pick(
+      'Consumer profile',
+      options,
+      initialIndex: initialIndex,
+    );
     await _shellRun(<String>['consumer', 'use', selected]);
-    final profile = ConsumerProfile.parse(selected)!;
+    final ConsumerProfile profile = ConsumerProfile.parse(selected)!;
     _consumerOverride = profile;
     passthrough.setConsumerOverride(profile);
+    return profile != before;
   }
 
   // ─── Build & tuning ──────────────────────────────────────────────────

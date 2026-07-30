@@ -1,9 +1,10 @@
-/// Frame-driven glyphs for the live dashboard: animated server-state dots
-/// and the breathing status blob. The dashboard repaints ~4x/second and
-/// passes a monotonically increasing frame counter.
+/// The frame-driven state dot for a server row.
+///
+/// [frame] is a monotonically increasing repaint tick, so a caller that
+/// animates gets movement out of it; a caller drawing a single static badge
+/// (the wizard's instance-menu header) passes a fixed frame instead.
 library;
 
-import '../utils/terminal/ansi.dart';
 import 'runtime_state.dart';
 
 const List<String> _spinFrames = <String>['◐', '◓', '◑', '◒'];
@@ -18,14 +19,4 @@ String animatedStateGlyph(RuntimeState state, int frame) {
     RuntimeState.restarting => _spinFrames[frame % 4],
     RuntimeState.stopped => '○',
   };
-}
-
-/// Breathing blob glyph: contracts to a point once per cycle.
-String blobGlyph(int frame) {
-  return frame % 4 == 0 ? '∙' : '●';
-}
-
-/// Breathing blob style: cyan, peaking bold mid-cycle.
-String blobStyle(int frame) {
-  return frame % 4 == 2 ? '${Ansi.bold}${Ansi.cyan}' : Ansi.cyan;
 }

@@ -35,26 +35,4 @@ void main() {
       expect(animatedStateGlyph(RuntimeState.running, 1), '●');
     });
   });
-
-  group('blob', () {
-    test('breathes through a smooth four-phase cycle', () {
-      expect(blobGlyph(0), '∙');
-      expect(blobGlyph(1), '●');
-      expect(blobGlyph(2), '●');
-      expect(blobGlyph(3), '●');
-      expect(blobGlyph(4), '∙');
-    });
-
-    test('style peaks bold at the middle of the cycle', () {
-      expect(blobStyle(2).contains('\x1B[1m'), isTrue);
-      expect(blobStyle(0).contains('\x1B[1m'), isFalse);
-      expect(blobStyle(1).contains('\x1B[1m'), isFalse);
-    });
-
-    test('every phase styles in cyan', () {
-      for (int frame = 0; frame < 4; frame++) {
-        expect(blobStyle(frame).contains('\x1B[36m'), isTrue);
-      }
-    });
-  });
 }
