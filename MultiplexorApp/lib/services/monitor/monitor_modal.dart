@@ -90,6 +90,14 @@ const String workspaceModalHitPrefix = 'wm:';
 /// lands on it fell outside the card, and closes the modal.
 const String modalScrimHitId = 'scrim';
 
+/// The id of the card's own [MonitorHitKind.modalScrim] hitboxes, laid over
+/// the card rectangle above [modalScrimHitId] and below the button boxes.
+/// A click that lands on it hit the card's border, title, badge or row
+/// padding — inside the modal but not on a control — and is a no-op. It
+/// exists so those clicks stop at the card instead of falling through to the
+/// scrim and dismissing the modal the user was aiming at.
+const String modalCardHitId = 'card';
+
 /// The hitbox id for [action] on the instance card.
 String instanceModalHitId(InstanceModalAction action) =>
     '$instanceModalHitPrefix${action.name}';
@@ -98,9 +106,8 @@ String instanceModalHitId(InstanceModalAction action) =>
 String workspaceModalHitId(WorkspaceModalAction action) =>
     '$workspaceModalHitPrefix${action.name}';
 
-/// The card's preferred width, and the narrowest it stays readable at.
+/// The card's preferred width.
 const int _cardMaxWidth = 46;
-const int _cardMinWidth = 24;
 
 /// Columns left showing on either side of the card at full width.
 const int _cardInset = 8;
@@ -110,6 +117,16 @@ const int _cardInset = 8;
 const int _rowIndent = 2;
 const int _rowGap = 2;
 
+/// The columns a chip spends on its brackets and their padding — the `[ ` and
+/// ` ]` [renderButton] wraps every label in. Mirrors that renderer's own
+/// `label.length + 4` sizing, and is what lets this library predict a row's
+/// width before laying it out.
+const int _chipPadding = 4;
+
+/// The columns a card spends on its own frame: the two border rules plus the
+/// one space of padding [renderPanel] adds on each side.
+const int _cardChrome = 4;
+
 /// The dismiss hint on the last content row of the card.
 const String _modalHint = 'esc closes';
 
@@ -117,14 +134,48 @@ const String _modalHint = 'esc closes';
 /// border rule plus the one space of padding [renderPanel] adds.
 const int _contentOffset = 2;
 
-/// The card width for a [columns]-wide frame: [_cardMaxWidth] at most, and
-/// [_cardInset] columns narrower than the frame so the dashboard stays
-/// visible around it. Below [_cardMinWidth] the inset is what is starving the
-/// card, not the cap, so the card spends the whole frame width instead.
-int _cardWidth(int columns) {
+/// The visible columns one card row needs to render every one of [buttons]
+/// whole: the row indent, each chip, and a gap between consecutive chips.
+int _rowWidth(List<ButtonSpec> buttons) {
+  int width = _rowIndent;
+  for (int index = 0; index < buttons.length; index++) {
+    if (index > 0) {
+      width += _rowGap;
+    }
+    width += buttons[index].label.length + _chipPadding;
+  }
+  return width;
+}
+
+/// The narrowest card that still renders every chip of every row in [rows].
+///
+/// [layoutButtonRow] drops a chip that would not fit *whole*, and it drops it
+/// silently — so a card narrower than this loses buttons with no visual cue
+/// that anything is missing. Deriving the floor from the rows themselves means
+/// relabelling a chip can never quietly reintroduce that.
+int _contentFloor(List<List<ButtonSpec>> rows) {
+  int floor = 0;
+  for (final List<ButtonSpec> row in rows) {
+    final int needed = _rowWidth(row) + _cardChrome;
+    if (needed > floor) {
+      floor = needed;
+    }
+  }
+  return floor;
+}
+
+/// The card width for a [columns]-wide frame drawing [rows]: [_cardMaxWidth]
+/// at most, and [_cardInset] columns narrower than the frame so the dashboard
+/// stays visible around it — but never narrower than [_contentFloor], since a
+/// card that silently drops DELETE is worse than one that touches both edges.
+///
+/// When the frame cannot seat the floor even at full width, the card spends
+/// the whole frame and [layoutButtonRow] does the dropping; there is no width
+/// left to give it.
+int _cardWidth(int columns, List<List<ButtonSpec>> rows) {
   final int inset = columns - _cardInset;
   final int capped = inset > _cardMaxWidth ? _cardMaxWidth : inset;
-  if (capped >= _cardMinWidth) {
+  if (capped >= _contentFloor(rows)) {
     return capped;
   }
   return columns < 2 ? 2 : columns;
@@ -295,10 +346,16 @@ String _hintRow(int innerWidth, MonitorTheme theme) {
 ///   the escape state the clip cut through; blanking is the honest, cheap
 ///   answer, and a modal row reads as a modal row either way.
 /// - [base]'s hitboxes are discarded outright — nothing behind a modal is
-///   clickable. In their place comes one full-width
-///   [MonitorHitKind.modalScrim] box per row (id [modalScrimHitId]), emitted
-///   *before* the card's button boxes so [hitTest]'s last-wins ordering lets
-///   a button beat the scrim underneath it.
+///   clickable. In their place come three layers, emitted in painter's order
+///   so [hitTest]'s last-wins search resolves them top down: one full-width
+///   [modalScrimHitId] box per frame row, then one [modalCardHitId] box per
+///   card row spanning the card's columns, then the card's button boxes. A
+///   click therefore reads as the button under it, else as [modalCardHitId]
+///   (inside the card but not on a control — a no-op), else as
+///   [modalScrimHitId] (outside the card — dismisses).
+///
+/// - The card is never narrower than the widest chip row needs, so no button
+///   is ever silently dropped while there are columns left to give it.
 ///
 /// [latest] is the instance's most recent reading (it badges the card and
 /// gates the runtime actions), [locked] and [isolated] are its flags. Both
@@ -321,9 +378,6 @@ MonitorFrame overlayModal({
   required int columns,
   required int lines,
 }) {
-  final int width = _cardWidth(columns);
-  final int innerWidth = width - 4 < 0 ? 0 : width - 4;
-
   final String title = switch (modal) {
     InstanceModal(instance: final String name) => name,
     WorkspaceModal() => 'WORKSPACE',
@@ -340,6 +394,11 @@ MonitorFrame overlayModal({
     ),
     WorkspaceModal() => _workspaceRows(),
   };
+
+  // Width is derived from the full row set, not the height-truncated one, so
+  // a short frame narrows the card's contents but never its columns.
+  final int width = _cardWidth(columns, allRows);
+  final int innerWidth = width - _cardChrome < 0 ? 0 : width - _cardChrome;
 
   // Two borders and the hint row are the card's fixed overhead; whatever is
   // left over is the chip-row budget, and at least one chip row is always
@@ -407,6 +466,17 @@ MonitorFrame overlayModal({
         kind: MonitorHitKind.modalScrim,
       ),
   ];
+  for (int index = 0; index < card.length; index++) {
+    hitboxes.add(
+      MonitorHitbox(
+        id: modalCardHitId,
+        row: top + index,
+        colStart: left,
+        colEnd: left + width,
+        kind: MonitorHitKind.modalScrim,
+      ),
+    );
+  }
   for (int index = 0; index < rowSpans.length; index++) {
     final int row = top + 1 + index;
     final int offset = left + _contentOffset;

@@ -240,9 +240,7 @@ void main() {
     });
 
     test('badges the instance card with the sampled state', () {
-      final MonitorFrame frame = instanceOverlay(
-        state: RuntimeState.stopped,
-      );
+      final MonitorFrame frame = instanceOverlay(state: RuntimeState.stopped);
       expect(plainRows(frame)[10], contains('stopped'));
     });
 
@@ -254,7 +252,10 @@ void main() {
     test('centers the workspace card over its own smaller height', () {
       final MonitorFrame frame = workspaceOverlay();
       // 6 rows over 30 lines.
-      expect(plainRows(frame)[12].substring(27, 73), startsWith('┌─ WORKSPACE'));
+      expect(
+        plainRows(frame)[12].substring(27, 73),
+        startsWith('┌─ WORKSPACE'),
+      );
       expect(plainRows(frame)[17][72], '┘');
       expect(rowWith(frame, 'esc closes'), 16);
     });
@@ -264,7 +265,7 @@ void main() {
     test('lays a full-width scrim over every row of the frame', () {
       final MonitorFrame frame = instanceOverlay();
       final List<MonitorHitbox> scrim = frame.hitboxes
-          .where((MonitorHitbox box) => box.kind == MonitorHitKind.modalScrim)
+          .where((MonitorHitbox box) => box.id == modalScrimHitId)
           .toList();
       expect(scrim.length, 30);
       expect(scrim.map((MonitorHitbox box) => box.row).toSet(), <int>{
@@ -300,7 +301,10 @@ void main() {
         hitTest(frame.hitboxes, row: stop.row, col: stop.colEnd - 1),
         'im:stop',
       );
-      expect(hitTest(frame.hitboxes, row: stop.row, col: stop.colEnd), isNot('im:stop'));
+      expect(
+        hitTest(frame.hitboxes, row: stop.row, col: stop.colEnd),
+        isNot('im:stop'),
+      );
     });
 
     test('offsets button spans by the card left edge and its border', () {
@@ -316,15 +320,57 @@ void main() {
       expect(restart.colEnd, 52);
     });
 
-    test('emits the scrim before the buttons so the buttons win', () {
+    test('emits scrim, then card, then buttons so the topmost layer wins', () {
       final MonitorFrame frame = instanceOverlay();
       final int lastScrim = frame.hitboxes.lastIndexWhere(
-        (MonitorHitbox box) => box.kind == MonitorHitKind.modalScrim,
+        (MonitorHitbox box) => box.id == modalScrimHitId,
+      );
+      final int firstCard = frame.hitboxes.indexWhere(
+        (MonitorHitbox box) => box.id == modalCardHitId,
+      );
+      final int lastCard = frame.hitboxes.lastIndexWhere(
+        (MonitorHitbox box) => box.id == modalCardHitId,
       );
       final int firstButton = frame.hitboxes.indexWhere(
         (MonitorHitbox box) => box.kind == MonitorHitKind.button,
       );
-      expect(firstButton, greaterThan(lastScrim));
+      expect(firstCard, greaterThan(lastScrim));
+      expect(firstButton, greaterThan(lastCard));
+    });
+
+    test('covers the card rectangle with a no-op card hitbox', () {
+      final MonitorFrame frame = instanceOverlay();
+      final List<MonitorHitbox> cardBoxes = frame.hitboxes
+          .where((MonitorHitbox box) => box.id == modalCardHitId)
+          .toList();
+      expect(cardBoxes.length, 9);
+      for (final MonitorHitbox box in cardBoxes) {
+        expect(box.kind, MonitorHitKind.modalScrim);
+        expect(box.colStart, 27);
+        expect(box.colEnd, 73);
+      }
+      expect(cardBoxes.map((MonitorHitbox box) => box.row).toSet(), <int>{
+        for (int index = 10; index <= 18; index++) index,
+      });
+    });
+
+    test('hit-tests the card border, title and padding as the card', () {
+      final MonitorFrame frame = instanceOverlay();
+      // Top-left corner, the inlaid title, and a chip row's left padding.
+      expect(hitTest(frame.hitboxes, row: 10, col: 27), modalCardHitId);
+      expect(hitTest(frame.hitboxes, row: 10, col: 31), modalCardHitId);
+      expect(hitTest(frame.hitboxes, row: 11, col: 28), modalCardHitId);
+      // The gap between the two chips, and the bottom border.
+      expect(hitTest(frame.hitboxes, row: 11, col: 39), modalCardHitId);
+      expect(hitTest(frame.hitboxes, row: 18, col: 72), modalCardHitId);
+    });
+
+    test('hit-tests just past the card edges as the scrim', () {
+      final MonitorFrame frame = instanceOverlay();
+      expect(hitTest(frame.hitboxes, row: 10, col: 26), modalScrimHitId);
+      expect(hitTest(frame.hitboxes, row: 10, col: 73), modalScrimHitId);
+      expect(hitTest(frame.hitboxes, row: 9, col: 40), modalScrimHitId);
+      expect(hitTest(frame.hitboxes, row: 19, col: 40), modalScrimHitId);
     });
   });
 
@@ -410,17 +456,20 @@ void main() {
       expect(ids, isNot(contains('im:unlock')));
     });
 
-    test('offers share on an isolated instance and isolate on a shared one', () {
-      final MonitorFrame isolatedFrame = instanceOverlay(isolated: true);
-      expect(buttonIds(isolatedFrame), contains('im:shared'));
-      expect(buttonIds(isolatedFrame), isNot(contains('im:isolated')));
-      expect(plainRows(isolatedFrame).join('\n'), contains('[ SHARE ]'));
+    test(
+      'offers share on an isolated instance and isolate on a shared one',
+      () {
+        final MonitorFrame isolatedFrame = instanceOverlay(isolated: true);
+        expect(buttonIds(isolatedFrame), contains('im:shared'));
+        expect(buttonIds(isolatedFrame), isNot(contains('im:isolated')));
+        expect(plainRows(isolatedFrame).join('\n'), contains('[ SHARE ]'));
 
-      final MonitorFrame sharedFrame = instanceOverlay();
-      expect(buttonIds(sharedFrame), contains('im:isolated'));
-      expect(buttonIds(sharedFrame), isNot(contains('im:shared')));
-      expect(plainRows(sharedFrame).join('\n'), contains('[ ISOLATE ]'));
-    });
+        final MonitorFrame sharedFrame = instanceOverlay();
+        expect(buttonIds(sharedFrame), contains('im:isolated'));
+        expect(buttonIds(sharedFrame), isNot(contains('im:shared')));
+        expect(plainRows(sharedFrame).join('\n'), contains('[ ISOLATE ]'));
+      },
+    );
 
     test('always offers set port, make active, motd and folder', () {
       for (final MonitorFrame frame in <MonitorFrame>[
@@ -527,11 +576,12 @@ void main() {
 
   group('overlayModal clamping', () {
     test('narrows the card to eight columns short of the frame', () {
-      final MonitorFrame frame = instanceOverlay(columns: 40);
-      // 40 - 8 = 32 wide, centered at column 4.
-      expect(plainRows(frame)[10].substring(4, 36), startsWith('┌─ alpha '));
+      final MonitorFrame frame = instanceOverlay(columns: 50);
+      // 50 - 8 = 42 wide, centered at column 4.
+      expect(plainRows(frame)[10].substring(4, 46), startsWith('┌─ alpha '));
+      expect(plainRows(frame)[18][45], '┘');
       for (final String row in frame.rows) {
-        expect(Ansi.visibleLength(row), 40);
+        expect(Ansi.visibleLength(row), 50);
       }
     });
 
@@ -541,6 +591,74 @@ void main() {
       for (final String row in frame.rows) {
         expect(Ansi.visibleLength(row), 28);
       }
+    });
+
+    test('never trades a chip away for the eight-column inset', () {
+      // The inset would leave 32 columns, one short of what the destructive
+      // row needs, so the card takes the whole frame rather than drop DELETE.
+      final MonitorFrame frame = instanceOverlay(
+        state: RuntimeState.stopped,
+        columns: 40,
+      );
+      final String text = plainRows(frame).join('\n');
+      expect(text, contains('[ FACTORY RESET ]'));
+      expect(text, contains('[ DELETE ]'));
+      expect(
+        buttonIds(frame),
+        containsAll(<String>['im:factoryReset', 'im:delete']),
+      );
+    });
+
+    test('renders every enabled instance chip at the content floor', () {
+      // 35 columns is exactly what the widest row (FACTORY RESET + DELETE)
+      // needs once the card's own border and padding are paid for.
+      final MonitorFrame frame = instanceOverlay(
+        state: RuntimeState.stopped,
+        columns: 35,
+      );
+      expect(Ansi.visibleLength(frame.rows[10]), 35);
+      expect(buttonIds(frame), <String>{
+        'im:start',
+        'im:setPort',
+        'im:makeActive',
+        'im:motd',
+        'im:lock',
+        'im:isolated',
+        'im:folder',
+        'im:update',
+        'im:factoryReset',
+        'im:delete',
+      });
+      for (final String label in <String>[
+        '[ START ]',
+        '[ RESTART ]',
+        '[ CONSOLE ]',
+        '[ SET PORT ]',
+        '[ MAKE ACTIVE ]',
+        '[ MOTD ]',
+        '[ LOCK ]',
+        '[ ISOLATE ]',
+        '[ FOLDER ]',
+        '[ UPDATE ]',
+        '[ FACTORY RESET ]',
+        '[ DELETE ]',
+      ]) {
+        expect(plainRows(frame).join('\n'), contains(label), reason: label);
+      }
+    });
+
+    test('renders every workspace chip at the content floor', () {
+      // BUILD & TUNING + PULL BUILDS is the widest workspace row: 41 columns.
+      final MonitorFrame frame = workspaceOverlay(columns: 41);
+      expect(Ansi.visibleLength(frame.rows[12]), 41);
+      expect(buttonIds(frame), <String>{
+        'wm:buildTuning',
+        'wm:pullBuilds',
+        'wm:createMany',
+        'wm:startAll',
+        'wm:stopAll',
+        'wm:wipe',
+      });
     });
 
     test('drops button rows from the bottom when the frame is short', () {
