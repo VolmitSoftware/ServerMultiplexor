@@ -14,6 +14,7 @@ import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
 import 'metric_sample.dart';
+import 'monitor_hitbox.dart';
 
 /// The smallest terminal the dashboard will render into. Below either bound
 /// the frame degrades to [buildResizeRequiredFrame] rather than emitting a
@@ -52,6 +53,23 @@ List<String> padMonitorFrame({
     (int index) => index >= rows.length
         ? ' ' * width
         : Ansi.padVisible(Ansi.clipVisible(rows[index], width), width),
+  );
+}
+
+/// Pads [frame] to exactly [lines] rows of exactly [columns] visible columns
+/// via [padMonitorFrame], and drops every hitbox whose [MonitorHitbox.row]
+/// falls at or past [lines] — a hitbox over a row that padding clipped away
+/// can never be clicked, so it has no business surviving in the result.
+MonitorFrame padFrame(
+  MonitorFrame frame, {
+  required int columns,
+  required int lines,
+}) {
+  return MonitorFrame(
+    rows: padMonitorFrame(rows: frame.rows, columns: columns, lines: lines),
+    hitboxes: frame.hitboxes
+        .where((MonitorHitbox hitbox) => hitbox.row < lines)
+        .toList(growable: false),
   );
 }
 

@@ -14,6 +14,7 @@ import '../../services/interactive_wizard.dart';
 import '../../services/monitor/metric_sample.dart';
 import '../../services/monitor/metrics_sampler.dart';
 import '../../services/monitor/monitor_frame_util.dart';
+import '../../services/monitor/monitor_hitbox.dart';
 import '../../services/monitor/monitor_keymap.dart';
 import '../../services/monitor/monitor_model.dart';
 import '../../utils/process_runner.dart';
@@ -71,7 +72,7 @@ Future<int> _printSnapshot() async {
   );
 
   final (int columns, int lines) = _snapshotSize();
-  final List<String> rows = buildMonitorFrame(
+  final MonitorFrame frame = buildMonitorFrame(
     snapshot: snapshot,
     selectedIndex: 0,
     frame: 0,
@@ -81,7 +82,7 @@ Future<int> _printSnapshot() async {
     range: monitorRanges.first,
     now: DateTime.now().toUtc(),
   );
-  stdout.writeln(rows.join('\n'));
+  stdout.writeln(frame.rows.join('\n'));
   return 0;
 }
 

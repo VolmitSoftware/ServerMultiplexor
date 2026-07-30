@@ -19,6 +19,7 @@ import '../../utils/terminal/theme.dart';
 import 'metric_sample.dart';
 import 'metrics_sampler.dart';
 import 'monitor_detail_model.dart';
+import 'monitor_hitbox.dart';
 import 'monitor_keymap.dart';
 import 'monitor_model.dart';
 
@@ -137,6 +138,11 @@ class MonitorScreen {
   /// The frame text last written, i.e. what the terminal is showing. Null
   /// means "nothing trustworthy on screen": the next render is a full one.
   String? _last;
+
+  /// The hitboxes from the most recently built frame — the mouse-click map.
+  /// Rebuilt every [_render], including in detail mode, where it is always
+  /// empty (the detail view has no clickable regions yet).
+  List<MonitorHitbox> _hitboxes = const <MonitorHitbox>[];
 
   int _selectedIndex = 0;
   int _frame = 0;
@@ -297,7 +303,7 @@ class MonitorScreen {
         wallClock.difference(_startedAt).inMilliseconds ~/
         _spinnerPeriod.inMilliseconds;
     final DateTime now = wallClock.toUtc();
-    final List<String> rows = _detailMode
+    final MonitorFrame frame = _detailMode
         ? buildDetailFrame(
             instance: _detailInstance,
             history: _historyFor(_detailInstance),
@@ -319,8 +325,9 @@ class MonitorScreen {
             range: _range,
             now: now,
           );
+    _hitboxes = frame.hitboxes;
 
-    final String text = rows.join('\n');
+    final String text = frame.rows.join('\n');
     final String patch = renderTerminalPatch(
       previous: _last,
       next: text,
@@ -344,11 +351,11 @@ class MonitorScreen {
 
   // --- state --------------------------------------------------------------
 
-  List<MonitorHitRow> _hits() => monitorServerRowHits(
-    snapshot: _snapshot,
-    columns: _lastColumns,
-    lines: _lastLines,
-  );
+  /// The server-row hitboxes from the most recently rendered frame — the
+  /// only kind the main view has to hit-test against today.
+  List<MonitorHitbox> _hits() => _hitboxes
+      .where((MonitorHitbox hitbox) => hitbox.kind == MonitorHitKind.serverRow)
+      .toList(growable: false);
 
   String? get _selectedInstance {
     final List<String> instances = _snapshot.instances;
@@ -489,18 +496,21 @@ class MonitorScreen {
     if (_detailMode || event.button != 0) {
       return null;
     }
-    final int row = event.row - 1;
-    for (final MonitorHitRow hit in _hits()) {
-      if (hit.row != row) {
-        continue;
-      }
-      if (hit.instanceIndex == _selectedIndex) {
-        final String? instance = _selectedInstance;
-        return instance == null ? null : MonitorOpenInstance(instance);
-      }
-      _selectedIndex = hit.instanceIndex;
+    final String? id = hitTest(_hits(), row: event.row - 1, col: event.col - 1);
+    if (id == null) {
       return null;
     }
+    final int index = _snapshot.instances.indexWhere(
+      (String instance) => 'server:$instance' == id,
+    );
+    if (index < 0) {
+      return null;
+    }
+    if (index == _selectedIndex) {
+      final String? instance = _selectedInstance;
+      return instance == null ? null : MonitorOpenInstance(instance);
+    }
+    _selectedIndex = index;
     return null;
   }
 
@@ -510,7 +520,7 @@ class MonitorScreen {
   /// window.
   MonitorResult? _handleWheel(TermEvent event, MonitorAction action) {
     if (!_detailMode) {
-      final List<MonitorHitRow> hits = _hits();
+      final List<MonitorHitbox> hits = _hits();
       if (hits.isNotEmpty) {
         final int row = event.row - 1;
         if (row >= hits.first.row && row <= hits.last.row) {

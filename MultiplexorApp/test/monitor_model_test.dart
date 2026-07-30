@@ -1,6 +1,7 @@
 import 'package:multiplexor/services/monitor/metric_sample.dart';
 import 'package:multiplexor/services/monitor/monitor_detail_model.dart';
 import 'package:multiplexor/services/monitor/monitor_frame_util.dart';
+import 'package:multiplexor/services/monitor/monitor_hitbox.dart';
 import 'package:multiplexor/services/monitor/monitor_model.dart';
 import 'package:multiplexor/services/runtime_state.dart';
 import 'package:multiplexor/utils/terminal/ansi.dart';
@@ -79,27 +80,36 @@ MonitorSnapshot twoServers({String? active = 'alpha'}) => MonitorSnapshot(
 List<String> stripAll(List<String> rows) =>
     rows.map(Ansi.strip).toList(growable: false);
 
+/// The `server:<name>` hitbox id prefix [buildMonitorFrame] emits for every
+/// visible instance row.
+const String _serverHitPrefix = 'server:';
+
 /// Asserts [hits] and the rendered [rows] agree in both directions: every
 /// hit points at the row its own instance was drawn on (name starting at
 /// column 4, right after the panel rule and the selector), and every server
 /// row that carries an instance name has exactly one hit.
 void expectHitsMatchRows(
   List<String> rows,
-  List<MonitorHitRow> hits,
+  List<MonitorHitbox> hits,
   List<String> instances,
 ) {
   final Set<int> hitRows = <int>{};
-  for (final MonitorHitRow hit in hits) {
-    final String name = instances[hit.instanceIndex];
+  final List<int> hitIndices = <int>[];
+  for (final MonitorHitbox hit in hits) {
+    expect(hit.kind, MonitorHitKind.serverRow);
+    expect(hit.colStart, 0);
+    final String name = hit.id.substring(_serverHitPrefix.length);
+    expect(hit.id, startsWith(_serverHitPrefix));
     expect(
       rows[hit.row].substring(4),
       startsWith(name),
       reason: 'hit row ${hit.row} should start instance $name at column 4',
     );
     expect(hitRows.add(hit.row), isTrue, reason: 'duplicate hit row');
+    hitIndices.add(instances.indexOf(name));
   }
   expect(
-    hits.map((MonitorHitRow hit) => hit.instanceIndex).toList(),
+    hitIndices,
     List<int>.generate(hits.length, (int index) => index),
     reason: 'hits are the first N instances, in order',
   );
@@ -191,6 +201,33 @@ void main() {
     });
   });
 
+  group('padFrame', () {
+    test('pads rows to size and drops hitboxes past the frame height', () {
+      const MonitorFrame frame = MonitorFrame(
+        rows: <String>['abc', 'def', 'ghi'],
+        hitboxes: <MonitorHitbox>[
+          MonitorHitbox(
+            id: 'server:alpha',
+            row: 0,
+            colStart: 0,
+            colEnd: 3,
+            kind: MonitorHitKind.serverRow,
+          ),
+          MonitorHitbox(
+            id: 'server:beta',
+            row: 2,
+            colStart: 0,
+            colEnd: 3,
+            kind: MonitorHitKind.serverRow,
+          ),
+        ],
+      );
+      final MonitorFrame padded = padFrame(frame, columns: 5, lines: 2);
+      expect(padded.rows, <String>['abc  ', 'def  ']);
+      expect(padded.hitboxes, <MonitorHitbox>[frame.hitboxes.first]);
+    });
+  });
+
   group('buildResizeRequiredFrame', () {
     test('renders the card with the current and minimum sizes', () {
       final List<String> rows = stripAll(
@@ -234,7 +271,7 @@ void main() {
         theme: plain,
         range: range,
         now: now,
-      );
+      ).rows;
       expectExactFrame(rows, 80, 24);
 
       final List<String> stripped = stripAll(rows);
@@ -271,7 +308,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       final String header = rows.take(4).join('\n');
       expect(header, contains('2 UP'));
@@ -303,7 +340,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       final String header = rows.take(4).join('\n');
       expect(header, contains('0 UP'));
@@ -335,7 +372,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       final String header = rows.take(4).join('\n');
       expect(header, contains('1 UP'));
@@ -357,7 +394,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       final DateTime local = now.toLocal();
       final String clock =
@@ -391,7 +428,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       final String alphaRow = rows.firstWhere(
         (String row) => row.contains('alpha') && row.contains('running'),
@@ -421,7 +458,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       final String gammaRow = rows.firstWhere(
         (String row) => row.contains('gamma'),
@@ -449,7 +486,7 @@ void main() {
         theme: plain,
         range: range,
         now: now,
-      );
+      ).rows;
       expectExactFrame(rows, 80, 40);
       final String joined = stripAll(rows).join('\n');
       expect(joined, contains('NO SERVERS'));
@@ -468,7 +505,7 @@ void main() {
         theme: plain,
         range: range,
         now: now,
-      );
+      ).rows;
       expectExactFrame(rows, 132, 40);
 
       final String joined = stripAll(rows).join('\n');
@@ -491,7 +528,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       final int bandTop = rows.indexWhere(
         (String row) => row.contains('· TPS '),
@@ -530,7 +567,7 @@ void main() {
             theme: plain,
             range: range,
             now: now,
-          ),
+          ).rows,
         );
         final String footer = rows.last.trimRight();
         expect(footer, contains('[enter] open'), reason: 'at $columns');
@@ -553,7 +590,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
       );
       expect(rows.last, contains('g consoles'));
       expect(rows.last, contains('b build'));
@@ -570,7 +607,7 @@ void main() {
         theme: color,
         range: range,
         now: now,
-      );
+      ).rows;
       expect(Ansi.strip(rows.first), contains('MULTIPLEXOR'));
       expect(Ansi.visibleLength(rows.first), 132);
       // A gradient is several colour runs, not the single run a plain
@@ -603,7 +640,7 @@ void main() {
             theme: plain,
             range: range,
             now: now,
-          ),
+          ).rows,
           size[0],
           size[1],
         );
@@ -632,7 +669,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
         80,
         24,
       );
@@ -646,7 +683,7 @@ void main() {
           theme: plain,
           range: range,
           now: now,
-        ),
+        ).rows,
         132,
         40,
       );
@@ -662,7 +699,7 @@ void main() {
         theme: plain,
         range: range,
         now: now,
-      );
+      ).rows;
       expectExactFrame(rows, 70, 20);
       final String joined = stripAll(rows).join('\n');
       expect(joined, contains('RESIZE REQUIRED'));
@@ -680,7 +717,7 @@ void main() {
         theme: plain,
         range: range,
         now: now,
-      );
+      ).rows;
       expect(rows.any((String row) => row.contains('\x1B')), isFalse);
     });
 
@@ -694,51 +731,47 @@ void main() {
         theme: color,
         range: range,
         now: now,
-      );
+      ).rows;
       expectExactFrame(rows, 132, 40);
       expect(rows.any((String row) => row.contains('\x1B')), isTrue);
     });
   });
 
-  group('monitorServerRowHits', () {
+  group('buildMonitorFrame server-row hitboxes', () {
     test('maps rows to the instance rendered on them at 80x24', () {
       final MonitorSnapshot snapshot = twoServers();
-      final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: snapshot,
-          selectedIndex: 0,
-          frame: 0,
-          columns: 80,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
-        ),
+      final MonitorFrame frame = buildMonitorFrame(
+        snapshot: snapshot,
+        selectedIndex: 0,
+        frame: 0,
+        columns: 80,
+        lines: 24,
+        theme: plain,
+        range: range,
+        now: now,
       );
       expectHitsMatchRows(
-        rows,
-        monitorServerRowHits(snapshot: snapshot, columns: 80, lines: 24),
+        stripAll(frame.rows),
+        frame.hitboxes,
         snapshot.instances,
       );
     });
 
     test('maps rows to the instance rendered on them at 132x40', () {
       final MonitorSnapshot snapshot = twoServers();
-      final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: snapshot,
-          selectedIndex: 1,
-          frame: 0,
-          columns: 132,
-          lines: 40,
-          theme: plain,
-          range: range,
-          now: now,
-        ),
+      final MonitorFrame frame = buildMonitorFrame(
+        snapshot: snapshot,
+        selectedIndex: 1,
+        frame: 0,
+        columns: 132,
+        lines: 40,
+        theme: plain,
+        range: range,
+        now: now,
       );
       expectHitsMatchRows(
-        rows,
-        monitorServerRowHits(snapshot: snapshot, columns: 132, lines: 40),
+        stripAll(frame.rows),
+        frame.hitboxes,
         snapshot.instances,
       );
     });
@@ -755,43 +788,50 @@ void main() {
         },
         consumerName: 'survival',
       );
-      final List<String> rows = stripAll(
+      final MonitorFrame frame = buildMonitorFrame(
+        snapshot: snapshot,
+        selectedIndex: 0,
+        frame: 0,
+        columns: 80,
+        lines: 24,
+        theme: plain,
+        range: range,
+        now: now,
+      );
+      expect(frame.hitboxes, isNotEmpty);
+      expect(frame.hitboxes.length, lessThan(names.length));
+      expectHitsMatchRows(stripAll(frame.rows), frame.hitboxes, names);
+    });
+
+    test('emits no hitboxes below the floor or with no instances', () {
+      expect(
         buildMonitorFrame(
-          snapshot: snapshot,
+          snapshot: twoServers(),
           selectedIndex: 0,
           frame: 0,
-          columns: 80,
-          lines: 24,
+          columns: 70,
+          lines: 20,
           theme: plain,
           range: range,
           now: now,
-        ),
-      );
-      final List<MonitorHitRow> hits = monitorServerRowHits(
-        snapshot: snapshot,
-        columns: 80,
-        lines: 24,
-      );
-      expect(hits, isNotEmpty);
-      expect(hits.length, lessThan(names.length));
-      expectHitsMatchRows(rows, hits, names);
-    });
-
-    test('returns no hits below the floor or with no instances', () {
-      expect(
-        monitorServerRowHits(snapshot: twoServers(), columns: 70, lines: 20),
+        ).hitboxes,
         isEmpty,
       );
       expect(
-        monitorServerRowHits(
+        buildMonitorFrame(
           snapshot: const MonitorSnapshot(
             instances: <String>[],
             history: <String, List<MetricSample>>{},
             consumerName: 'survival',
           ),
+          selectedIndex: 0,
+          frame: 0,
           columns: 132,
           lines: 40,
-        ),
+          theme: plain,
+          range: range,
+          now: now,
+        ).hitboxes,
         isEmpty,
       );
     });
@@ -822,7 +862,7 @@ void main() {
         theme: theme ?? MonitorTheme.plain(),
         range: range,
         now: now,
-      );
+      ).rows;
     }
 
     test('renders four charts, a log panel and a footer at 132x40', () {

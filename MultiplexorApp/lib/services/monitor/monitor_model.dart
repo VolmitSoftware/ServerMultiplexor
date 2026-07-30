@@ -8,6 +8,7 @@ import '../../utils/terminal/theme.dart';
 import '../runtime_state.dart';
 import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
+import 'monitor_hitbox.dart';
 
 /// Rows for the header panel (two content rows plus borders) and the footer.
 const int _headerRows = 4;
@@ -100,22 +101,13 @@ class MonitorSnapshot {
   }
 }
 
-/// One clickable server row: the absolute, zero-based frame row [row] that
-/// instance [instanceIndex] was rendered on.
-class MonitorHitRow {
-  const MonitorHitRow({required this.row, required this.instanceIndex});
-
-  final int row;
-  final int instanceIndex;
-}
-
 /// The resolved row geometry of a monitor frame: the servers panel's total
 /// rows (borders included), how many instances got a row, how many did not
 /// fit (summarised on the last content row), and the bottom band's rows
 /// (zero when there is no band).
 ///
-/// [buildMonitorFrame] and [monitorServerRowHits] both derive their
-/// positions from this, so a click target can never drift from what was
+/// [buildMonitorFrame] derives both the rendered rows and the server-row
+/// hitboxes from this, so a click target can never drift from what was
 /// drawn.
 class _MonitorLayout {
   const _MonitorLayout({
@@ -194,7 +186,12 @@ _MonitorLayout _resolveLayout({
 /// are UTC and chart windows are `[now - range, now]` — and is the only
 /// notion of "current" the frame has. The header clock is rendered in local
 /// time from it.
-List<String> buildMonitorFrame({
+///
+/// [hoveredId] and [pressedId] are accepted but not yet consumed by any
+/// layout decision — they exist so callers can thread hover/press state
+/// through now; the frame renders identically regardless of their value
+/// until a later change reads them.
+MonitorFrame buildMonitorFrame({
   required MonitorSnapshot snapshot,
   required int selectedIndex,
   required int frame,
@@ -203,12 +200,17 @@ List<String> buildMonitorFrame({
   required MonitorTheme theme,
   required Duration range,
   required DateTime now,
+  String? hoveredId,
+  String? pressedId,
 }) {
   if (columns < monitorMinColumns || lines < monitorMinLines) {
-    return buildResizeRequiredFrame(
-      columns: columns,
-      lines: lines,
-      theme: theme,
+    return MonitorFrame(
+      rows: buildResizeRequiredFrame(
+        columns: columns,
+        lines: lines,
+        theme: theme,
+      ),
+      hitboxes: const <MonitorHitbox>[],
     );
   }
 
@@ -248,34 +250,21 @@ List<String> buildMonitorFrame({
     theme.paint(_footerHints(columns), theme.faint),
   ];
 
-  return padMonitorFrame(rows: rows, columns: columns, lines: lines);
-}
+  final List<MonitorHitbox> hitboxes = <MonitorHitbox>[
+    for (int index = 0; index < layout.visibleInstances; index++)
+      MonitorHitbox(
+        id: 'server:${snapshot.instances[index]}',
+        kind: MonitorHitKind.serverRow,
+        row: layout.firstServerContentRow + index,
+        colStart: 0,
+        colEnd: columns,
+      ),
+  ];
 
-/// The frame rows that carry an instance row in [buildMonitorFrame]'s output
-/// for the same [snapshot], [columns] and [lines] — the mouse-click map.
-///
-/// Empty below the size floor, when there are no instances, and for any
-/// instance the servers panel could not fit.
-List<MonitorHitRow> monitorServerRowHits({
-  required MonitorSnapshot snapshot,
-  required int columns,
-  required int lines,
-}) {
-  if (columns < monitorMinColumns ||
-      lines < monitorMinLines ||
-      snapshot.instances.isEmpty) {
-    return const <MonitorHitRow>[];
-  }
-  final _MonitorLayout layout = _resolveLayout(
-    instanceCount: snapshot.instances.length,
+  return padFrame(
+    MonitorFrame(rows: rows, hitboxes: hitboxes),
+    columns: columns,
     lines: lines,
-  );
-  return List<MonitorHitRow>.generate(
-    layout.visibleInstances,
-    (int index) => MonitorHitRow(
-      row: layout.firstServerContentRow + index,
-      instanceIndex: index,
-    ),
   );
 }
 

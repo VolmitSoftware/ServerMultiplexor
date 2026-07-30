@@ -5,6 +5,7 @@ import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
 import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
+import 'monitor_hitbox.dart';
 
 /// Rows the detail header panel occupies: one content row plus its borders.
 const int _headerRows = 3;
@@ -66,7 +67,12 @@ class _DetailChart {
 ///
 /// Pure: no clock reads and no IO. [now] must be UTC, matching the UTC
 /// timestamps on [history]; every chart window is `[now - range, now]`.
-List<String> buildDetailFrame({
+///
+/// [hoveredId] and [pressedId] are accepted but not yet consumed by any
+/// layout decision — they exist so callers can thread hover/press state
+/// through now; the frame renders identically regardless of their value
+/// until a later change reads them.
+MonitorFrame buildDetailFrame({
   required String instance,
   required List<MetricSample> history,
   required List<String> logLines,
@@ -76,12 +82,17 @@ List<String> buildDetailFrame({
   required MonitorTheme theme,
   required Duration range,
   required DateTime now,
+  String? hoveredId,
+  String? pressedId,
 }) {
   if (columns < monitorMinColumns || lines < monitorMinLines) {
-    return buildResizeRequiredFrame(
-      columns: columns,
-      lines: lines,
-      theme: theme,
+    return MonitorFrame(
+      rows: buildResizeRequiredFrame(
+        columns: columns,
+        lines: lines,
+        theme: theme,
+      ),
+      hitboxes: const <MonitorHitbox>[],
     );
   }
 
@@ -126,7 +137,11 @@ List<String> buildDetailFrame({
     theme.paint(_detailFooterHint, theme.faint),
   ];
 
-  return padMonitorFrame(rows: rows, columns: columns, lines: lines);
+  return padFrame(
+    MonitorFrame(rows: rows, hitboxes: const <MonitorHitbox>[]),
+    columns: columns,
+    lines: lines,
+  );
 }
 
 /// Splits the rows between charts and the log, then between the charts.
