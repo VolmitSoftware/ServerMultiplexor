@@ -22,18 +22,14 @@ class Ui {
 
   static final Console _console = Console();
 
-  static MonitorTheme? _themeOverride;
-  static MonitorTheme? _detectedTheme;
-
-  /// The theme every prompt and menu renders with. Detection reads the
-  /// environment, so it is resolved once and reused; a test can pin it with
-  /// [themeOverride].
-  static MonitorTheme get theme =>
-      _themeOverride ?? (_detectedTheme ??= MonitorTheme.detect());
+  /// The theme every prompt and menu renders with: [MonitorTheme.cached],
+  /// surfaced here so callers of this facade have one place to look.
+  static MonitorTheme get theme => MonitorTheme.cached;
 
   /// Pins [theme] to a fixed value, or restores detection when set to null.
   /// For tests: production code only reads [theme].
-  static set themeOverride(MonitorTheme? value) => _themeOverride = value;
+  static set themeOverride(MonitorTheme? value) =>
+      MonitorTheme.cachedOverride = value;
 
   static bool get hasTerminal => TermIo.instance.hasTerminal;
 
@@ -238,11 +234,15 @@ class Ui {
   static void _inputAccepted(
     String message,
     String value, {
-    String color = Ansi.green,
+    String? valueTone,
   }) {
     stdout.writeln(
-      '${Ansi.style('✔', Ansi.green)} ${Ansi.style(message, Ansi.bold)} '
-      '${Ansi.style('·', Ansi.gray)} ${Ansi.style(value, color)}',
+      renderPromptResult(
+        prompt: message,
+        value: value,
+        theme: theme,
+        valueTone: valueTone,
+      ),
     );
   }
 
@@ -419,7 +419,7 @@ class Ui {
       _inputAccepted(
         prompt,
         value ? 'yes' : 'no',
-        color: value ? Ansi.green : Ansi.gray,
+        valueTone: value ? theme.ok : theme.faint,
       );
       return value;
     }

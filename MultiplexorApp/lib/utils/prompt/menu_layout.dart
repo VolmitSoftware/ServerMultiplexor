@@ -59,6 +59,43 @@ int staleBandBottom({
   return tail > terminalLines ? terminalLines : tail;
 }
 
+/// Index of the entry drawn on screen row [row], or null when that row is not
+/// an entry row: the frame's first row is its top border, and its last rows are
+/// the footer and the bottom border.
+///
+/// [frameTop] is the screen row the top border occupies, as the last draw
+/// measured it.
+int? menuEntryAtRow({
+  required int row,
+  required int frameTop,
+  required int entryCount,
+}) {
+  final int index = row - frameTop - 1;
+  if (index < 0 || index >= entryCount) {
+    return null;
+  }
+  return index;
+}
+
+/// The screen rows a frame of [frameHeight] rows drawn at [top] occupies, both
+/// inclusive: the band that has to be erased to take the frame off the screen.
+///
+/// The cursor parks on [top] — the row the top border occupied — so whatever
+/// the caller prints next lands in the menu's place.
+({int top, int bottom}) menuClearBand({
+  required int top,
+  required int frameHeight,
+}) => (top: top, bottom: top + frameHeight - 1);
+
+/// The cursor moves that erase a frame of [frameHeight] rows when the terminal
+/// does not report a cursor position, starting from where a draw parks the
+/// cursor: column 1 of the frame's last row.
+///
+/// [up] reaches the frame's first row, [erase] rows are then erased downward
+/// (each erase advances a row), and [back] returns to the first row.
+({int up, int erase, int back}) menuClearMoves({required int frameHeight}) =>
+    (up: frameHeight - 1, erase: frameHeight, back: frameHeight);
+
 /// Columns a framed row spends on its borders and their padding: `│ ` and
 /// ` │`.
 const int _menuChromeWidth = 4;
@@ -66,6 +103,14 @@ const int _menuChromeWidth = 4;
 /// Columns a border spends around its inlay: `┌─ `, a trailing space, and the
 /// closing corner.
 const int _menuInlayChromeWidth = 5;
+
+/// Columns a rule spends around an inlaid heading: `── ` and the space before
+/// the tail.
+const int _menuRuleChromeWidth = 4;
+
+/// Shortest tail an inlaid run keeps after it, so a title or heading never
+/// runs into the corner it is inlaid before.
+const int _menuInlayTailWidth = 2;
 
 /// Shortest border that still has room for a readable inlaid run. Below this
 /// the border is drawn solid instead.
@@ -121,7 +166,7 @@ String _menuBorder({
   }
   final String clipped = Ansi.clipVisible(
     inlay,
-    width - _menuInlayChromeWidth - 1,
+    width - _menuInlayChromeWidth - _menuInlayTailWidth,
   );
   final int fill = width - _menuInlayChromeWidth - Ansi.visibleLength(clipped);
   final StringBuffer buffer = StringBuffer()
@@ -155,23 +200,33 @@ String _menuFramedRow(
   return _menuForceWidth('$rule$bar $painted ${Ansi.reset}$rule', width);
 }
 
-/// A separator drawn as a rule across the frame's [inner] columns, with its
-/// label inlaid: `── SECTION ──────`.
+/// A separator drawn as a rule across the frame's [inner] columns, with
+/// [heading] — already uppercased, so it is sized as it is drawn — inlaid:
+/// `── SECTION ──────`.
 String _menuSeparatorRow(
-  String label, {
+  String heading, {
   required int inner,
   required MonitorTheme theme,
 }) {
   final String dash = theme.glyphs.frameH;
-  if (label.isEmpty || inner < 8) {
+  if (heading.isEmpty || inner < _menuMinInlayWidth) {
     return theme.paint(dash * inner, theme.frame);
   }
-  final String text = Ansi.clipVisible(label.toUpperCase(), inner - 6);
-  final int fill = inner - 4 - Ansi.visibleLength(text);
+  final String text = Ansi.clipVisible(
+    heading,
+    inner - _menuRuleChromeWidth - _menuInlayTailWidth,
+  );
+  final int fill = inner - _menuRuleChromeWidth - Ansi.visibleLength(text);
   return theme.paint('$dash$dash ', theme.frame) +
       theme.paint(text, '${theme.bold}${theme.faint}') +
       theme.paint(' ${dash * (fill < 0 ? 0 : fill)}', theme.frame);
 }
+
+/// An inlaid run styled for [theme]: the tone where the theme has color, and
+/// stripped of any escapes the caller brought where it has none — the same
+/// rule the frame's rows follow.
+String _menuInlay(String text, String tone, MonitorTheme theme) =>
+    _isColorless(theme) ? Ansi.strip(text) : theme.paint(text, tone);
 
 /// Styles a caller-provided run — a menu footer or an entry detail — that may
 /// already carry its own escapes: pre-styled text is passed through, plain text
@@ -182,6 +237,23 @@ String _menuCallerText(String text, MonitorTheme theme) {
   }
   return text.contains('\x1B') ? text : theme.paint(text, theme.faint);
 }
+
+/// The line a finished prompt leaves in its place: `✔ Prompt · value`.
+///
+/// Shared by every prompt that answers in a line — the menu, line input,
+/// secrets, confirmations — so they all report the same shape. [valueTone]
+/// overrides the tone of [value] (a declined confirmation is faint, not ok).
+/// A colorless theme emits the same text with no escape bytes at all.
+String renderPromptResult({
+  required String prompt,
+  required String value,
+  required MonitorTheme theme,
+  String? valueTone,
+}) =>
+    '${theme.paint('✔', theme.ok)} '
+    '${theme.paint(prompt, '${theme.bold}${theme.text}')} '
+    '${theme.paint('·', theme.faint)} '
+    '${theme.paint(value, valueTone ?? theme.ok)}';
 
 /// The terminal rows of one menu frame, in draw order: the top border with
 /// [title] inlaid, one row per entry, the footer row when [footer] is set, and
@@ -236,6 +308,13 @@ List<String> renderMenuRows<T>(
   final String styledFooter = footer == null
       ? ''
       : _menuCallerText(footer, theme);
+  // Headings and the title are drawn uppercased, so they are measured that way
+  // too: uppercasing can change a string's length.
+  final List<String> headings = <String>[
+    for (final MenuEntry<T> entry in entries)
+      entry.isSeparator ? entry.label.toUpperCase() : '',
+  ];
+  final String upperTitle = title.toUpperCase();
 
   int contentWidth = 0;
   void demand(int width) {
@@ -244,26 +323,31 @@ List<String> renderMenuRows<T>(
     }
   }
 
+  /// Width the frame needs for a run inlaid in a border rather than in a row:
+  /// the border's own chrome and tail, less the side padding a row spends.
+  int inlayDemand(String text) =>
+      Ansi.visibleLength(text) +
+      _menuInlayChromeWidth +
+      _menuInlayTailWidth -
+      _menuChromeWidth;
+
   for (int i = 0; i < entries.length; i++) {
     final String? content = contents[i];
     if (content != null) {
       demand(Ansi.visibleLength(content));
-    } else if (entries[i].label.isNotEmpty) {
-      // '── LABEL ──' at its shortest.
-      demand(entries[i].label.length + 6);
+    } else if (headings[i].isNotEmpty) {
+      demand(
+        Ansi.visibleLength(headings[i]) +
+            _menuRuleChromeWidth +
+            _menuInlayTailWidth,
+      );
     }
   }
   if (footer != null) {
     demand(Ansi.visibleLength(styledFooter));
   }
-  // An inlaid run needs the border's own chrome plus a two-glyph tail, which
-  // the box's side padding covers all but one column of.
-  demand(
-    Ansi.visibleLength(title) + _menuInlayChromeWidth - _menuChromeWidth + 2,
-  );
-  demand(
-    Ansi.visibleLength(hint) + _menuInlayChromeWidth - _menuChromeWidth + 2,
-  );
+  demand(inlayDemand(upperTitle));
+  demand(inlayDemand(hint));
 
   final int desired = contentWidth + _menuChromeWidth;
   final int width = desired > maxWidth ? maxWidth : desired;
@@ -273,17 +357,14 @@ List<String> renderMenuRows<T>(
     _menuBorder(
       left: theme.glyphs.frameTl,
       right: theme.glyphs.frameTr,
-      inlay: theme.paint(
-        title.toUpperCase(),
-        '${theme.bold}${theme.textStrong}',
-      ),
+      inlay: _menuInlay(upperTitle, '${theme.bold}${theme.textStrong}', theme),
       width: width,
       theme: theme,
     ),
     for (int i = 0; i < entries.length; i++)
       _menuFramedRow(
         contents[i] ??
-            _menuSeparatorRow(entries[i].label, inner: inner, theme: theme),
+            _menuSeparatorRow(headings[i], inner: inner, theme: theme),
         isSelected: contents[i] != null && i == selected,
         width: width,
         theme: theme,
@@ -298,9 +379,7 @@ List<String> renderMenuRows<T>(
     _menuBorder(
       left: theme.glyphs.frameBl,
       right: theme.glyphs.frameBr,
-      inlay: _isColorless(theme)
-          ? Ansi.strip(hint)
-          : theme.paint(hint, theme.faint),
+      inlay: _menuInlay(hint, theme.faint, theme),
       width: width,
       theme: theme,
     ),

@@ -390,6 +390,23 @@ class MonitorTheme {
   factory MonitorTheme.plainAscii() =>
       const MonitorTheme._(ColorDepth.none, MonitorGlyphs.ascii);
 
+  static MonitorTheme? _override;
+  static MonitorTheme? _detected;
+
+  /// The process-wide theme for surfaces that render one row at a time and
+  /// have no frame to carry a theme down from — the prompts and the cooked-mode
+  /// menu. [detect] reads the environment on every call, so it is resolved once
+  /// here and reused.
+  ///
+  /// Renderers that are handed a theme keep taking it as a parameter; this is
+  /// only for the entry points that have nowhere to get one from.
+  static MonitorTheme get cached =>
+      _override ?? (_detected ??= MonitorTheme.detect());
+
+  /// Pins [cached] to a fixed theme, or restores detection when set to null.
+  /// For tests: production code reads [cached].
+  static set cachedOverride(MonitorTheme? value) => _override = value;
+
   String get frame => _encodeTone(_Palette.frame, depth);
   String get frameActive => _encodeTone(_Palette.frameActive, depth);
   String get text => _encodeTone(_Palette.text, depth);

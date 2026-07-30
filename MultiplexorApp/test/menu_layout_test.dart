@@ -72,6 +72,115 @@ void main() {
     });
   });
 
+  group('menuEntryAtRow', () {
+    // Frame at row 10: 10 is the top border, 11..14 the four entries, 15 the
+    // footer, 16 the bottom border.
+    test('maps the row under the top border to the first entry', () {
+      expect(menuEntryAtRow(row: 11, frameTop: 10, entryCount: 4), 0);
+    });
+
+    test('maps the last entry row', () {
+      expect(menuEntryAtRow(row: 14, frameTop: 10, entryCount: 4), 3);
+    });
+
+    test('ignores the top border', () {
+      expect(menuEntryAtRow(row: 10, frameTop: 10, entryCount: 4), isNull);
+    });
+
+    test('ignores the footer and the bottom border below the entries', () {
+      expect(menuEntryAtRow(row: 15, frameTop: 10, entryCount: 4), isNull);
+      expect(menuEntryAtRow(row: 16, frameTop: 10, entryCount: 4), isNull);
+    });
+
+    test('ignores rows above the frame', () {
+      expect(menuEntryAtRow(row: 9, frameTop: 10, entryCount: 4), isNull);
+      expect(menuEntryAtRow(row: 1, frameTop: 10, entryCount: 4), isNull);
+    });
+  });
+
+  group('menuClearBand', () {
+    test('covers the frame from its top border to its bottom border', () {
+      expect(menuClearBand(top: 5, frameHeight: 6), (top: 5, bottom: 10));
+    });
+
+    test('is a single row for a one-row frame', () {
+      expect(menuClearBand(top: 5, frameHeight: 1), (top: 5, bottom: 5));
+    });
+  });
+
+  group('menuClearMoves', () {
+    test('walks up from the frame\'s last row and back to its first', () {
+      final ({int up, int erase, int back}) moves = menuClearMoves(
+        frameHeight: 6,
+      );
+      expect(moves.up, 5);
+      expect(moves.erase, 6);
+      expect(moves.back, 6);
+    });
+
+    test('erases as many rows as the frame is tall', () {
+      for (final int height in <int>[3, 8, 34]) {
+        final ({int up, int erase, int back}) moves = menuClearMoves(
+          frameHeight: height,
+        );
+        // Up to the top row, erase downward from there, back to the top row.
+        expect(moves.up + 1, height);
+        expect(moves.erase, height);
+        expect(moves.back, moves.erase);
+      }
+    });
+  });
+
+  group('renderPromptResult', () {
+    test('reports the prompt and its answer', () {
+      final String line = renderPromptResult(
+        prompt: 'Server platform',
+        value: 'Paper',
+        theme: colorTheme(),
+      );
+      expect(Ansi.strip(line), '✔ Server platform · Paper');
+    });
+
+    test('tones the value with the theme, or with an override', () {
+      final MonitorTheme theme = colorTheme();
+      expect(
+        renderPromptResult(prompt: 'Wipe', value: 'yes', theme: theme),
+        contains('${theme.ok}yes'),
+      );
+      expect(
+        renderPromptResult(
+          prompt: 'Wipe',
+          value: 'no',
+          theme: theme,
+          valueTone: theme.faint,
+        ),
+        contains('${theme.faint}no'),
+      );
+    });
+
+    test('emits no escape bytes with a colorless theme', () {
+      final String line = renderPromptResult(
+        prompt: 'Instance name',
+        value: 'paper-26.2',
+        theme: MonitorTheme.plain(),
+      );
+      expect(line, '✔ Instance name · paper-26.2');
+      expect(line, isNot(contains('\x1B')));
+    });
+
+    test('stays escape-free with a toned value at depth none', () {
+      final MonitorTheme theme = MonitorTheme.plain();
+      final String line = renderPromptResult(
+        prompt: 'Wipe every instance?',
+        value: 'no',
+        theme: theme,
+        valueTone: theme.faint,
+      );
+      expect(line, '✔ Wipe every instance? · no');
+      expect(line, isNot(contains('\x1B')));
+    });
+  });
+
   group('clampFrameTop', () {
     test('leaves a frame that fits where it is', () {
       expect(

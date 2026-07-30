@@ -4,9 +4,6 @@ import '../terminal/ansi.dart';
 import '../terminal/term_events.dart';
 import '../terminal/term_io.dart';
 import '../terminal/theme.dart';
-// Only for the shared, lazily detected prompt theme; `show` keeps this back
-// edge to the Ui facade from shadowing the imports above it.
-import '../user_prompt.dart' show Ui;
 
 part 'menu_layout.dart';
 
@@ -174,7 +171,7 @@ Future<T> menuSelect<T>(
       hint: hintText,
       footer: currentFooter,
       columns: columns,
-      theme: Ui.theme,
+      theme: MonitorTheme.cached,
     );
 
     // Parking the cursor at column 1 of the last row makes the resting position
@@ -259,22 +256,25 @@ Future<T> menuSelect<T>(
   void clear() {
     final int? top = frameTop;
     if (top == null) {
-      // Cursor rests on the frame's last row; the top border sits
-      // frameHeight - 1 rows above it.
-      if (frameHeight > 1) {
-        stdout.write('\r\x1B[${frameHeight - 1}A');
-      }
-      for (int i = 0; i < frameHeight; i++) {
+      final ({int up, int erase, int back}) moves = menuClearMoves(
+        frameHeight: frameHeight,
+      );
+      stdout.write('\r\x1B[${moves.up}A');
+      for (int i = 0; i < moves.erase; i++) {
         stdout.write('\r${Ansi.eraseLine}\x1B[1B');
       }
-      stdout.write('\x1B[${frameHeight}A');
+      stdout.write('\x1B[${moves.back}A');
       return;
     }
+    final ({int top, int bottom}) band = menuClearBand(
+      top: top,
+      frameHeight: frameHeight,
+    );
     final StringBuffer out = StringBuffer();
-    for (int row = top; row < top + frameHeight; row++) {
+    for (int row = band.top; row <= band.bottom; row++) {
       out.write('\x1B[$row;1H${Ansi.eraseLine}');
     }
-    out.write('\x1B[$top;1H');
+    out.write('\x1B[${band.top};1H');
     stdout.write(out.toString());
   }
 
@@ -301,9 +301,12 @@ Future<T> menuSelect<T>(
       if (first == null) {
         return null;
       }
-      // The frame's first row is the top border, so entries start one below.
-      final int index = row - first - 1;
-      if (index < 0 || index >= entries.length) {
+      final int? index = menuEntryAtRow(
+        row: row,
+        frameTop: first,
+        entryCount: entries.length,
+      );
+      if (index == null) {
         return null;
       }
       return entries[index].selectable ? index : null;
@@ -317,8 +320,11 @@ Future<T> menuSelect<T>(
       // return the carriage and the next line starts mid-column.
       io.setRawMode(false);
       stdout.writeln(
-        '${Ansi.style('✔', Ansi.green)} ${Ansi.style(title, Ansi.bold)} '
-        '${Ansi.style('·', Ansi.gray)} ${Ansi.style(label, Ansi.green)}',
+        renderPromptResult(
+          prompt: title,
+          value: label,
+          theme: MonitorTheme.cached,
+        ),
       );
       return value;
     }
