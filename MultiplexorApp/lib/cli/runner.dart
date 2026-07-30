@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'command_help.dart';
 import 'handlers/consumer_handlers.dart';
+import 'handlers/monitor_handler.dart';
 import 'handlers/passthrough_handlers.dart';
 import 'handlers/wizard_handler.dart';
 
@@ -335,6 +336,10 @@ Future<int> _runRuntime(List<String> rest) async {
   final parsed = _parse(rest.skip(1).toList(growable: false));
 
   switch (sub) {
+    // Routed here rather than through the native passthrough: the monitor
+    // owns the terminal and, interactively, the wizard's own flows.
+    case 'watch':
+      return handleRuntimeWatch(rest.skip(1).toList(growable: false));
     case 'console':
       await handleRuntimeConsole(<String, dynamic>{
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
@@ -411,7 +416,7 @@ Future<int> _runRuntime(List<String> rest) async {
       }
     default:
       stderr.writeln(
-        'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (start/restart support --instance/--no-console)',
+        'Usage: runtime <watch|console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (watch supports --once; start/restart support --instance/--no-console)',
       );
       return 2;
   }

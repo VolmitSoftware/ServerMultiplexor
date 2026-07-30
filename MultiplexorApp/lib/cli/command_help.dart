@@ -42,6 +42,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]',
   ]),
   CommandHelpGroup('runtime', <String>[
+    'watch [--once]',
     'start [instance] [--instance <name>] [--no-console]',
     'console [instance] [--instance <name>]',
     'consoles',

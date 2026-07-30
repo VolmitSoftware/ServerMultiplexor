@@ -1,20 +1,31 @@
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
+
 import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
 import '../utils/process_runner.dart';
+import '../utils/terminal/theme.dart';
 import '../utils/user_prompt.dart';
 import 'consumer_service.dart';
 import 'dashboard_glyphs.dart';
-import 'dashboard_quick_action.dart';
+import 'monitor/log_tail.dart';
+import 'monitor/metric_sample.dart';
+import 'monitor/metrics_sampler.dart';
+import 'monitor/monitor_keymap.dart';
+import 'monitor/monitor_model.dart';
+import 'monitor/monitor_screen.dart';
+import 'monitor/trend_store.dart';
 import 'passthrough_service.dart';
 import 'runtime_state.dart';
 
-/// Dashboard-driven interactive wizard.
+/// Monitor-driven interactive wizard.
 ///
-/// One screen lists every instance with its live state; selecting an
-/// instance opens a flat, state-aware action menu. Global actions sit
-/// below the instance list with single-key shortcuts. All background
+/// The landing view is the full-screen monitor ([MonitorScreen]): it owns
+/// the dashboard, the charts, and the per-instance quick keys. Everything it
+/// cannot do itself it hands back here — opening an instance, creating one,
+/// the workspace menu, switching consumers — and each of those runs as a
+/// flat, state-aware menu flow on a suspended terminal. All background
 /// commands run shielded so stray keystrokes cannot corrupt the UI.
 class InteractiveWizard {
   InteractiveWizard({
@@ -40,33 +51,31 @@ class InteractiveWizard {
     'neoforge',
   ];
 
+  /// How far back a new monitor session backfills its charts from the trend
+  /// store. Matches the longest window the dashboard can cycle to.
+  static const Duration _trendSeedWindow = Duration(hours: 24);
+
   Future<void> run() async {
     if (!Ui.hasTerminal) {
       _printTextFallback();
       return;
     }
+    await runMonitor();
+  }
 
+  /// Runs the full-screen monitor as the landing view, dispatching every
+  /// hand-off it reports back into this wizard's own flows.
+  ///
+  /// Owns the terminal for its whole lifetime, so callers only have to have
+  /// checked [Ui.hasTerminal] first. Shared with `runtime watch`, which
+  /// lands on the same dashboard with the same flows behind it.
+  Future<void> runMonitor() async {
     TermIo.instance.installSignalRestore();
     try {
-      while (true) {
-        final _DashboardData data = await Ui.spin(
-          'Loading servers',
-          _loadDashboardData,
-        );
-        _renderHeader(data);
-
-        _DashChoice choice;
-        try {
-          choice = await _dashboardMenu(data);
-        } on PromptBackNavigation {
-          return;
-        }
-
-        if (choice.kind == _Act.quit) {
-          return;
-        }
-        await _runStep(() => _dispatch(choice, data.rows));
-      }
+      // A consumer switch invalidates the sampler, its trend store, and
+      // every reading either holds, so that one hand-off rebuilds the
+      // session rather than resuming it.
+      while (await _monitorSession()) {}
     } on PromptInputUnavailable catch (e) {
       Ui.error('Input stream lost: $e');
       stdout.writeln('Wizard closed to avoid a redraw loop.');
@@ -92,317 +101,236 @@ class InteractiveWizard {
     }
   }
 
-  // ─── Dashboard ───────────────────────────────────────────────────────
+  // ─── Monitor ─────────────────────────────────────────────────────────
 
-  Future<_DashboardData> _loadDashboardData() async {
-    return _DashboardData(
-      rows: await _loadInstanceRows(),
-      active: await _activeInstance(),
-      dropins: await _dropinsSource(),
-      buildCache: await _cachedBuilds('all'),
+  /// One monitor session, against whichever consumer is active when it
+  /// starts. Returns true when the caller should build a fresh session:
+  /// the user switched consumers, so every sample taken so far — and the
+  /// trend directory they were written to — belongs to the old profile.
+  Future<bool> _monitorSession() async {
+    final MetricsSampler sampler = MetricsSampler(
+      captureMetrics: _captureMetrics,
+      store: await _trendStore(),
     );
-  }
+    // Swept and seeded before the screen opens so the first frame carries
+    // both live readings and whatever history the last session left behind.
+    await Ui.spin('Loading servers', () async {
+      await sampler.sweep();
+      await sampler.seedFromStore(sampler.instances, window: _trendSeedWindow);
+    });
 
-  void _renderHeader(_DashboardData data) {
-    Ui.clearScreen();
-    final ConsumerProfile consumer = _activeConsumer();
-    Ui.appHeader('MULTIPLEXOR', <String>[
-      'consumer: ${consumer.shortName}',
-      if (data.active != null) 'active: ${data.active}',
-      if (data.dropins != null)
-        '${_isPluginConsumer() ? 'plugins' : 'mods'}: '
-            '${_shortenPath(data.dropins!)}',
-    ]);
-    Ui.blank();
-  }
+    final MonitorScreen screen = MonitorScreen(
+      sampler: sampler,
+      theme: MonitorTheme.detect(),
+      loadSnapshot: () => _monitorSnapshot(sampler),
+      suspend: _suspendedFlow,
+      quickAction: _monitorQuickAction,
+      readLogTail: readLogTail,
+    );
 
-  List<MenuEntry<_DashChoice>> _buildDashEntries(
-    List<_InstanceRow> rows,
-    String? active, {
-    int frame = 0,
-  }) {
-    final List<_InstanceRow> running = rows
-        .where((_InstanceRow r) => r.state != RuntimeState.stopped)
-        .toList(growable: false);
-    final List<_InstanceRow> stopped = rows
-        .where((_InstanceRow r) => r.state == RuntimeState.stopped)
-        .toList(growable: false);
-
-    final List<MenuEntry<_DashChoice>> entries = <MenuEntry<_DashChoice>>[];
-
-    if (rows.isEmpty) {
-      entries.add(
-        MenuEntry<_DashChoice>(
-          'Create your first server',
-          value: const _DashChoice(_Act.create),
-          shortcut: 'n',
-        ),
-      );
-    } else {
-      entries.add(const MenuEntry<_DashChoice>.separator('servers'));
-      for (final _InstanceRow row in rows) {
-        final List<String> bits = <String>[
-          Ansi.style(':${row.port}', Ansi.gray),
-        ];
-        if (row.players != null) {
-          final String players = '${row.players}/${row.maxPlayers ?? '?'}';
-          bits.add(
-            Ansi.style(players, row.players! > 0 ? Ansi.cyan : Ansi.gray),
-          );
-        }
-        if (row.tps != null) {
-          bits.add(
-            Ansi.style(
-              '${row.tps!.toStringAsFixed(1)} tps',
-              _tpsColor(row.tps!),
-            ),
-          );
-        }
-        if (row.version != null && row.version!.isNotEmpty) {
-          bits.add(Ansi.style(row.version!, Ansi.gray));
-        }
-        if (row.locked) {
-          bits.add(Ansi.style('locked', Ansi.yellow));
-        }
-        if (row.isolated) {
-          bits.add(Ansi.style('isolated', Ansi.gray));
-        }
-        final String activeMark = row.name == active
-            ? '  ${Ansi.style('active', Ansi.cyan)}'
-            : '';
-        entries.add(
-          MenuEntry<_DashChoice>(
-            row.name,
-            value: _DashChoice(_Act.instance, instance: row.name),
-            badge: '${animatedStateGlyph(row.state, frame)} ${row.state.name}',
-            badgeColor: _stateColor(row.state),
-            detail: '${bits.join(Ansi.style(' · ', Ansi.gray))}$activeMark',
-          ),
-        );
+    while (true) {
+      final MonitorResult result = await screen.run();
+      switch (result) {
+        case MonitorQuit():
+          return false;
+        case MonitorSwitchConsumer():
+          await _monitorFlow(_switchConsumer);
+          return true;
+        case MonitorOpenInstance(:final String instance):
+          await _monitorFlow(() => _instanceMenu(instance));
+        case MonitorNewInstance():
+          await _monitorFlow(_createInstance);
+        case MonitorBuildMenu():
+          await _monitorFlow(_workspaceMenu);
       }
     }
-
-    entries.add(const MenuEntry<_DashChoice>.separator('actions'));
-    if (rows.isNotEmpty) {
-      entries.add(
-        MenuEntry<_DashChoice>(
-          'New instance',
-          value: const _DashChoice(_Act.create),
-          shortcut: 'n',
-        ),
-      );
-    }
-    entries.add(
-      MenuEntry<_DashChoice>(
-        'Create many',
-        value: const _DashChoice(_Act.createMany),
-        shortcut: 'm',
-        detail: 'one server per type, all at once',
-      ),
-    );
-    entries.add(
-      MenuEntry<_DashChoice>(
-        'Pull latest builds',
-        value: const _DashChoice(_Act.pullBuilds),
-        shortcut: 'p',
-        detail: 'refresh every platform jar, spigot included',
-      ),
-    );
-    if (stopped.length > 1) {
-      entries.add(
-        MenuEntry<_DashChoice>(
-          'Start all stopped',
-          value: const _DashChoice(_Act.startAll),
-          shortcut: 's',
-          detail: '${stopped.length} instances',
-        ),
-      );
-    }
-    if (running.length > 1) {
-      entries.add(
-        MenuEntry<_DashChoice>(
-          'Stop all running',
-          value: const _DashChoice(_Act.stopAll),
-          shortcut: 'k',
-          detail: '${running.length} instances',
-        ),
-      );
-    }
-    if (running.isNotEmpty) {
-      entries.add(
-        MenuEntry<_DashChoice>(
-          'All consoles: grid',
-          value: const _DashChoice(_Act.consolesGrid),
-          shortcut: 'g',
-          detail: running.length == 1
-              ? '1 console'
-              : 'grid view · ${running.length} consoles',
-        ),
-      );
-      entries.add(
-        MenuEntry<_DashChoice>(
-          'All consoles: side-by-side',
-          value: const _DashChoice(_Act.consolesLateral),
-          detail: 'side-by-side view',
-        ),
-      );
-    }
-
-    entries.add(const MenuEntry<_DashChoice>.separator('workspace'));
-    entries.add(
-      MenuEntry<_DashChoice>(
-        'Build & tuning',
-        value: const _DashChoice(_Act.buildMenu),
-        shortcut: 'b',
-        detail: 'jars, repos, sync, JVM',
-      ),
-    );
-    entries.add(
-      MenuEntry<_DashChoice>(
-        'Switch consumer',
-        value: const _DashChoice(_Act.consumer),
-        shortcut: 'c',
-        detail: _activeConsumer().shortName,
-      ),
-    );
-    entries.add(
-      MenuEntry<_DashChoice>(
-        'Wipe everything',
-        value: const _DashChoice(_Act.wipeEverything),
-        labelColor: Ansi.red,
-        detail: 'delete all instances across all consumers',
-      ),
-    );
-    entries.add(
-      MenuEntry<_DashChoice>(
-        'Refresh',
-        value: const _DashChoice(_Act.refresh),
-        shortcut: 'r',
-      ),
-    );
-    entries.add(
-      MenuEntry<_DashChoice>(
-        'Quit',
-        value: const _DashChoice(_Act.quit),
-        shortcut: 'q',
-      ),
-    );
-
-    return entries;
   }
 
-  Future<_DashChoice> _dashboardMenu(_DashboardData data) async {
-    int frame = 0;
-    List<_InstanceRow> rows = data.rows;
-    String? active = data.active;
-    List<BuildCacheEntry> cache = data.buildCache;
-
-    return menuSelect<_DashChoice>(
-      'Dashboard',
-      _buildDashEntries(rows, active),
-      initialIndex: data.rows.isEmpty ? 0 : 1,
-      hint:
-          '↑↓ move · enter open · R restart · S stop · X kill · O console · esc back',
-      footer: _liveFooter(cache, 0),
-      tickInterval: const Duration(milliseconds: 250),
-      onActionKey: (String raw, MenuEntry<_DashChoice> entry) {
-        final _DashChoice? value = entry.value;
-        final bool onServerRow =
-            value != null &&
-            value.kind == _Act.instance &&
-            value.instance != null;
-        final DashboardQuickAction? action = dashboardQuickAction(
-          raw,
-          onServerRow: onServerRow,
-        );
-        if (action == null) {
-          return null;
-        }
-        final String name = value!.instance!;
-        switch (action) {
-          case DashboardQuickAction.restart:
-            return _DashChoice(_Act.instanceRestart, instance: name);
-          case DashboardQuickAction.stop:
-            return _DashChoice(_Act.instanceStop, instance: name);
-          case DashboardQuickAction.kill:
-            return _DashChoice(_Act.instanceKill, instance: name);
-          case DashboardQuickAction.console:
-            return _DashChoice(_Act.instanceConsole, instance: name);
-        }
-      },
-      // Animation repaints ~4x/s from cached rows; the expensive metrics
-      // sweep (pings every running server) still runs only ~once a second.
-      onTick: () async {
-        frame++;
-        if (frame % 4 == 0) {
-          rows = await _loadInstanceMetricRows();
-          active = await _activeInstance();
-          cache = await _cachedBuilds('all');
-        }
-        return MenuTick<_DashChoice>(
-          _buildDashEntries(rows, active, frame: frame),
-          footer: _liveFooter(cache, frame),
-        );
-      },
-    );
+  /// Runs a hand-off flow on a cleared screen, absorbing an Escape as a
+  /// return to the dashboard. The monitor has already given the terminal
+  /// back by the time this runs.
+  Future<void> _monitorFlow(Future<void> Function() flow) async {
+    Ui.clearScreen();
+    await _runStep(flow);
   }
 
-  /// Dashboard footer with the breathing blob and live build freshness.
-  String _liveFooter(List<BuildCacheEntry> cache, int frame) {
-    return '${Ansi.style(blobGlyph(frame), blobStyle(frame))} '
-        '${_buildFreshnessFooter(cache)}';
+  /// The monitor's suspension callback. The screen brackets the call with
+  /// its own terminal transitions, so all this adds is a clean canvas and a
+  /// guarantee that nothing escapes: an exception thrown here propagates out
+  /// of [MonitorScreen.run] and would end the session, so a failed quick
+  /// action reports itself and returns to the dashboard instead.
+  Future<void> _suspendedFlow(Future<void> Function() flow) async {
+    Ui.clearScreen();
+    try {
+      await flow();
+    } on PromptBackNavigation {
+      // Escape backs out of the flow, not out of the dashboard.
+    } catch (error) {
+      Ui.error('$error');
+      await Ui.pause();
+    }
   }
 
-  Future<void> _dispatch(_DashChoice choice, List<_InstanceRow> rows) async {
-    switch (choice.kind) {
-      case _Act.instance:
-        await _instanceMenu(choice.instance!);
-        return;
-      case _Act.instanceRestart:
-        await _quickRestart(choice.instance!);
-        return;
-      case _Act.instanceStop:
-        await _quickStop(choice.instance!);
-        return;
-      case _Act.instanceKill:
-        await _quickKill(choice.instance!);
-        return;
-      case _Act.instanceConsole:
-        await _quickConsole(choice.instance!);
-        return;
-      case _Act.create:
-        await _createInstance();
-        return;
-      case _Act.createMany:
-        await _createMany();
-        return;
-      case _Act.pullBuilds:
-        await _refreshAllBuilds();
-        return;
-      case _Act.startAll:
-        await _startAllStopped(await Ui.shielded(_loadInstanceRows));
-        return;
-      case _Act.stopAll:
-        await _stopAllRunning(await Ui.shielded(_loadInstanceRows));
-        return;
-      case _Act.wipeEverything:
-        await _wipeEverything();
-        return;
-      case _Act.consolesGrid:
+  /// Per-instance quick actions, on the same commands the legacy dashboard's
+  /// R/S/X/O keys ran. The consoles grid is workspace-level and ignores the
+  /// instance it is handed (which may be empty). Every other action the
+  /// monitor can report is handled by the screen itself.
+  Future<void> _monitorQuickAction(
+    String instance,
+    MonitorAction action,
+  ) async {
+    switch (action) {
+      case MonitorAction.restart:
+        await _quickRestart(instance);
+      case MonitorAction.stop:
+        await _quickStop(instance);
+      case MonitorAction.kill:
+        await _quickKill(instance);
+      case MonitorAction.console:
+        await _quickConsole(instance);
+      case MonitorAction.consolesGrid:
         await _shellRun(<String>['runtime', 'consoles']);
+      case MonitorAction.up:
+      case MonitorAction.down:
+      case MonitorAction.open:
+      case MonitorAction.detail:
+      case MonitorAction.newInstance:
+      case MonitorAction.buildMenu:
+      case MonitorAction.switchConsumer:
+      case MonitorAction.cycleRange:
+      case MonitorAction.refresh:
+      case MonitorAction.quit:
+      case MonitorAction.back:
+      case MonitorAction.none:
         return;
-      case _Act.consolesLateral:
-        await _shellRun(<String>['runtime', 'consoles-lateral']);
+    }
+  }
+
+  /// The metrics feed behind the sampler: one `runtime metrics` capture per
+  /// sweep. A failed capture yields no rows rather than an error, so the
+  /// dashboard keeps its last good readings and tries again next sweep.
+  Future<String> _captureMetrics() async {
+    final CapturedResult result = await passthrough.capture(<String>[
+      'runtime',
+      'metrics',
+    ]);
+    return result.success ? result.stdout : '';
+  }
+
+  /// Assembles the workspace view around the rings the sampler already
+  /// holds. Capturing metrics is the sampler's job; this only adds the two
+  /// workspace facts the frame needs on top of them.
+  Future<MonitorSnapshot> _monitorSnapshot(MetricsSampler sampler) async {
+    final List<String> instances = sampler.instances;
+    return MonitorSnapshot(
+      instances: instances,
+      history: <String, List<MetricSample>>{
+        for (final String instance in instances)
+          instance: sampler.history(instance),
+      },
+      consumerName: _activeConsumer().shortName,
+      activeInstance: await _activeInstance(),
+    );
+  }
+
+  /// The active consumer's trend directory: `state/trends`, the sibling of
+  /// the `state/runtime` folder every metrics row's `logPath` points into.
+  /// Null when the consumer root cannot be resolved, in which case the
+  /// session runs on in-memory history alone.
+  Future<TrendStore?> _trendStore() async {
+    final String? root = await Ui.shielded(
+      () => passthrough.captureStdoutLine(<String>['consumer', 'path']),
+    );
+    final String trimmed = (root ?? '').trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    return TrendStore(Directory(p.join(trimmed, 'state', 'trends')));
+  }
+
+  /// Workspace-level actions the monitor has no key of its own for. Reached
+  /// with `b` from the dashboard.
+  Future<void> _workspaceMenu() async {
+    while (true) {
+      final List<_InstanceRow> rows = await Ui.spin(
+        'Loading servers',
+        _loadInstanceRows,
+      );
+      final int stopped = rows
+          .where((_InstanceRow r) => r.state == RuntimeState.stopped)
+          .length;
+      final int running = rows.length - stopped;
+
+      final List<MenuEntry<_WorkspaceAct>> entries = <MenuEntry<_WorkspaceAct>>[
+        const MenuEntry<_WorkspaceAct>(
+          'Build & tuning',
+          value: _WorkspaceAct.buildMenu,
+          shortcut: 'b',
+          detail: 'jars, repos, sync, JVM',
+        ),
+        const MenuEntry<_WorkspaceAct>(
+          'Pull latest builds',
+          value: _WorkspaceAct.pullBuilds,
+          shortcut: 'p',
+          detail: 'refresh every platform jar, spigot included',
+        ),
+        const MenuEntry<_WorkspaceAct>(
+          'Create many',
+          value: _WorkspaceAct.createMany,
+          shortcut: 'm',
+          detail: 'one server per type, all at once',
+        ),
+        if (stopped > 1)
+          MenuEntry<_WorkspaceAct>(
+            'Start all stopped',
+            value: _WorkspaceAct.startAll,
+            shortcut: 's',
+            detail: '$stopped instances',
+          ),
+        if (running > 1)
+          MenuEntry<_WorkspaceAct>(
+            'Stop all running',
+            value: _WorkspaceAct.stopAll,
+            shortcut: 'k',
+            detail: '$running instances',
+          ),
+        const MenuEntry<_WorkspaceAct>.separator(),
+        const MenuEntry<_WorkspaceAct>(
+          'Wipe everything',
+          value: _WorkspaceAct.wipeEverything,
+          labelColor: Ansi.red,
+          detail: 'delete all instances across all consumers',
+        ),
+        const MenuEntry<_WorkspaceAct>('Back', value: _WorkspaceAct.back),
+      ];
+
+      _WorkspaceAct action;
+      try {
+        action = await menuSelect<_WorkspaceAct>('Workspace', entries);
+      } on PromptBackNavigation {
         return;
-      case _Act.buildMenu:
-        await _buildAndTuningMenu();
-        return;
-      case _Act.consumer:
-        await _switchConsumer();
-        return;
-      case _Act.refresh:
-      case _Act.quit:
-        return;
+      }
+
+      switch (action) {
+        case _WorkspaceAct.buildMenu:
+          await _runStep(_buildAndTuningMenu);
+        case _WorkspaceAct.pullBuilds:
+          await _runStep(_refreshAllBuilds);
+        case _WorkspaceAct.createMany:
+          await _runStep(_createMany);
+        case _WorkspaceAct.startAll:
+          await _runStep(
+            () async => _startAllStopped(await Ui.shielded(_loadInstanceRows)),
+          );
+        case _WorkspaceAct.stopAll:
+          await _runStep(
+            () async => _stopAllRunning(await Ui.shielded(_loadInstanceRows)),
+          );
+        case _WorkspaceAct.wipeEverything:
+          await _runStep(_wipeEverything);
+        case _WorkspaceAct.back:
+          return;
+      }
     }
   }
 
@@ -1577,48 +1505,6 @@ class InteractiveWizard {
     return rows;
   }
 
-  /// Loads rows with live metrics (players, TPS, version) via `runtime metrics`.
-  /// Slower than [_loadInstanceRows] because it pings each running server, so
-  /// it drives the dashboard's periodic refresh rather than the first paint.
-  Future<List<_InstanceRow>> _loadInstanceMetricRows() async {
-    final CapturedResult result = await passthrough.capture(<String>[
-      'runtime',
-      'metrics',
-    ]);
-    if (!result.success) {
-      return const <_InstanceRow>[];
-    }
-
-    final List<_InstanceRow> rows = <_InstanceRow>[];
-    for (final String line in result.stdout.split('\n')) {
-      // name, state, port, locked, players, max, version, tps, isolation,
-      // then the metrics-only tail the monitor consumes: uptimeSeconds,
-      // cpuPercent, rssBytes, logPath. Only the first nine are read here, so
-      // both the 9-column and the extended 13-column form parse.
-      final List<String> parts = line.trim().split('\t');
-      if (parts.length < 9 || parts[0].isEmpty) {
-        continue;
-      }
-      rows.add(
-        _InstanceRow(
-          name: parts[0],
-          state: RuntimeState.values.firstWhere(
-            (RuntimeState s) => s.name == parts[1],
-            orElse: () => RuntimeState.stopped,
-          ),
-          port: parts[2],
-          locked: parts[3] == 'locked',
-          isolated: parts[8] == 'isolated',
-          players: int.tryParse(parts[4]),
-          maxPlayers: int.tryParse(parts[5]),
-          version: parts[6] == '-' ? null : parts[6],
-          tps: double.tryParse(parts[7]),
-        ),
-      );
-    }
-    return rows;
-  }
-
   Future<_InstanceRow?> _loadInstanceRow(String name) async {
     final List<_InstanceRow> rows = await _loadInstanceRows();
     for (final _InstanceRow row in rows) {
@@ -1648,16 +1534,6 @@ class InteractiveWizard {
     final String? line = await passthrough.captureStdoutLine(<String>[
       'instance',
       'current',
-    ]);
-    final String cleaned = (line ?? '').trim();
-    return cleaned.isEmpty ? null : cleaned;
-  }
-
-  Future<String?> _dropinsSource() async {
-    final String command = _isPluginConsumer() ? 'plugins' : 'mods';
-    final String? line = await passthrough.captureStdoutLine(<String>[
-      command,
-      'show-source',
     ]);
     final String cleaned = (line ?? '').trim();
     return cleaned.isEmpty ? null : cleaned;
@@ -1803,55 +1679,6 @@ class InteractiveWizard {
       RuntimeState.stopped => Ansi.gray,
     };
   }
-
-  String _tpsColor(double tps) {
-    if (tps >= 18) {
-      return Ansi.green;
-    }
-    if (tps >= 15) {
-      return Ansi.yellow;
-    }
-    return Ansi.red;
-  }
-
-  String _shortenPath(String path) {
-    final String? home = Platform.environment['HOME'];
-    String shortened = path;
-    if (home != null && home.isNotEmpty && shortened.startsWith(home)) {
-      shortened = '~${shortened.substring(home.length)}';
-    }
-    if (shortened.length > 32) {
-      shortened = '…${shortened.substring(shortened.length - 31)}';
-    }
-    return shortened;
-  }
-}
-
-enum _Act {
-  instance,
-  instanceRestart,
-  instanceStop,
-  instanceKill,
-  instanceConsole,
-  create,
-  createMany,
-  pullBuilds,
-  startAll,
-  stopAll,
-  wipeEverything,
-  consolesGrid,
-  consolesLateral,
-  buildMenu,
-  consumer,
-  refresh,
-  quit,
-}
-
-class _DashChoice {
-  const _DashChoice(this.kind, {this.instance});
-
-  final _Act kind;
-  final String? instance;
 }
 
 enum _InstanceAct {
@@ -1870,6 +1697,17 @@ enum _InstanceAct {
   unlock,
   reset,
   delete,
+  back,
+}
+
+/// Workspace-level actions the monitor has no key of its own for.
+enum _WorkspaceAct {
+  buildMenu,
+  pullBuilds,
+  createMany,
+  startAll,
+  stopAll,
+  wipeEverything,
   back,
 }
 
@@ -1895,10 +1733,6 @@ class _InstanceRow {
     required this.port,
     this.locked = false,
     this.isolated = false,
-    this.players,
-    this.maxPlayers,
-    this.version,
-    this.tps,
   });
 
   final String name;
@@ -1906,27 +1740,6 @@ class _InstanceRow {
   final String port;
   final bool locked;
   final bool isolated;
-
-  /// Live metrics, populated by the metrics sweep (`runtime metrics`). Null on
-  /// the fast state-only load and for servers that are not currently pingable.
-  final int? players;
-  final int? maxPlayers;
-  final String? version;
-  final double? tps;
-}
-
-class _DashboardData {
-  const _DashboardData({
-    required this.rows,
-    required this.active,
-    required this.dropins,
-    required this.buildCache,
-  });
-
-  final List<_InstanceRow> rows;
-  final String? active;
-  final String? dropins;
-  final List<BuildCacheEntry> buildCache;
 }
 
 class _RuntimeSettings {

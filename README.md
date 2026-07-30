@@ -17,21 +17,39 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 ./start.sh consumer use plugin                      # pick a consumer profile
 ./start.sh server create demo --type purpur --auto-build
 ./start.sh runtime start demo                       # starts and attaches console
+./start.sh runtime watch                            # live monitoring dashboard
 ```
+
+## Live monitor
+
+`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. It sweeps `runtime metrics` every two seconds and keeps a per-instance ring of players, TPS, CPU, and memory, seeded at startup from `consumers/<profile>/state/trends/` so the charts survive a restart. The frame is a `MULTIPLEXOR` header, a `SERVERS` panel with one live row per instance, and — on a tall enough terminal — a TPS chart and a host card for the selected server.
+
+| Key | What it does |
+|-----|--------------|
+| `↑` `↓`, wheel | Move the selection. The wheel outside the servers panel cycles the chart window instead. |
+| `enter`, click | Open the selected server's action menu (a second click on the selected row does the same). |
+| `d` | Detail screen for the selected server. |
+| `R` `S` `X` `O` | Restart, stop (graceful), kill (force), open console — on the selected server. Uppercase on purpose, so a slipped key can never fire one. |
+| `g` | Open every running console in a tmux grid. |
+| `n` | Create a new instance. |
+| `b` | Workspace menu: build & tuning, pull latest builds, create many, start all stopped, stop all running, wipe everything. |
+| `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
+| `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h`. |
+| `q`, `ctrl-c` | Quit. |
+
+The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM MiB`, and `PLAYERS` charts over the same window, plus a live `LOG` tail of its runtime log. `esc` returns to the landing view; `esc` on the landing view quits. Below 80×24 the frame is replaced by a resize prompt rather than a squeezed layout.
+
+`./start.sh runtime watch --once` prints a single frame to stdout and exits — colorless, zero escape bytes, no TTY required — so it is safe to pipe, log, or diff from a script.
 
 ## Interactive Wizard
 
-`./start.sh` with no args opens a dashboard listing every instance with a live state badge, port, and `active` / `isolated` / `locked` markers. The dashboard refreshes about once a second: running servers show live player count (`online/max`), version, and — for Paper-family servers started with RCON enabled — TPS. Pick an instance to get a state-aware action menu (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation/lock-or-unlock always). Delete and factory reset are hidden while an instance is locked. Keyboard and mouse both work — arrows/wheel to move, Enter or click to activate, Esc to go back. Keys pressed while a build or sync runs are discarded.
+`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc: Enter opens a server's state-aware action menu (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation/lock-or-unlock always), `n` runs the create flow, `b` opens the workspace menu, `c` switches consumer. Delete and factory reset are hidden while an instance is locked. Keys pressed while a build or sync runs are discarded. Without a TTY the wizard prints direct-command hints instead.
 
-Dashboard shortcuts: `n` new instance, `m` create many, `p` pull latest builds, `s` start all, `k` stop all, `g` all consoles, `b` build & tuning, `c` switch consumer, `r` refresh, `q` quit.
+The workspace menu (`b`) holds the actions that are not per-instance: Build & tuning, Pull latest builds, Create many, Start all stopped, Stop all running, and Wipe everything. Destructive actions (wipe, delete, factory reset) are shown in red. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
 
-Highlighted-server quick keys (act on the selected server without opening its menu): `R` restart, `S` stop (graceful), `X` kill (force), `O` console. These are uppercase (Shift), so they never clash with the lowercase shortcuts above; they do nothing when a non-server row (New, Build, etc.) is highlighted.
+Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `build spigot --force`.
 
-Use `m` for Create many. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
-
-Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the dashboard, platform picker, and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `build spigot --force`.
-
-`p` (Pull latest builds, also in Build & tuning) refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line. The dashboard itself is live: state dots pulse and spin with each server's lifecycle, players/TPS/version and the build-freshness footer update in place, and destructive actions (wipe, delete, factory reset) are shown in red.
+Pull latest builds refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line.
 
 ## Concepts
 
@@ -101,6 +119,7 @@ Single `server create` and `build <type>` commands must run under the consumer t
 
 | Command | What it does |
 |---------|--------------|
+| `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, with the wizard's flows behind `enter` / `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
 | `runtime start [instance] [--no-console]` | Start the instance and attach its console. `--no-console` returns immediately. |
 | `runtime stop [instance] [--graceful]` | Force-stop the instance immediately (kills the tmux session, then SIGTERM/SIGKILL any tracked pids). With `--graceful`, sends `stop` to the server console and waits up to 60s for a clean world-save shutdown, falling back to a force-stop on timeout. |
 | `runtime restart [instance] [--no-console]` | Stop and start again. Attaches console unless `--no-console`. |
@@ -110,7 +129,7 @@ Single `server create` and `build <type>` commands must run under the consumer t
 | `runtime status [instance]` | Print the runtime state of one instance. |
 | `runtime stats [instance]` | Show live stats for running servers: player count (`online/max`), state, CPU, memory, uptime, port, and version, plus the names of online players. With no instance, scans every consumer for running servers; with an instance, reports that one. Player counts come from a Server List Ping, so neither `enable-query` nor `enable-rcon` is required. `CPU` (`4.2%`) and `MEM` (resident set, e.g. `2.4G`) come from a single batched `ps` over the tracked server pids; `CPU`, `MEM`, and `UPTIME` read `n/a` when the value is unavailable rather than showing a zero. |
 | `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked<TAB>isolated`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`; the final two columns are `locked`/`unlocked` and `isolated`/`shared`. |
-| `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps<TAB>isolated<TAB>uptimeSeconds<TAB>cpuPercent<TAB>rssBytes<TAB>logPath`. Running servers are pinged (and RCON-queried for TPS) concurrently. Backs the wizard dashboard's live refresh and the monitoring dashboard. TPS is `-` unless the server is Paper-family and was started with RCON enabled. The last four columns extend the row for monitoring: `uptimeSeconds` is whole seconds since the tmux session started, `cpuPercent` and `rssBytes` (resident set, bytes) come from one batched `ps` over the tracked server pids, and `logPath` is the absolute path of the instance's runtime log. Any unavailable value is `-`, never a zero. |
+| `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps<TAB>isolated<TAB>uptimeSeconds<TAB>cpuPercent<TAB>rssBytes<TAB>logPath`. Running servers are pinged (and RCON-queried for TPS) concurrently. Every sweep of the [live monitor](#live-monitor) is one of these. TPS is `-` unless the server is Paper-family and was started with RCON enabled. The last four columns extend the row for monitoring: `uptimeSeconds` is whole seconds since the tmux session started, `cpuPercent` and `rssBytes` (resident set, bytes) come from one batched `ps` over the tracked server pids, and `logPath` is the absolute path of the instance's runtime log. Any unavailable value is `-`, never a zero. |
 | `runtime list` | Print running instance names. |
 | `runtime settings show` | Print the active heap, JVM preset, and flags. |
 | `runtime settings presets` | List available JVM presets (`aikar`, `vanilla`, `conservative`). |
@@ -212,6 +231,14 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 ```bash
 # Create a paper server on the latest upstream version, refreshing the cache first
 ./start.sh server create lobby --type paper --auto-build
+
+# Create a server, start it headless, then watch every instance live
+./start.sh server create lobby --type paper --auto-build
+./start.sh runtime start lobby --no-console
+./start.sh runtime watch
+
+# Snapshot the dashboard into a log from a script (no TTY, no escape bytes)
+./start.sh runtime watch --once >> monitor.log
 
 # Create an isolated test server (won't pick up your dropins)
 ./start.sh server create vanilla-test --type purpur --isolated
