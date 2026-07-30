@@ -343,6 +343,110 @@ void main() {
       );
       expect(theme.glyphs, same(MonitorGlyphs.unicode));
     });
+
+    test('a UTF-8 locale selects the unicode glyph set', () {
+      final MonitorTheme theme = MonitorTheme.detect(
+        env: <String, String>{'TERM': 'xterm-256color', 'LANG': 'en_US.UTF-8'},
+        isTty: true,
+      );
+      expect(theme.glyphs, same(MonitorGlyphs.unicode));
+    });
+
+    test('a non-UTF-8 locale selects the ascii glyph set', () {
+      final MonitorTheme theme = MonitorTheme.detect(
+        env: <String, String>{'TERM': 'xterm-256color', 'LANG': 'C'},
+        isTty: true,
+      );
+      expect(theme.glyphs, same(MonitorGlyphs.ascii));
+      // The glyph set is independent of the color depth.
+      expect(theme.depth, ColorDepth.ansi256);
+    });
+  });
+
+  group('detectMonitorGlyphs', () {
+    test('reads a UTF-8 locale in any case and either spelling', () {
+      for (final String value in <String>[
+        'en_US.UTF-8',
+        'en_US.utf8',
+        'C.UTF8',
+        'de_DE.utf-8',
+      ]) {
+        expect(
+          detectMonitorGlyphs(
+            env: <String, String>{'LANG': value},
+            isTty: true,
+          ),
+          same(MonitorGlyphs.unicode),
+          reason: value,
+        );
+      }
+    });
+
+    test('a locale that names no UTF-8 charset falls back to ascii', () {
+      for (final String value in <String>[
+        'C',
+        'POSIX',
+        'en_US',
+        'en_US.ISO8859-1',
+      ]) {
+        expect(
+          detectMonitorGlyphs(
+            env: <String, String>{'LANG': value},
+            isTty: true,
+          ),
+          same(MonitorGlyphs.ascii),
+          reason: value,
+        );
+      }
+    });
+
+    test('LC_ALL outranks LC_CTYPE, which outranks LANG', () {
+      expect(
+        detectMonitorGlyphs(
+          env: <String, String>{'LC_ALL': 'C', 'LANG': 'en_US.UTF-8'},
+          isTty: true,
+        ),
+        same(MonitorGlyphs.ascii),
+      );
+      expect(
+        detectMonitorGlyphs(
+          env: <String, String>{'LC_CTYPE': 'C', 'LANG': 'en_US.UTF-8'},
+          isTty: true,
+        ),
+        same(MonitorGlyphs.ascii),
+      );
+      expect(
+        detectMonitorGlyphs(
+          env: <String, String>{'LC_ALL': 'en_US.UTF-8', 'LC_CTYPE': 'C'},
+          isTty: true,
+        ),
+        same(MonitorGlyphs.unicode),
+      );
+    });
+
+    test('an empty locale value is skipped, not read as non-UTF-8', () {
+      expect(
+        detectMonitorGlyphs(
+          env: <String, String>{'LC_ALL': '', 'LANG': 'en_US.UTF-8'},
+          isTty: true,
+        ),
+        same(MonitorGlyphs.unicode),
+      );
+    });
+
+    test('with no locale set at all, a TTY gets unicode', () {
+      expect(
+        detectMonitorGlyphs(env: <String, String>{}, isTty: true),
+        same(MonitorGlyphs.unicode),
+      );
+    });
+
+    test('with no locale set at all, captured output gets ascii', () {
+      expect(
+        detectMonitorGlyphs(env: <String, String>{}, isTty: false),
+        same(MonitorGlyphs.ascii),
+      );
+    });
   });
 
   group('MonitorTheme tones — no backgrounds ever', () {

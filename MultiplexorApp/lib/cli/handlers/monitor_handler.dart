@@ -107,13 +107,16 @@ Future<int> _printSnapshot() async {
 /// A colorless theme for the snapshot, ASCII-only unless the locale says the
 /// consumer of this output can render UTF-8. Either way it emits no escape
 /// bytes, so the frame stays greppable.
+///
+/// The charset question is the same one the interactive theme asks, so it is
+/// asked in the same place ([detectMonitorGlyphs]); only the color half is
+/// overridden here.
 MonitorTheme _snapshotTheme() {
-  final Map<String, String> env = Platform.environment;
-  final String locale =
-      '${env['LC_ALL'] ?? ''}|${env['LC_CTYPE'] ?? ''}|${env['LANG'] ?? ''}'
-          .toUpperCase();
-  final bool utf8Locale = locale.contains('UTF-8') || locale.contains('UTF8');
-  return utf8Locale ? MonitorTheme.plain() : MonitorTheme.plainAscii();
+  final MonitorGlyphs glyphs = detectMonitorGlyphs(
+    env: Platform.environment,
+    isTty: stdout.hasTerminal,
+  );
+  return glyphs.isAscii ? MonitorTheme.plainAscii() : MonitorTheme.plain();
 }
 
 /// One `runtime metrics` capture. A failed capture reads as no rows rather

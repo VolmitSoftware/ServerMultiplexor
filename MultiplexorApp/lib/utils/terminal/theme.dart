@@ -43,6 +43,42 @@ ColorDepth detectColorDepth({
   return ColorDepth.basic;
 }
 
+/// Locale values naming a UTF-8 charset, in either of its two spellings.
+final RegExp _utf8Charset = RegExp('utf-?8', caseSensitive: false);
+
+/// The locale variables that decide a process's charset, in POSIX
+/// precedence order: the first one that is set wins outright.
+const List<String> _localeVars = <String>['LC_ALL', 'LC_CTYPE', 'LANG'];
+
+/// Resolves the glyph set the terminal can actually render.
+///
+/// The charset comes from the locale, read in POSIX precedence order
+/// ([_localeVars]): the first variable that is set and non-empty decides,
+/// so `LC_ALL=C` forces ASCII even alongside a UTF-8 `LANG`. A value naming
+/// a UTF-8 charset (either spelling, any case) gets
+/// [MonitorGlyphs.unicode]; any other value gets [MonitorGlyphs.ascii].
+///
+/// With no locale set at all the charset is genuinely unknown, so this falls
+/// back to [isTty]: an interactive terminal gets unicode (a modern terminal
+/// with an unset locale — under launchd, or a bare `ssh` — is far more
+/// likely to render it than not), while captured or piped output gets ASCII,
+/// where the cost of guessing wrong is a file of mojibake nobody can grep.
+MonitorGlyphs detectMonitorGlyphs({
+  required Map<String, String> env,
+  required bool isTty,
+}) {
+  for (final String key in _localeVars) {
+    final String value = env[key] ?? '';
+    if (value.isEmpty) {
+      continue;
+    }
+    return _utf8Charset.hasMatch(value)
+        ? MonitorGlyphs.unicode
+        : MonitorGlyphs.ascii;
+  }
+  return isTty ? MonitorGlyphs.unicode : MonitorGlyphs.ascii;
+}
+
 /// A single tri-encoded color: a truecolor RGB triple, an ANSI 256-color
 /// index, and a hand-authored 16-color (basic) fallback. Basic fallbacks are
 /// authored per-token rather than computed, so structural greys and hued
@@ -328,14 +364,20 @@ class MonitorTheme {
   final ColorDepth depth;
   final MonitorGlyphs glyphs;
 
-  /// Resolves depth from [env] and [isTty] (defaulting to the real process
-  /// environment and terminal state when omitted).
+  /// Resolves both the color depth ([detectColorDepth]) and the glyph set
+  /// ([detectMonitorGlyphs]) from [env] and [isTty], defaulting to the real
+  /// process environment and terminal state when either is omitted.
+  ///
+  /// The two are independent: a truecolor terminal under a `C` locale gets
+  /// full color and ASCII glyphs, and a UTF-8 terminal under `NO_COLOR` gets
+  /// the unicode set with no color at all.
   factory MonitorTheme.detect({Map<String, String>? env, bool? isTty}) {
-    final ColorDepth resolved = detectColorDepth(
-      env: env ?? Platform.environment,
-      isTty: isTty ?? stdout.hasTerminal,
+    final Map<String, String> resolvedEnv = env ?? Platform.environment;
+    final bool resolvedTty = isTty ?? stdout.hasTerminal;
+    return MonitorTheme._(
+      detectColorDepth(env: resolvedEnv, isTty: resolvedTty),
+      detectMonitorGlyphs(env: resolvedEnv, isTty: resolvedTty),
     );
-    return MonitorTheme._(resolved, MonitorGlyphs.unicode);
   }
 
   /// A colorless theme with unicode glyphs, for `--once` snapshots and any
