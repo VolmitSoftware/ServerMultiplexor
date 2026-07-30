@@ -49,6 +49,10 @@ class _FakeRcon {
 
   int get port => _server.port;
 
+  /// Connections the server still holds open. Drops to zero once a client
+  /// closes its side, which is how a test observes the pool's teardown.
+  int get liveClientCount => _clients.length;
+
   void _handle(Socket socket) {
     acceptCount++;
     _clients.add(socket);
@@ -104,6 +108,22 @@ Future<_FakeRcon> _startFakeRcon({
 }) async {
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   return _FakeRcon(server, password, response);
+}
+
+/// Polls [condition] until it holds, rather than guessing at how long the
+/// loopback needs to deliver a FIN.
+Future<void> _waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 5),
+  required String describe,
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('timed out after $timeout waiting for: $describe');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 }
 
 void main() {
@@ -238,6 +258,71 @@ void main() {
         timeout: const Duration(milliseconds: 300),
       );
       expect(out, isNull);
+    });
+
+    // The CLI's exit path depends on these two facts: a pooled socket really
+    // closes on disposal (an open one keeps the Dart event loop alive after
+    // main returns), and disposal can happen twice — the interactive monitor
+    // tears the pool down itself, and the runner does it again on the way out.
+    test(
+      'disposeAll closes the pooled connection and clears the pool',
+      () async {
+        final server = await _startFakeRcon(
+          password: 'secret',
+          response: 'TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0',
+        );
+        addTearDown(server.close);
+        final pool = RconConnectionPool();
+        addTearDown(pool.disposeAll);
+
+        expect(
+          parseTps(
+            await pool.command('127.0.0.1', server.port, 'secret', 'tps'),
+          ),
+          20.0,
+        );
+        expect(server.liveClientCount, 1);
+
+        pool.disposeAll();
+        await _waitUntil(
+          () => server.liveClientCount == 0,
+          describe: 'the server to see the pooled socket close',
+        );
+
+        // A cleared pool has nothing to reuse, so the next command dials again.
+        expect(
+          parseTps(
+            await pool.command('127.0.0.1', server.port, 'secret', 'tps'),
+          ),
+          20.0,
+        );
+        expect(server.acceptCount, 2);
+      },
+    );
+
+    test('disposeAll is idempotent', () async {
+      final server = await _startFakeRcon(
+        password: 'secret',
+        response: 'TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0',
+      );
+      addTearDown(server.close);
+      final pool = RconConnectionPool();
+      addTearDown(pool.disposeAll);
+
+      await pool.command('127.0.0.1', server.port, 'secret', 'tps');
+
+      pool.disposeAll();
+      pool.disposeAll();
+      pool.disposeAll();
+
+      await _waitUntil(
+        () => server.liveClientCount == 0,
+        describe: 'the server to see the pooled socket close',
+      );
+      expect(
+        parseTps(await pool.command('127.0.0.1', server.port, 'secret', 'tps')),
+        20.0,
+      );
     });
   });
 }

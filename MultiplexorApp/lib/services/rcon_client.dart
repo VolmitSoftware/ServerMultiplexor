@@ -48,8 +48,11 @@ class RconConnectionPool {
     return connection.command(command, timeout: timeout);
   }
 
-  /// Tears down every pooled connection. Call on shutdown so sockets close
-  /// cleanly instead of relying on process exit.
+  /// Tears down every pooled connection. Not optional on shutdown: a live
+  /// socket keeps the Dart event loop alive, so a CLI command that queried
+  /// TPS never exits until the pool is closed. Safe to call more than once —
+  /// the interactive monitor disposes on its way out and the CLI runner
+  /// disposes again at the dispatch boundary.
   void disposeAll() {
     for (final connection in _connections.values) {
       connection.dispose();

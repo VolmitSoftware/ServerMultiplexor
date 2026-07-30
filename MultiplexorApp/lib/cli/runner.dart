@@ -1,12 +1,37 @@
 import 'dart:io';
 
+import '../services/app_context.dart';
 import 'command_help.dart';
 import 'handlers/consumer_handlers.dart';
 import 'handlers/monitor_handler.dart';
 import 'handlers/passthrough_handlers.dart';
 import 'handlers/wizard_handler.dart';
 
+/// Runs one CLI invocation and returns its exit code.
+///
+/// Every command funnels through here, and so does the one teardown that has
+/// to happen on the way back out. `runtime metrics` reads live TPS over a
+/// pooled RCON connection that is deliberately held open for reuse, and an
+/// open socket keeps the Dart event loop alive long after the command has
+/// printed its last line — so a headless `runtime metrics` or
+/// `runtime watch --once` never returned while a server was up. Closing the
+/// pool here covers every command by construction, which is why it lives at
+/// the dispatch boundary rather than in the handlers that happen to reach
+/// RCON today.
+///
+/// Disposing the resource is the fix, not `exit()`: killing the process would
+/// hide the next leaked socket instead of closing this one.
 Future<int> runCli(List<String> args) async {
+  try {
+    return await _dispatch(args);
+  } finally {
+    // Idempotent — the interactive wizard tears the same pool down when it
+    // leaves the dashboard, and this runs again on the way out.
+    passthroughService.disposeRcon();
+  }
+}
+
+Future<int> _dispatch(List<String> args) async {
   if (isCliHelpRequest(args)) {
     return printCliHelpForArgs(args);
   }
