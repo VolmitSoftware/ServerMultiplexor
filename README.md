@@ -22,7 +22,7 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 
 ## Live monitor
 
-`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. It sweeps `runtime metrics` every two seconds and keeps a per-instance ring of players, TPS, CPU, and memory, seeded at startup from `consumers/<profile>/state/trends/` so the charts survive a restart. The frame is a `MULTIPLEXOR` header, a `SERVERS` panel with one live row per instance, and — on a tall enough terminal — a TPS chart and a host card for the selected server.
+`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. It sweeps `runtime metrics` every two seconds and keeps a per-instance ring of players, TPS, CPU, and memory, seeded at startup from the active consumer's `state/trends/` (for example `consumers/plugin-consumers/state/trends/`) so the charts survive a restart. That history is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that; retention is applied once per session, as the monitor opens, and only to a trend file that has grown past 4 MiB. The frame is a `MULTIPLEXOR` header, a `SERVERS` panel with one live row per instance, and — on a tall enough terminal — a TPS chart and a host card for the selected server.
 
 | Key | What it does |
 |-----|--------------|
@@ -291,7 +291,7 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 ## Layout
 
 ```
-consumers/<profile>/
+consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   builds/<type>/                  # cached server jars
   backups/<instance>/              # restorable snapshots + manifest/checksums
   dropins/plugins or dropins/mods   # dropin jars (manual and content-managed)
@@ -301,6 +301,7 @@ consumers/<profile>/
     plugins/ or mods/             # synced from dropin-source
   shared-plugin-data/             # plugin-only: iris packs + merged ops.json
   state/runtime/                  # tmux logs, pid files
+  state/trends/                   # per-instance metric history for the monitor
   state/content-lock.yaml          # managed plugin/mod manifest
 .multiplexor/templates/             # reusable server blueprints
 .multiplexor/workspace.yaml         # workspace marker
