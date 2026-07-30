@@ -85,7 +85,10 @@ class BuildCachePolicy {
   /// True when a create/update should pass `--auto-build` for [type] given
   /// the newest cached age for the requested version ([cachedAge] is null
   /// when nothing is cached).
-  static bool shouldRefresh({required String type, required Duration? cachedAge}) {
+  static bool shouldRefresh({
+    required String type,
+    required Duration? cachedAge,
+  }) {
     if (cachedAge == null) {
       return true;
     }

@@ -75,13 +75,16 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
       );
     });
 
-    test('reads the game version, not the loader version, off an installer', () {
-      expect(buildJarVersionKey('forge-26.2-65.0.1-installer.jar'), '26.2');
-      expect(
-        buildJarVersionKey('fabric-26.2-loader.0.19.3-installer.1.1.1.jar'),
-        '26.2',
-      );
-    });
+    test(
+      'reads the game version, not the loader version, off an installer',
+      () {
+        expect(buildJarVersionKey('forge-26.2-65.0.1-installer.jar'), '26.2');
+        expect(
+          buildJarVersionKey('fabric-26.2-loader.0.19.3-installer.1.1.1.jar'),
+          '26.2',
+        );
+      },
+    );
 
     test('returns null when no version token is present', () {
       expect(buildJarVersionKey('latest.jar'), isNull);
@@ -104,10 +107,10 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
           jar('paper-26.2-62.jar', 20),
         ],
       );
-      expect(
-        stale.map((CachedBuildJar j) => j.name),
-        <String>['paper-26.2-46.jar', 'paper-26.2-62.jar'],
-      );
+      expect(stale.map((CachedBuildJar j) => j.name), <String>[
+        'paper-26.2-46.jar',
+        'paper-26.2-62.jar',
+      ]);
     });
 
     test('never prunes across Minecraft versions', () {
@@ -130,10 +133,9 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
         ],
         keepPaths: <String>{'/builds/paper/leaf-26.2-33.jar'},
       );
-      expect(
-        stale.map((CachedBuildJar j) => j.name),
-        <String>['leaf-26.2-25.jar'],
-      );
+      expect(stale.map((CachedBuildJar j) => j.name), <String>[
+        'leaf-26.2-25.jar',
+      ]);
     });
 
     test('never prunes latest.jar or an unversioned file', () {
@@ -156,10 +158,9 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
         ],
         keepPerVersion: 2,
       );
-      expect(
-        stale.map((CachedBuildJar j) => j.name),
-        <String>['paper-26.2-46.jar'],
-      );
+      expect(stale.map((CachedBuildJar j) => j.name), <String>[
+        'paper-26.2-46.jar',
+      ]);
     });
 
     test('returns nothing for an empty or single-jar cache', () {

@@ -152,7 +152,10 @@ class InteractiveWizard {
         }
         if (row.tps != null) {
           bits.add(
-            Ansi.style('${row.tps!.toStringAsFixed(1)} tps', _tpsColor(row.tps!)),
+            Ansi.style(
+              '${row.tps!.toStringAsFixed(1)} tps',
+              _tpsColor(row.tps!),
+            ),
           );
         }
         if (row.version != null && row.version!.isNotEmpty) {
@@ -304,11 +307,14 @@ class InteractiveWizard {
       tickInterval: const Duration(milliseconds: 250),
       onActionKey: (String raw, MenuEntry<_DashChoice> entry) {
         final _DashChoice? value = entry.value;
-        final bool onServerRow = value != null &&
+        final bool onServerRow =
+            value != null &&
             value.kind == _Act.instance &&
             value.instance != null;
-        final DashboardQuickAction? action =
-            dashboardQuickAction(raw, onServerRow: onServerRow);
+        final DashboardQuickAction? action = dashboardQuickAction(
+          raw,
+          onServerRow: onServerRow,
+        );
         if (action == null) {
           return null;
         }

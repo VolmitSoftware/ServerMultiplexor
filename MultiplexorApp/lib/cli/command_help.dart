@@ -65,7 +65,9 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'test-latest [--spigot-mc <version>]',
     'prune [all|type]',
   ]),
-  CommandHelpGroup('repos', <String>['sync [all|paper|purpur|folia|canvas|leaf]']),
+  CommandHelpGroup('repos', <String>[
+    'sync [all|paper|purpur|folia|canvas|leaf]',
+  ]),
   CommandHelpGroup('plugins', <String>[
     'show-source',
     'sync [instance|--all] [--clean]',

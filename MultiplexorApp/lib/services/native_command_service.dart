@@ -1107,8 +1107,9 @@ class NativeCommandService {
         final List<String> stopPositional = rest
             .where((String a) => a != '--graceful')
             .toList(growable: false);
-        final String? stopTarget =
-            stopPositional.isNotEmpty ? stopPositional.first : null;
+        final String? stopTarget = stopPositional.isNotEmpty
+            ? stopPositional.first
+            : null;
         if (graceful) {
           await _runtimeGracefulStop(profile, stopTarget, io);
         } else {
@@ -3780,7 +3781,8 @@ class NativeCommandService {
     final spigotMc = options['spigot-mc']?.trim();
 
     for (final type in targets) {
-      final pinned = type == 'spigot' && spigotMc != null && spigotMc.isNotEmpty;
+      final pinned =
+          type == 'spigot' && spigotMc != null && spigotMc.isNotEmpty;
       try {
         await _buildTarget(
           profile,
@@ -3815,7 +3817,13 @@ class NativeCommandService {
 
     final latest = await _resolveLatestMcVersion(normalized);
     try {
-      return await _buildTargetVersion(profile, normalized, latest, options, io);
+      return await _buildTargetVersion(
+        profile,
+        normalized,
+        latest,
+        options,
+        io,
+      );
     } on _NativeCommandException catch (firstFailure) {
       // BuildTools compiles are minutes long and fail for reasons a different
       // Minecraft version will not fix, so only downloaded platforms retry.
@@ -4084,7 +4092,10 @@ class NativeCommandService {
 
     final downloadUrl =
         'https://api.leafmc.one/v2/projects/leaf/versions/$mc/builds/$bestBuild/downloads/$jarName';
-    final output = p.join(_buildDir(profile, 'leaf'), 'leaf-$mc-$bestBuild.jar');
+    final output = p.join(
+      _buildDir(profile, 'leaf'),
+      'leaf-$mc-$bestBuild.jar',
+    );
     await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'leaf', output);
     io.write('[OK] Cached leaf build $bestBuild for mc=$mc');
@@ -4833,12 +4844,7 @@ class NativeCommandService {
     var removed = 0;
     for (final consumer in ConsumerProfile.values) {
       for (final type in types) {
-        removed += _pruneBuildCache(
-          consumer,
-          type,
-          io,
-          qualifyConsumer: true,
-        );
+        removed += _pruneBuildCache(consumer, type, io, qualifyConsumer: true);
         removed += _pruneBuildToolsWorkDirs(
           consumer,
           type,
@@ -4985,7 +4991,13 @@ class NativeCommandService {
       return upstream;
     }
 
-    if (<String>{'paper', 'purpur', 'folia', 'canvas', 'leaf'}.contains(normalized)) {
+    if (<String>{
+      'paper',
+      'purpur',
+      'folia',
+      'canvas',
+      'leaf',
+    }.contains(normalized)) {
       final stable = await _repoLatestStableVersion(profile, normalized);
       if (stable != null && stable.isNotEmpty) {
         return stable;
@@ -6643,21 +6655,23 @@ class NativeCommandService {
       TableColumn(header: 'PORT'),
       TableColumn(header: 'VERSION'),
     ];
-    final cells = rows.map((r) {
-      final pid = r.pid;
-      final stat = pid != null ? psStats[pid] : null;
-      return <String>[
-        r.instance,
-        r.consumer,
-        r.state.name,
-        _statsPlayersCell(r.ping, r.state),
-        formatCpuPercent(stat?.cpuPercent),
-        formatBytes(stat?.rssBytes),
-        r.uptime != null ? formatCompactDuration(r.uptime!) : 'n/a',
-        '${r.port}',
-        r.ping?.versionName ?? '-',
-      ];
-    }).toList(growable: false);
+    final cells = rows
+        .map((r) {
+          final pid = r.pid;
+          final stat = pid != null ? psStats[pid] : null;
+          return <String>[
+            r.instance,
+            r.consumer,
+            r.state.name,
+            _statsPlayersCell(r.ping, r.state),
+            formatCpuPercent(stat?.cpuPercent),
+            formatBytes(stat?.rssBytes),
+            r.uptime != null ? formatCompactDuration(r.uptime!) : 'n/a',
+            '${r.port}',
+            r.ping?.versionName ?? '-',
+          ];
+        })
+        .toList(growable: false);
 
     final lines = renderTable(
       columns: columns,
@@ -8780,10 +8794,7 @@ class NativeCommandService {
         // once a second, so it is consumed at the launch site.
         final Future<Duration?> uptimeFuture = stopped
             ? Future<Duration?>.value()
-            : _runtimeUptime(
-                profile,
-                name,
-              ).catchError((Object _) => null);
+            : _runtimeUptime(profile, name).catchError((Object _) => null);
         MinecraftPingResult? ping;
         double? tps;
         if (live) {

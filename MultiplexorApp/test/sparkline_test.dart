@@ -16,7 +16,11 @@ void main() {
     test('width <= 0 always renders the empty string', () {
       for (final int width in <int>[0, -1, -20]) {
         expect(
-          renderSparkline(values: <double?>[1, 2, 3], width: width, theme: truecolor),
+          renderSparkline(
+            values: <double?>[1, 2, 3],
+            width: width,
+            theme: truecolor,
+          ),
           '',
         );
         expect(
@@ -71,33 +75,40 @@ void main() {
       expect(Ansi.visibleLength(rendered), 12);
     });
 
-    test('mixed null/real samples of every size relationship occupy width columns', () {
-      final List<List<double?>> cases = <List<double?>>[
-        <double?>[],
-        <double?>[null],
-        <double?>[1, null, 3],
-        <double?>[1, null, 3, null, 5, 6, 7, 8, 9, 10],
-      ];
-      for (final List<double?> values in cases) {
-        for (final int width in <int>[1, 3, 5, 10]) {
-          final String rendered = renderSparkline(
-            values: values,
-            width: width,
-            theme: truecolor,
-          );
-          expect(
-            Ansi.visibleLength(rendered),
-            width,
-            reason: 'values=$values width=$width rendered="$rendered"',
-          );
+    test(
+      'mixed null/real samples of every size relationship occupy width columns',
+      () {
+        final List<List<double?>> cases = <List<double?>>[
+          <double?>[],
+          <double?>[null],
+          <double?>[1, null, 3],
+          <double?>[1, null, 3, null, 5, 6, 7, 8, 9, 10],
+        ];
+        for (final List<double?> values in cases) {
+          for (final int width in <int>[1, 3, 5, 10]) {
+            final String rendered = renderSparkline(
+              values: values,
+              width: width,
+              theme: truecolor,
+            );
+            expect(
+              Ansi.visibleLength(rendered),
+              width,
+              reason: 'values=$values width=$width rendered="$rendered"',
+            );
+          }
         }
-      }
-    });
+      },
+    );
   });
 
   group('renderSparkline — empty and all-gap input', () {
     test('empty values renders every cell as the gap glyph, painted faint', () {
-      final String rendered = renderSparkline(values: <double?>[], width: 4, theme: plain);
+      final String rendered = renderSparkline(
+        values: <double?>[],
+        width: 4,
+        theme: plain,
+      );
       expect(rendered, '····');
     });
 
@@ -111,7 +122,11 @@ void main() {
     });
 
     test('gap cells are painted faint at truecolor depth', () {
-      final String rendered = renderSparkline(values: <double?>[], width: 2, theme: truecolor);
+      final String rendered = renderSparkline(
+        values: <double?>[],
+        width: 2,
+        theme: truecolor,
+      );
       expect(
         rendered,
         '${truecolor.faint}·${truecolor.reset}${truecolor.faint}·${truecolor.reset}',
@@ -143,24 +158,30 @@ void main() {
   });
 
   group('renderSparkline — flat data', () {
-    test('zero-span data renders the middle spark level for every non-null cell', () {
-      final String rendered = renderSparkline(
-        values: <double?>[5, 5, 5],
-        width: 3,
-        theme: plain,
-      );
-      final String mid = _glyphAt(MonitorGlyphs.unicode.spark, 3);
-      expect(rendered, mid * 3);
-    });
+    test(
+      'zero-span data renders the middle spark level for every non-null cell',
+      () {
+        final String rendered = renderSparkline(
+          values: <double?>[5, 5, 5],
+          width: 3,
+          theme: plain,
+        );
+        final String mid = _glyphAt(MonitorGlyphs.unicode.spark, 3);
+        expect(rendered, mid * 3);
+      },
+    );
 
-    test('a single non-null sample (trivially flat) renders the middle level', () {
-      final String rendered = renderSparkline(
-        values: <double?>[42],
-        width: 1,
-        theme: plain,
-      );
-      expect(rendered, _glyphAt(MonitorGlyphs.unicode.spark, 3));
-    });
+    test(
+      'a single non-null sample (trivially flat) renders the middle level',
+      () {
+        final String rendered = renderSparkline(
+          values: <double?>[42],
+          width: 1,
+          theme: plain,
+        );
+        expect(rendered, _glyphAt(MonitorGlyphs.unicode.spark, 3));
+      },
+    );
 
     test('flat data is painted at ramp fraction 0.5', () {
       final String rendered = renderSparkline(
@@ -184,7 +205,10 @@ void main() {
         width: 3,
         theme: plain,
       );
-      expect(rendered, '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}·${_glyphAt(MonitorGlyphs.unicode.spark, 7)}');
+      expect(
+        rendered,
+        '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}·${_glyphAt(MonitorGlyphs.unicode.spark, 7)}',
+      );
     });
 
     test('a bucket with zero non-null members renders as a gap', () {
@@ -228,7 +252,10 @@ void main() {
         max: 100,
       );
       expect(autoScaled, isNot(fixedScaled));
-      expect(fixedScaled.substring(0, 1), _glyphAt(MonitorGlyphs.unicode.spark, 0));
+      expect(
+        fixedScaled.substring(0, 1),
+        _glyphAt(MonitorGlyphs.unicode.spark, 0),
+      );
     });
 
     test('values outside min/max clamp into range rather than overflowing', () {
@@ -239,7 +266,10 @@ void main() {
         min: 0,
         max: 100,
       );
-      expect(rendered, '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}${_glyphAt(MonitorGlyphs.unicode.spark, 7)}');
+      expect(
+        rendered,
+        '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}${_glyphAt(MonitorGlyphs.unicode.spark, 7)}',
+      );
     });
   });
 
@@ -263,39 +293,48 @@ void main() {
         aggregate: SparkAggregate.max,
       );
       expect(meanRendered, isNot(maxRendered));
-      expect(meanRendered, '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}${_glyphAt(MonitorGlyphs.unicode.spark, 2)}');
-      expect(maxRendered, '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}${_glyphAt(MonitorGlyphs.unicode.spark, 7)}');
+      expect(
+        meanRendered,
+        '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}${_glyphAt(MonitorGlyphs.unicode.spark, 2)}',
+      );
+      expect(
+        maxRendered,
+        '${_glyphAt(MonitorGlyphs.unicode.spark, 0)}${_glyphAt(MonitorGlyphs.unicode.spark, 7)}',
+      );
     });
 
-    test('last picks the final non-null sample in the bucket, distinct from mean and max', () {
-      final List<double?> values = <double?>[5, 1, 2];
-      final String lastRendered = renderSparkline(
-        values: values,
-        width: 1,
-        theme: plain,
-        min: 0,
-        max: 5,
-        aggregate: SparkAggregate.last,
-      );
-      final String meanRendered = renderSparkline(
-        values: values,
-        width: 1,
-        theme: plain,
-        min: 0,
-        max: 5,
-      );
-      final String maxRendered = renderSparkline(
-        values: values,
-        width: 1,
-        theme: plain,
-        min: 0,
-        max: 5,
-        aggregate: SparkAggregate.max,
-      );
-      expect(lastRendered, isNot(meanRendered));
-      expect(lastRendered, isNot(maxRendered));
-      expect(maxRendered, _glyphAt(MonitorGlyphs.unicode.spark, 7));
-    });
+    test(
+      'last picks the final non-null sample in the bucket, distinct from mean and max',
+      () {
+        final List<double?> values = <double?>[5, 1, 2];
+        final String lastRendered = renderSparkline(
+          values: values,
+          width: 1,
+          theme: plain,
+          min: 0,
+          max: 5,
+          aggregate: SparkAggregate.last,
+        );
+        final String meanRendered = renderSparkline(
+          values: values,
+          width: 1,
+          theme: plain,
+          min: 0,
+          max: 5,
+        );
+        final String maxRendered = renderSparkline(
+          values: values,
+          width: 1,
+          theme: plain,
+          min: 0,
+          max: 5,
+          aggregate: SparkAggregate.max,
+        );
+        expect(lastRendered, isNot(meanRendered));
+        expect(lastRendered, isNot(maxRendered));
+        expect(maxRendered, _glyphAt(MonitorGlyphs.unicode.spark, 7));
+      },
+    );
 
     test('last skips trailing nulls to find the final real sample', () {
       final String rendered = renderSparkline(
@@ -383,7 +422,9 @@ void main() {
         high: 10,
         glyphs: MonitorGlyphs.ascii,
       );
-      final int unicodeIndex = MonitorGlyphs.unicode.spark.indexOf(unicodeCell.glyph);
+      final int unicodeIndex = MonitorGlyphs.unicode.spark.indexOf(
+        unicodeCell.glyph,
+      );
       final int asciiIndex = MonitorGlyphs.ascii.spark.indexOf(asciiCell.glyph);
       expect(unicodeIndex, asciiIndex);
     });
