@@ -168,10 +168,10 @@ void main() {
   });
 
   group('MetricSample.fromMetricsTsv', () {
-    test('parses a full 13-column row', () {
+    test('parses a full 14-column row', () {
       const String line =
           'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
-          '\t3600\t3.5\t536870912\t/logs/survival/latest.log';
+          '\t3600\t3.5\t536870912\t/logs/survival/latest.log\t42';
       final MetricSample? sample = MetricSample.fromMetricsTsv(line, ts);
       expect(sample, isNotNull);
       expect(sample!.ts, ts);
@@ -186,21 +186,43 @@ void main() {
       expect(sample.cpuPercent, 3.5);
       expect(sample.rssBytes, 536870912);
       expect(sample.logPath, '/logs/survival/latest.log');
-      expect(sample.latencyMs, isNull);
+      expect(sample.latencyMs, 42);
     });
 
-    test('extra columns beyond 13 are ignored', () {
+    test('a dashed latency cell parses to null, never zero', () {
       const String line =
           'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
-          '\t3600\t3.5\t536870912\t/logs/survival/latest.log\tEXTRA\tSTUFF';
+          '\t3600\t3.5\t536870912\t/logs/survival/latest.log\t-';
+      final MetricSample? sample = MetricSample.fromMetricsTsv(line, ts);
+      expect(sample, isNotNull);
+      expect(sample!.latencyMs, isNull);
+    });
+
+    test('a legacy 13-column row leaves latency null', () {
+      const String line =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
+          '\t3600\t3.5\t536870912\t/logs/survival/latest.log';
       final MetricSample? sample = MetricSample.fromMetricsTsv(line, ts);
       expect(sample, isNotNull);
       expect(sample!.logPath, '/logs/survival/latest.log');
+      expect(sample.rssBytes, 536870912);
+      expect(sample.latencyMs, isNull);
+    });
+
+    test('extra columns beyond 14 are ignored', () {
+      const String line =
+          'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
+          '\t3600\t3.5\t536870912\t/logs/survival/latest.log\t42'
+          '\tEXTRA\tSTUFF';
+      final MetricSample? sample = MetricSample.fromMetricsTsv(line, ts);
+      expect(sample, isNotNull);
+      expect(sample!.logPath, '/logs/survival/latest.log');
+      expect(sample.latencyMs, 42);
     });
 
     test('a stopped instance row with dash fields parses to nulls', () {
       const String line =
-          'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-';
+          'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-\t-';
       final MetricSample? sample = MetricSample.fromMetricsTsv(line, ts);
       expect(sample, isNotNull);
       expect(sample!.instance, 'lobby');
@@ -323,7 +345,7 @@ void main() {
   });
 
   group('metricsTsvRow', () {
-    test('emits 13 tab-separated columns in the documented order', () {
+    test('emits 14 tab-separated columns in the documented order', () {
       final String row = metricsTsvRow(
         name: 'survival',
         state: RuntimeState.running,
@@ -338,13 +360,14 @@ void main() {
         cpuPercent: 3.54,
         rssBytes: 536870912,
         logPath: '/logs/survival/latest.log',
+        latencyMs: 42,
       );
       expect(
         row,
         'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
-        '\t3600\t3.5\t536870912\t/logs/survival/latest.log',
+        '\t3600\t3.5\t536870912\t/logs/survival/latest.log\t42',
       );
-      expect(row.split('\t'), hasLength(13));
+      expect(row.split('\t'), hasLength(14));
     });
 
     test('renders every unavailable value as a dash, never zero', () {
@@ -362,10 +385,11 @@ void main() {
         cpuPercent: null,
         rssBytes: null,
         logPath: null,
+        latencyMs: null,
       );
       expect(
         row,
-        'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-',
+        'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-\t-',
       );
     });
 
@@ -393,7 +417,7 @@ void main() {
         logPath: '/logs/a\tb.log',
       );
       final List<String> cols = row.split('\t');
-      expect(cols, hasLength(13));
+      expect(cols, hasLength(14));
       expect(cols[6], 'Paper 1.21 beta');
       expect(cols[12], '/logs/a b.log');
     });
@@ -413,6 +437,7 @@ void main() {
         cpuPercent: 3.5,
         rssBytes: 536870912,
         logPath: '/logs/survival/latest.log',
+        latencyMs: 42,
       );
       final MetricSample? sample = MetricSample.fromMetricsTsv(row, ts);
       expect(sample, isNotNull);
@@ -427,6 +452,7 @@ void main() {
       expect(sample.cpuPercent, 3.5);
       expect(sample.rssBytes, 536870912);
       expect(sample.logPath, '/logs/survival/latest.log');
+      expect(sample.latencyMs, 42);
     });
 
     test('a fully-unavailable row round-trips back to nulls', () {
@@ -447,6 +473,7 @@ void main() {
       expect(sample.cpuPercent, isNull);
       expect(sample.rssBytes, isNull);
       expect(sample.logPath, isNull);
+      expect(sample.latencyMs, isNull);
     });
   });
 

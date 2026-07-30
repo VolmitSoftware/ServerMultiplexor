@@ -8767,10 +8767,13 @@ class NativeCommandService {
 
   /// Emits one tab-separated line per instance with live metrics for the
   /// dashboard: name, state, port, locked, players, max, version, tps,
-  /// isolation, uptimeSeconds, cpuPercent, rssBytes, logPath. Running servers
-  /// are pinged (and RCON-queried for TPS) concurrently with short timeouts,
-  /// and every live server's resident set and CPU share come from a single
-  /// batched `ps`, so the whole sweep stays within ~1s.
+  /// isolation, uptimeSeconds, cpuPercent, rssBytes, logPath, latencyMs.
+  /// Running servers are pinged (and RCON-queried for TPS) concurrently with
+  /// short timeouts, and every live server's resident set and CPU share come
+  /// from a single batched `ps`, so the whole sweep stays within ~1s.
+  ///
+  /// The `cpuPercent` column is BSD `ps %cpu`: a lifetime average, not an
+  /// instantaneous load reading.
   Future<int> _runtimeMetrics(
     ConsumerProfile profile,
     _NativeIoBuffer io,
@@ -8848,6 +8851,7 @@ class NativeCommandService {
           cpuPercent: stat?.cpuPercent,
           rssBytes: stat?.rssBytes,
           logPath: sample.logPath,
+          latencyMs: ping?.latency.inMilliseconds,
         ),
       );
     }

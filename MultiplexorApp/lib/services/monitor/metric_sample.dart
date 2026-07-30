@@ -7,6 +7,14 @@ import '../runtime_state.dart';
 ///
 /// Every metric field is nullable by design: missing data stays null (and
 /// renders as "n/a" downstream) rather than being fabricated as zero.
+///
+/// One field is not what its name suggests: [cpuPercent] comes from BSD
+/// `ps %cpu`, which reports CPU time over the whole life of the process
+/// divided by its elapsed run time — a lifetime average, not an
+/// instantaneous reading. A long-lived server that spiked an hour ago and is
+/// idle now still reports the raised average, and a busy server that only
+/// just started reports a low one. Read the CPU series as a trend, not as a
+/// live load meter.
 class MetricSample {
   const MetricSample({
     required this.ts,
@@ -138,15 +146,19 @@ class MetricSample {
 
   /// Parses one row of the extended `runtime metrics` TSV output:
   /// `name state port locked players max version tps isolated
-  /// uptimeSeconds cpuPercent rssBytes logPath`, tab-separated, `-` marking
-  /// a null cell.
+  /// uptimeSeconds cpuPercent rssBytes logPath latencyMs`, tab-separated,
+  /// `-` marking a null cell.
   ///
   /// `locked` and `isolated` are read but not stored on [MetricSample] (the
   /// wizard reads lock/isolation state elsewhere). [ts] is stamped from
   /// [now]. Returns null when there are fewer than 9 columns, the name is
-  /// empty, or the state column doesn't match a known [RuntimeState]. Rows
-  /// with 9-12 columns (the pre-extension format) leave the trailing
-  /// metrics-only columns null; columns beyond the 13th are ignored.
+  /// empty, or the state column doesn't match a known [RuntimeState].
+  ///
+  /// Shorter rows are read as far as they go, so an older writer's output
+  /// still parses: 9-12 columns leave every metrics-only field null, and 13
+  /// columns (the format before ping latency was carried) leave
+  /// [latencyMs] null rather than fabricating a round trip. Columns beyond
+  /// the 14th are ignored.
   static MetricSample? fromMetricsTsv(String line, DateTime now) {
     final List<String> cols = line.split('\t');
     if (cols.length < 9) {
@@ -172,6 +184,7 @@ class MetricSample {
       rssBytes = _tsvInt(cols[11]);
       logPath = _tsvString(cols[12]);
     }
+    final int? latencyMs = cols.length >= 14 ? _tsvInt(cols[13]) : null;
 
     return MetricSample(
       ts: now,
@@ -182,6 +195,7 @@ class MetricSample {
       maxPlayers: _tsvInt(cols[5]),
       version: _tsvString(cols[6]),
       tps: _tsvDouble(cols[7]),
+      latencyMs: latencyMs,
       uptimeSeconds: uptimeSeconds,
       cpuPercent: cpuPercent,
       rssBytes: rssBytes,
@@ -218,6 +232,9 @@ class MetricSample {
 }
 
 /// One `ps` reading for a single process: resident set size and CPU percent.
+///
+/// [cpuPercent] is BSD `%cpu` — a lifetime average over the process's whole
+/// run, not an instantaneous sample. See [MetricSample].
 class PsStat {
   const PsStat({required this.rssBytes, required this.cpuPercent});
 
@@ -272,12 +289,15 @@ List<String> psArgsForPids(List<int> pids) {
 /// Renders one row of the extended `runtime metrics` TSV — the exact
 /// inverse of [MetricSample.fromMetricsTsv]. Columns, in order:
 /// `name state port locked players max version tps isolated uptimeSeconds
-/// cpuPercent rssBytes logPath`.
+/// cpuPercent rssBytes logPath latencyMs`.
 ///
 /// Every unavailable value renders as `-`, never as a zero. [tps] and
 /// [cpuPercent] render with one decimal place. [version] and [logPath] are
 /// treated as unavailable when blank, and any tab or newline they contain is
 /// replaced with a space so a single row can never span or split columns.
+///
+/// New columns are only ever appended: a reader written against a shorter
+/// row must keep parsing this one (see [MetricSample.fromMetricsTsv]).
 String metricsTsvRow({
   required String name,
   required RuntimeState state,
@@ -292,6 +312,7 @@ String metricsTsvRow({
   double? cpuPercent,
   int? rssBytes,
   String? logPath,
+  int? latencyMs,
 }) {
   return <String>[
     _tsvSanitize(name),
@@ -307,6 +328,7 @@ String metricsTsvRow({
     _tsvDecimalCell(cpuPercent),
     _tsvNumberCell(rssBytes),
     _tsvTextCell(logPath),
+    _tsvNumberCell(latencyMs),
   ].join('\t');
 }
 
