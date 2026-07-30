@@ -386,19 +386,21 @@ void main() {
         final List<String> rows = stripAll(frame.rows);
 
         expect(rows[0], startsWith('┌─'));
-        expect(rows.take(4).join('\n'), contains('MULTIPLEXOR'));
+        expect(rows.take(3).join('\n'), contains('MULTIPLEXOR'));
+        expect(rows[1], contains('ACTIVE alpha · RANGE 15m · 2 SERVERS'));
+        expect(rows[2], startsWith('└'), reason: 'a three-row header');
 
         // One three-card strip: every title on the same border row.
-        expect(rows[4], contains('FLEET'));
-        expect(rows[4], contains('TPS'));
-        expect(rows[4], contains('HOST'));
-        expect(rows[6], startsWith('└'));
+        expect(rows[3], contains('FLEET'));
+        expect(rows[3], contains('TPS'));
+        expect(rows[3], contains('HOST'));
+        expect(rows[5], startsWith('└'));
 
         // The body: slim list on the left, selected server on the right.
-        expect(rows[7], startsWith('┌─ SERVERS '));
-        expect(rows[7].substring(29), startsWith('┌─ ALPHA '));
-        expect(rows[7], contains('2/2 UP'));
-        expect(rows[7], contains('running · 15m'));
+        expect(rows[6], startsWith('┌─ SERVERS '));
+        expect(rows[6].substring(29), startsWith('┌─ ALPHA '));
+        expect(rows[6], contains('2/2 UP'));
+        expect(rows[6], contains('running · 15m'));
         expect(rows[20], startsWith('└'));
 
         expect(rows[21], contains('[ STOP ]'));
@@ -409,7 +411,9 @@ void main() {
       },
     );
 
-    test('shows the header roll-up with up/down counts, players and tps', () {
+    test('keeps the header to the workspace facts the kpi strip omits', () {
+      // The fleet numbers moved to the KPI strip. A header that repeats them
+      // one row above spends a row of the body saying the same thing twice.
       final List<String> rows = stripAll(
         frameOf(
           snapshot: MonitorSnapshot(
@@ -426,22 +430,23 @@ void main() {
           spinner: 1,
         ).rows,
       );
-      final String header = rows.take(4).join('\n');
-      expect(header, contains('2 UP'));
-      expect(header, contains('1 DOWN'));
-      expect(header, contains('PLAYERS'));
-      expect(header, contains('AVG TPS'));
-      expect(header, contains('ACTIVE beta'));
-      expect(header, contains('RANGE 15m'));
-      expect(header, contains('3 SERVERS'));
+      final String header = rows.take(3).join('\n');
+      expect(header, contains('MULTIPLEXOR'));
+      expect(header, contains('survival'), reason: 'the consumer badge');
       expect(RegExp(r'\d\d:\d\d').hasMatch(header), isTrue);
+      expect(header, contains('ACTIVE beta · RANGE 15m · 3 SERVERS'));
+      expect(header, isNot(contains('UP')));
+      expect(header, isNot(contains('DOWN')));
+      expect(header, isNot(contains('PLAYERS')));
+      expect(header, isNot(contains('AVG TPS')));
     });
 
-    test('an unsampled instance counts as neither up nor down', () {
+    test('an unsampled instance is not counted as up', () {
       // MonitorSnapshot documents an instance with no history as "no readings
-      // yet ... never as zeros", and the row itself renders no state. The
-      // roll-up has to agree: an instance nothing has been heard from is not
-      // a stopped one, so counting it as DOWN invents a fact.
+      // yet ... never as zeros". The roll-up has to agree: an instance
+      // nothing has been heard from is neither up nor stopped, so the fleet
+      // card counts what is up out of the total rather than claiming a state
+      // for every member.
       final List<String> rows = stripAll(
         frameOf(
           snapshot: const MonitorSnapshot(
@@ -452,27 +457,23 @@ void main() {
           columns: 100,
         ).rows,
       );
-      final String header = rows.take(4).join('\n');
-      expect(header, contains('0 UP'));
-      expect(header, contains('0 DOWN'));
-      expect(header, contains('3 SERVERS'));
-      expect(rows[7], contains('0/3 UP'), reason: 'the slim list badge');
-      expect(rows.sublist(4, 7).join('\n'), contains('0/3 UP'));
+      expect(rows.take(3).join('\n'), contains('3 SERVERS'));
+      expect(rows[6], contains('0/3 UP'), reason: 'the slim list badge');
+      expect(rows.sublist(3, 6).join('\n'), contains('0/3 UP'));
     });
 
-    test('a stopped instance still counts as down', () {
+    test('a stopped instance is not counted as up', () {
       final List<String> rows = stripAll(
         frameOf(snapshot: mixedFleet(), columns: 100).rows,
       );
-      final String header = rows.take(4).join('\n');
-      expect(header, contains('1 UP'));
-      expect(header, contains('1 DOWN'));
+      expect(rows.sublist(3, 6).join('\n'), contains('1/2 UP'));
+      expect(rows[6], contains('1/2 UP'));
     });
 
     test('reads the fleet roll-up into the three kpi cards', () {
       final String kpi = stripAll(
         frameOf(columns: 100).rows,
-      ).sublist(4, 7).join('\n');
+      ).sublist(3, 6).join('\n');
       expect(kpi, contains('2/2 UP'));
       expect(kpi, contains('PLAYERS'));
       // Both fleet members' last reading, averaged: (18.4 + 15.2) / 2.
@@ -491,7 +492,7 @@ void main() {
           ),
           columns: 100,
         ).rows,
-      ).sublist(4, 7).join('\n');
+      ).sublist(3, 6).join('\n');
       expect(kpi, contains('0/2 UP'));
       expect(
         RegExp('n/a').allMatches(kpi).length,
@@ -505,23 +506,55 @@ void main() {
       );
     });
 
+    test('never clips a kpi reading, however wide the fleet counts run', () {
+      // The cards are sized against the readings as rendered, not against a
+      // budget: a clipped `CPU 150%` reads as `CPU 150`, which is a smaller
+      // load than the one measured. The meter gives up cells instead.
+      for (final int count in <int>[1, 5, 12, 100]) {
+        final List<String> names = List<String>.generate(
+          count,
+          (int index) => 'srv-$index',
+        );
+        final String kpi = stripAll(
+          frameOf(
+            snapshot: MonitorSnapshot(
+              instances: names,
+              history: <String, List<MetricSample>>{
+                for (final String name in names)
+                  name: runHistory(name, count: 4, cpuPercent: 150.0),
+              },
+              consumerName: 'survival',
+            ),
+            columns: 80,
+          ).rows,
+        ).sublist(3, 6).join('\n');
+        expect(kpi, contains('$count/$count UP'), reason: 'at $count');
+        expect(kpi, contains('PLAYERS'), reason: 'at $count');
+        expect(
+          RegExp(r'\d[BKMGTP] · CPU \d+%').hasMatch(kpi),
+          isTrue,
+          reason: 'at $count both readings keep their unit: $kpi',
+        );
+      }
+    });
+
     test('marks the selection with an accent selector in the slim list', () {
       final List<String> rows = stripAll(
         frameOf(snapshot: twoServers(active: null), selectedIndex: 1).rows,
       );
-      expect(nameOnRow(rows[8]), 'alpha');
-      expect(nameOnRow(rows[9]), 'beta');
-      expect(rows[8][2], ' ');
-      expect(rows[9][2], '▸');
-      expect(rows[8][25], '●', reason: 'a running instance keeps its bullet');
+      expect(nameOnRow(rows[7]), 'alpha');
+      expect(nameOnRow(rows[8]), 'beta');
+      expect(rows[7][2], ' ');
+      expect(rows[8][2], '▸');
+      expect(rows[7][25], '●', reason: 'a running instance keeps its bullet');
     });
 
     test('shows the selector on a hovered row that is not the selection', () {
       final List<String> rows = stripAll(
         frameOf(selectedIndex: 0, hoveredId: '${serverHitPrefix}beta').rows,
       );
-      expect(rows[8][2], '▸', reason: 'the selection');
-      expect(rows[9][2], '▸', reason: 'the hover');
+      expect(rows[7][2], '▸', reason: 'the selection');
+      expect(rows[8][2], '▸', reason: 'the hover');
     });
 
     test('paints a hovered row selector with the accent tone', () {
@@ -530,7 +563,7 @@ void main() {
         hoveredId: '${serverHitPrefix}beta',
         theme: color,
       ).rows;
-      expect(rows[9], contains('${color.accent}▸'));
+      expect(rows[8], contains('${color.accent}▸'));
     });
 
     test(
@@ -543,10 +576,10 @@ void main() {
         );
         expectExactFrame(frame.rows, 132, 40);
         final List<String> rows = stripAll(frame.rows);
-        expect(rows[7].substring(29), startsWith('┌─ BETA '));
-        expect(rows[7], contains('running · 15m'));
+        expect(rows[6].substring(29), startsWith('┌─ BETA '));
+        expect(rows[6], contains('running · 15m'));
 
-        final String body = rows.sublist(7, 37).join('\n');
+        final String body = rows.sublist(6, 37).join('\n');
         expect(body, contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
         expect(
           RegExp('MEM [█▏▎▍▌▋▊▉─]{14} ').hasMatch(body),
@@ -571,12 +604,12 @@ void main() {
             lines: 40,
           ).rows,
         );
-        expect(rows[7].substring(29), startsWith('┌─ GAMMA '));
-        expect(rows[7], contains('stopped · 15m'));
+        expect(rows[6].substring(29), startsWith('┌─ GAMMA '));
+        expect(rows[6], contains('stopped · 15m'));
 
         // The body only: the KPI strip above it rolls up the whole fleet,
         // which still has a running member.
-        final List<String> body = rows.sublist(7, 37);
+        final List<String> body = rows.sublist(6, 37);
         final String facts = body
             .firstWhere((String row) => row.contains('PING'))
             .substring(29);
@@ -608,7 +641,7 @@ void main() {
           '${local.hour.toString().padLeft(2, '0')}:'
           '${local.minute.toString().padLeft(2, '0')}';
 
-      expect(rows.take(4).join('\n'), contains(clock));
+      expect(rows.take(3).join('\n'), contains(clock));
 
       final String axis = rows.lastWhere(
         (String row) => RegExp(r'\d\d:\d\d.*\d\d:\d\d').hasMatch(row),
@@ -916,24 +949,24 @@ void main() {
         (MonitorHitbox hit) => hit.kind == MonitorHitKind.rangeChip,
       );
       expect(chip.id, rangeHitId);
-      expect(chip.row, 7);
+      expect(chip.row, 6);
       expect(
-        stripAll(frame.rows)[7].substring(chip.colStart, chip.colEnd),
+        stripAll(frame.rows)[6].substring(chip.colStart, chip.colEnd),
         'running · 15m',
       );
-      expect(hitTest(frame.hitboxes, row: 7, col: chip.colStart), rangeHitId);
+      expect(hitTest(frame.hitboxes, row: 6, col: chip.colStart), rangeHitId);
     });
 
     test('follows a deep selection to the end of the fleet', () {
       final MonitorSnapshot snapshot = manyServers();
       final MonitorFrame frame = frameOf(snapshot: snapshot, selectedIndex: 29);
       final List<String> rows = stripAll(frame.rows);
-      // 12 content rows: one marker for the 19 servers above, then the last
-      // eleven.
-      expect(rows[8], contains('+19 more'));
-      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(19));
+      // 13 content rows: one marker for the 18 servers above, then the last
+      // twelve.
+      expect(rows[7], contains('+18 more'));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(18));
       expect(
-        frame.hitboxes.any((MonitorHitbox hit) => hit.row == 8),
+        frame.hitboxes.any((MonitorHitbox hit) => hit.row == 7),
         isFalse,
         reason: 'a marker row is not clickable',
       );
@@ -943,17 +976,17 @@ void main() {
       final MonitorSnapshot snapshot = manyServers();
       final MonitorFrame frame = frameOf(snapshot: snapshot, selectedIndex: 15);
       final List<String> rows = stripAll(frame.rows);
-      expect(rows[8], contains('+6 more'));
+      expect(rows[7], contains('+5 more'));
       expect(rows[19], contains('+14 more'));
-      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(6, 16));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(5, 16));
     });
 
     test('marks only the tail when the window sits at the top', () {
       final MonitorSnapshot snapshot = manyServers();
       final MonitorFrame frame = frameOf(snapshot: snapshot);
       final List<String> rows = stripAll(frame.rows);
-      expect(rows[19], contains('+19 more'));
-      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(0, 11));
+      expect(rows[19], contains('+18 more'));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(0, 12));
     });
 
     test('emits no hitboxes at all below the size floor', () {

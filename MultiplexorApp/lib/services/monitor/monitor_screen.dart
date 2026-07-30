@@ -515,16 +515,30 @@ class MonitorScreen {
     return null;
   }
 
-  /// The wheel means "scroll the list" over the servers panel and "change
-  /// the window" anywhere else, because everywhere else is charts. In the
-  /// detail view the whole screen is charts, so it always changes the
-  /// window.
+  /// The wheel means "scroll the list" over the server list and "change the
+  /// window" anywhere else, because everywhere else is charts. In the detail
+  /// view the whole screen is charts, so it always changes the window.
+  ///
+  /// The list is no longer the full width of the frame: it is a slim panel
+  /// with the selected server's chart beside it, sharing its rows. So the
+  /// pointer has to be inside the list's columns as well as its rows —
+  /// testing rows alone would turn a wheel over the chart into a selection
+  /// change. Both bounds come from the server-row hitboxes themselves rather
+  /// than from a constant here, so they cannot drift from what was drawn.
+  /// The row band is one row wider at each end than the hitboxes: a clipped
+  /// list spends that row on a `+N more` marker, which is part of the list
+  /// even though it is deliberately not a click target.
   MonitorResult? _handleWheel(TermEvent event, MonitorAction action) {
     if (!_detailMode) {
       final List<MonitorHitbox> hits = _hits();
       if (hits.isNotEmpty) {
+        final MonitorHitbox first = hits.first;
         final int row = event.row - 1;
-        if (row >= hits.first.row && row <= hits.last.row) {
+        final int col = event.col - 1;
+        if (col >= first.colStart &&
+            col < first.colEnd &&
+            row >= first.row - 1 &&
+            row <= hits.last.row + 1) {
           _moveSelection(action == MonitorAction.up ? -1 : 1);
           return null;
         }

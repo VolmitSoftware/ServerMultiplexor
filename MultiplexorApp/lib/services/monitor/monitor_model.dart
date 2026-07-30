@@ -18,10 +18,11 @@ import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
 import 'monitor_landing.dart';
 
-/// The frame's fixed row budget, top-down: the header panel, the KPI strip,
-/// one row per action bar, and the footer hint. Everything left over is the
-/// body — at the 24-line floor that is 14 rows.
-const int _headerRows = 4;
+/// The frame's fixed row budget, top-down: the header panel (a title border,
+/// one facts row and a bottom border), the KPI strip, one row per action bar,
+/// and the footer hint. Everything left over is the body — at the 24-line
+/// floor that is 15 rows.
+const int _headerRows = 3;
 const int _kpiRows = 3;
 const int _barRows = 1;
 const int _footerRows = 1;
@@ -136,7 +137,7 @@ MonitorFrame buildMonitorFrame({
   final List<String> rows = <String>[
     ..._headerPanel(
       snapshot: snapshot,
-      rollup: rollup,
+      instances: total,
       frame: frame,
       columns: columns,
       theme: theme,
@@ -252,36 +253,30 @@ String _footerHints(int columns) {
   return shown.join(_hintSeparator);
 }
 
-/// The header panel: brand wordmark, spinner/consumer/clock badge, a
-/// fleet roll-up row and a faint workspace-facts row.
+/// The header panel: brand wordmark, spinner/consumer/clock badge, and one
+/// faint workspace-facts row.
+///
+/// The fleet roll-up that used to sit here — up/down, players, average TPS —
+/// is the KPI strip's job now. Saying it twice, one row apart, spent a row
+/// of the body on a repetition.
 List<String> _headerPanel({
   required MonitorSnapshot snapshot,
-  required MonitorRollup rollup,
+  required int instances,
   required int frame,
   required int columns,
   required MonitorTheme theme,
   required Duration range,
   required DateTime now,
 }) {
-  final MonitorGlyphs glyphs = theme.glyphs;
   final DateTime local = now.toLocal();
   final String clock =
       '${local.hour.toString().padLeft(2, '0')}:'
       '${local.minute.toString().padLeft(2, '0')}';
 
-  final double? meanTps = rollup.meanTps;
-  final String upTone = rollup.up > 0 ? theme.ok : theme.faint;
-  final String summary =
-      '${theme.paint(glyphs.bulletOn, upTone)} '
-      '${theme.paint('${rollup.up} UP', upTone)} · '
-      '${theme.paint('${rollup.down} DOWN', theme.faint)}'
-      '   PLAYERS ${theme.paint(rollup.anyPlayers ? '${rollup.players}' : 'n/a', rollup.anyPlayers && rollup.players > 0 ? theme.accent : theme.faint)}'
-      '   AVG TPS ${theme.paint(meanTps == null ? 'n/a' : meanTps.toStringAsFixed(1), theme.tpsTone(meanTps))}';
-
   final String facts =
       'ACTIVE ${snapshot.activeInstance ?? 'none'} · '
       'RANGE ${rangeLabel(range)} · '
-      '${rollup.total} SERVERS';
+      '$instances SERVERS';
 
   return renderPanel(
     // The wordmark is the one title the panel does not style itself: the
@@ -291,7 +286,7 @@ List<String> _headerPanel({
     title: 'MULTIPLEXOR',
     styledTitle: theme.gradientTitle('MULTIPLEXOR'),
     badge: '${monitorSpinner(theme, frame)} ${snapshot.consumerName} $clock',
-    content: <String>[summary, theme.paint(facts, theme.faint)],
+    content: <String>[theme.paint(facts, theme.faint)],
     width: columns,
     theme: theme,
   );

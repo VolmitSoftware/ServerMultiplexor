@@ -53,15 +53,21 @@ const int _kpiTpsFixed = 5;
 const int _kpiMinSparkCells = 12;
 const int _kpiMaxSparkCells = 48;
 
-/// Columns the HOST card spends outside its meter: `MEM `, a space, the
-/// widest byte reading, ` · `, `CPU ` and the widest percent reading.
-const int _kpiHostFixed = 21;
-const int _kpiMinMeterCells = 4;
+/// Columns the HOST card spends outside its meter and its two readings:
+/// `MEM `, the space after the meter, and ` · CPU `.
+///
+/// The readings are measured as rendered rather than budgeted at their
+/// widest, because a budget that guesses low clips the number itself — a
+/// `CPU 150%` reading losing its `%` reads as a smaller load, which is worse
+/// than a shorter bar. The meter gives up its cells first, down to none.
+const int _kpiHostFixed = 12;
 const int _kpiMaxMeterCells = 16;
 
 /// Columns the selected-server panel's meter row spends outside its two
-/// meters, and the ceiling on each meter.
-const int _panelMetersFixed = 23;
+/// meters and its two readings (`MEM `, a space, `  CPU `, a space), and the
+/// ceiling on each meter. Sized against the rendered readings for the same
+/// reason as [_kpiHostFixed].
+const int _panelMetersFixed = 12;
 const int _panelMeterCells = 14;
 
 /// Content rows the selected-server panel keeps for its chart at minimum,
@@ -78,8 +84,8 @@ class MonitorPanelRender {
   final List<MonitorHitbox> hitboxes;
 }
 
-/// The fleet-wide readings the header and the KPI strip are drawn from, so
-/// the two can never disagree about the same fleet.
+/// The fleet-wide readings the KPI strip is drawn from — one pass over the
+/// snapshot, so no two cards can disagree about the same fleet.
 ///
 /// Counts follow the snapshot's own discipline: an instance nothing has been
 /// sampled from is neither up nor down, and a missing reading is missing —
@@ -87,7 +93,6 @@ class MonitorPanelRender {
 class MonitorRollup {
   const MonitorRollup({
     required this.up,
-    required this.down,
     required this.total,
     required this.players,
     required this.anyPlayers,
@@ -98,11 +103,11 @@ class MonitorRollup {
     required this.meanCpu,
   });
 
-  /// Instances that have been sampled and are not stopped.
+  /// Instances that have been sampled and are not stopped. An instance
+  /// nothing has been heard from is not one of these — and is not down
+  /// either, which is why the fleet card reads `up/total` rather than
+  /// claiming a state for every member.
   final int up;
-
-  /// Instances whose latest sample says stopped.
-  final int down;
 
   /// Instances in the workspace, sampled or not.
   final int total;
@@ -135,7 +140,6 @@ class MonitorRollup {
     required DateTime windowEnd,
   }) {
     int up = 0;
-    int down = 0;
     int players = 0;
     bool anyPlayers = false;
     double tpsTotal = 0;
@@ -151,9 +155,7 @@ class MonitorRollup {
 
     for (final String instance in snapshot.instances) {
       final MetricSample? latest = snapshot.latestFor(instance);
-      if (latest?.state == RuntimeState.stopped) {
-        down += 1;
-      } else if (latest != null) {
+      if (latest != null && latest.state != RuntimeState.stopped) {
         up += 1;
       }
       final int? instancePlayers = latest?.players;
@@ -216,7 +218,6 @@ class MonitorRollup {
 
     return MonitorRollup(
       up: up,
-      down: down,
       total: snapshot.instances.length,
       players: players,
       anyPlayers: anyPlayers,
@@ -282,16 +283,18 @@ List<String> renderKpiStrip({
       ? null
       : rssSum / peakRssSum;
   final double? meanCpu = rollup.meanCpu;
+  final String memText = formatBytes(rssSum);
+  final String cpuText = _wholePercent(meanCpu);
   final int meterCells = _clampInt(
-    hostWidth - 4 - _kpiHostFixed,
-    _kpiMinMeterCells,
+    hostWidth - 4 - _kpiHostFixed - memText.length - cpuText.length,
+    0,
     _kpiMaxMeterCells,
   );
   final String host =
       'MEM ${renderMeter(fraction: memFraction, cells: meterCells, theme: theme)} '
-      '${theme.paint(formatBytes(rssSum), rssSum == null ? theme.faint : theme.text)}'
+      '${theme.paint(memText, rssSum == null ? theme.faint : theme.text)}'
       ' · CPU '
-      '${theme.paint(_wholePercent(meanCpu), meanCpu == null ? theme.faint : theme.text)}';
+      '${theme.paint(cpuText, meanCpu == null ? theme.faint : theme.text)}';
 
   return joinBlocks(<List<String>>[
     renderPanel(
@@ -345,15 +348,31 @@ MonitorPanelRender renderServerList({
       slots = contentRows - 2;
       offset = _windowOffset(selectedIndex, slots, total);
     }
+    if (slots < 1 && contentRows > 0) {
+      // A panel too short for a window and its markers still shows the
+      // selection: the row the user is on outranks the note saying there is
+      // more of the fleet elsewhere.
+      slots = 1;
+      offset = _windowOffset(selectedIndex, slots, total);
+    }
   }
   if (slots < 0) {
     slots = 0;
   }
   final int end = offset + slots < total ? offset + slots : total;
 
+  // Markers are drawn only out of rows the window itself did not need, so
+  // the panel can never be handed more content than it has room for.
+  int spare = contentRows - (end - offset);
+  bool above = offset > 0 && spare > 0;
+  if (above) {
+    spare -= 1;
+  }
+  final bool below = end < total && spare > 0;
+
   final List<String> content = <String>[];
   final List<MonitorHitbox> hitboxes = <MonitorHitbox>[];
-  if (offset > 0 && contentRows > 0) {
+  if (above) {
     content.add(theme.paint('+$offset more', theme.faint));
   }
   for (int index = offset; index < end; index++) {
@@ -378,7 +397,7 @@ MonitorPanelRender renderServerList({
       ),
     );
   }
-  if (end < total && content.length < contentRows) {
+  if (below) {
     content.add(theme.paint('+${total - end} more', theme.faint));
   }
   while (content.length < contentRows) {
@@ -517,7 +536,7 @@ MonitorPanelRender renderEmptyBody({
     indent: (inner - chipWidth) ~/ 2 < 0 ? 0 : (inner - chipWidth) ~/ 2,
   );
 
-  final int promptRow = (contentRows - 2) ~/ 2;
+  final int promptRow = contentRows < 2 ? 0 : (contentRows - 2) ~/ 2;
   final List<String> content = <String>[
     for (int index = 0; index < contentRows; index++)
       if (index == promptRow)
@@ -611,16 +630,18 @@ String _metersRow({
   final double? cpuFraction = cpu == null
       ? null
       : (cpu / 100).clamp(0.0, 1.0).toDouble();
+  final String memText = formatBytes(rss);
+  final String cpuText = formatCpuPercent(cpu);
   final int cells = _clampInt(
-    (inner - _panelMetersFixed) ~/ 2,
-    2,
+    (inner - _panelMetersFixed - memText.length - cpuText.length) ~/ 2,
+    0,
     _panelMeterCells,
   );
 
   return 'MEM ${renderMeter(fraction: memFraction, cells: cells, theme: theme)} '
-      '${theme.paint(formatBytes(rss), rss == null ? theme.faint : theme.text)}'
+      '${theme.paint(memText, rss == null ? theme.faint : theme.text)}'
       '  CPU ${renderMeter(fraction: cpuFraction, cells: cells, theme: theme)} '
-      '${theme.paint(formatCpuPercent(cpu), cpu == null ? theme.faint : theme.text)}';
+      '${theme.paint(cpuText, cpu == null ? theme.faint : theme.text)}';
 }
 
 /// The selected-server panel's facts row. A fact leaves whole when the row
