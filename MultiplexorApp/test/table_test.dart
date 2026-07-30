@@ -14,17 +14,20 @@ void main() {
       <String>['bananarama', 'stopped', '12.75'],
     ];
 
-    test('column widths fit the widest of header or cell, alignRight pads left', () {
-      final List<String> lines = renderTable(
-        columns: columns,
-        rows: rows,
-        bold: false,
-      );
-      expect(lines.length, 3);
-      expect(lines[0], 'NAME        STATUS     CPU');
-      expect(lines[1], 'alpha       running    3.2');
-      expect(lines[2], 'bananarama  stopped  12.75');
-    });
+    test(
+      'column widths fit the widest of header or cell, alignRight pads left',
+      () {
+        final List<String> lines = renderTable(
+          columns: columns,
+          rows: rows,
+          bold: false,
+        );
+        expect(lines.length, 3);
+        expect(lines[0], 'NAME        STATUS     CPU');
+        expect(lines[1], 'alpha       running    3.2');
+        expect(lines[2], 'bananarama  stopped  12.75');
+      },
+    );
 
     test('bold wraps the header row in raw SGR bold codes', () {
       final List<String> lines = renderTable(columns: columns, rows: rows);
@@ -73,22 +76,25 @@ void main() {
       ]);
     });
 
-    test('paintCell wrapping a padded cell does not break column alignment', () {
-      final List<String> painted = renderTable(
-        columns: columns,
-        rows: rows,
-        bold: false,
-        paintCell: (int col, int row, String cell) => '\x1B[32m$cell\x1B[0m',
-      );
-      final List<String> plain = renderTable(
-        columns: columns,
-        rows: rows,
-        bold: false,
-      );
-      for (int i = 0; i < painted.length; i++) {
-        expect(Ansi.strip(painted[i]), plain[i]);
-      }
-    });
+    test(
+      'paintCell wrapping a padded cell does not break column alignment',
+      () {
+        final List<String> painted = renderTable(
+          columns: columns,
+          rows: rows,
+          bold: false,
+          paintCell: (int col, int row, String cell) => '\x1B[32m$cell\x1B[0m',
+        );
+        final List<String> plain = renderTable(
+          columns: columns,
+          rows: rows,
+          bold: false,
+        );
+        for (int i = 0; i < painted.length; i++) {
+          expect(Ansi.strip(painted[i]), plain[i]);
+        }
+      },
+    );
 
     test('no emitted line has trailing whitespace', () {
       final List<String> lines = renderTable(columns: columns, rows: rows);
@@ -98,17 +104,49 @@ void main() {
       }
     });
 
-    test('no trailing whitespace even with a ragged short row and painted last cell', () {
+    test('no trailing whitespace with a ragged short row and a real '
+        'escape-wrapping painter, in both styled and stripped form', () {
+      // CPU (last column, alignRight) is missing from this row. A real
+      // painter wraps its cell in SGR codes, so if the blank CPU cell
+      // were still painted, its trailing padding spaces would end up
+      // sealed inside the escape codes (e.g. "...\x1B[32m   \x1B[0m"),
+      // unreachable by any trim anchored to the string's true end.
       final List<String> lines = renderTable(
         columns: columns,
         rows: <List<String>>[
           <String>['alpha', 'running'],
         ],
-        paintCell: (int col, int row, String cell) => cell,
+        paintCell: (int col, int row, String cell) => '\x1B[32m$cell\x1B[0m',
       );
       for (final String line in lines) {
-        expect(line, equals(line.trimRight()));
+        expect(line, equals(line.trimRight()), reason: 'styled: "$line"');
+        final String stripped = Ansi.strip(line);
+        expect(
+          stripped,
+          equals(stripped.trimRight()),
+          reason: 'stripped: "$stripped"',
+        );
       }
+    });
+
+    test('paintCell is never invoked for an omitted blank trailing cell', () {
+      final List<List<int>> seen = <List<int>>[];
+      renderTable(
+        columns: columns,
+        rows: <List<String>>[
+          <String>['alpha', 'running'],
+        ],
+        paintCell: (int col, int row, String cell) {
+          seen.add(<int>[col, row]);
+          return cell;
+        },
+      );
+      // CPU (index 2) is missing and trailing, so it is omitted entirely
+      // rather than painted as a blank cell.
+      expect(seen, <List<int>>[
+        <int>[0, 0],
+        <int>[1, 0],
+      ]);
     });
 
     test('rows shorter than the column count treat missing cells as empty', () {
@@ -130,7 +168,10 @@ void main() {
 
     test('rows longer than the column count ignore extra cells', () {
       final List<String> lines = renderTable(
-        columns: <TableColumn>[TableColumn(header: 'A'), TableColumn(header: 'B')],
+        columns: <TableColumn>[
+          TableColumn(header: 'A'),
+          TableColumn(header: 'B'),
+        ],
         rows: <List<String>>[
           <String>['x', 'y', 'ignored', 'also ignored'],
         ],
@@ -139,37 +180,52 @@ void main() {
       expect(lines[1], 'x  y');
     });
 
-    test('exactly a two-space gutter separates columns with no leading or trailing pad', () {
-      final List<String> lines = renderTable(
-        columns: <TableColumn>[TableColumn(header: 'A'), TableColumn(header: 'B')],
-        rows: <List<String>>[
-          <String>['1', '2'],
-        ],
-        bold: false,
-      );
-      expect(lines[0], 'A  B');
-      expect(lines[1], '1  2');
-      expect(lines[0], isNot(startsWith(' ')));
-    });
+    test(
+      'exactly a two-space gutter separates columns with no leading or trailing pad',
+      () {
+        final List<String> lines = renderTable(
+          columns: <TableColumn>[
+            TableColumn(header: 'A'),
+            TableColumn(header: 'B'),
+          ],
+          rows: <List<String>>[
+            <String>['1', '2'],
+          ],
+          bold: false,
+        );
+        expect(lines[0], 'A  B');
+        expect(lines[1], '1  2');
+        expect(lines[0], isNot(startsWith(' ')));
+      },
+    );
 
-    test('ANSI escapes already present in a cell do not inflate its measured width', () {
-      final List<String> lines = renderTable(
-        columns: <TableColumn>[TableColumn(header: 'NAME'), TableColumn(header: 'X')],
-        rows: <List<String>>[
-          <String>['\x1B[31mred\x1B[0m', 'y'],
-        ],
-        bold: false,
-      );
-      // Visible "red" (3) is shorter than "NAME" (4), so column 0 stays
-      // width 4 (4 + 2-space gutter + 1 for column 1 = 7 total) even though
-      // the raw cell string is much longer than 4 characters.
-      expect(Ansi.visibleLength(lines[0]), 7);
-      expect(Ansi.visibleLength(lines[1]), 7);
-      expect(lines[1], contains('\x1B[31mred\x1B[0m'));
-    });
+    test(
+      'ANSI escapes already present in a cell do not inflate its measured width',
+      () {
+        final List<String> lines = renderTable(
+          columns: <TableColumn>[
+            TableColumn(header: 'NAME'),
+            TableColumn(header: 'X'),
+          ],
+          rows: <List<String>>[
+            <String>['\x1B[31mred\x1B[0m', 'y'],
+          ],
+          bold: false,
+        );
+        // Visible "red" (3) is shorter than "NAME" (4), so column 0 stays
+        // width 4 (4 + 2-space gutter + 1 for column 1 = 7 total) even though
+        // the raw cell string is much longer than 4 characters.
+        expect(Ansi.visibleLength(lines[0]), 7);
+        expect(Ansi.visibleLength(lines[1]), 7);
+        expect(lines[1], contains('\x1B[31mred\x1B[0m'));
+      },
+    );
 
     test('an empty columns list renders no lines', () {
-      final List<String> lines = renderTable(columns: <TableColumn>[], rows: <List<String>>[]);
+      final List<String> lines = renderTable(
+        columns: <TableColumn>[],
+        rows: <List<String>>[],
+      );
       expect(lines, <String>[]);
     });
 

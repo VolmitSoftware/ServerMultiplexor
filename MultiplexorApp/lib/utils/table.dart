@@ -22,12 +22,27 @@ String _padLeft(String text, int width) {
   return (' ' * (width - visible)) + text;
 }
 
-/// Strips only genuine trailing space characters from [text]. Unlike a
-/// blind `trimRight()`, this only ever removes bytes that sit at the true
-/// end of the string, so it can never reach into (or corrupt) an ANSI
-/// escape sequence — a painted cell's trailing spaces are only stripped
-/// when nothing (not even a reset code) follows them.
-String _trimTrailingSpaces(String text) => text.replaceAll(RegExp(r' +$'), '');
+/// Index of the rightmost cell in [cells] (over [columnCount] columns,
+/// missing trailing cells treated as `''`) with nonzero visible length, or
+/// `-1` if every cell is blank.
+///
+/// Columns after this index are omitted from the emitted line entirely —
+/// no padding, no gutter, and critically no [renderTable]'s `paintCell`
+/// call — which is what keeps a blank trailing cell from ever producing
+/// trailing whitespace. A post-hoc string trim cannot do this safely: a
+/// real painter wraps its cell in escape codes (e.g. a trailing reset), so
+/// any trailing padding spaces end up *inside* the painted string, not at
+/// its true end, and a trim anchored to the string's end can't reach them
+/// without risking corruption of legitimate styling on real content.
+int _lastVisibleIndex(List<String> cells, int columnCount) {
+  for (int i = columnCount - 1; i >= 0; i--) {
+    final String raw = i < cells.length ? cells[i] : '';
+    if (Ansi.visibleLength(raw) > 0) {
+      return i;
+    }
+  }
+  return -1;
+}
 
 /// Renders a plain-text table: [columns] sized to the widest visible
 /// header or cell, a 2-space gutter between (never before or after)
@@ -39,10 +54,10 @@ String _trimTrailingSpaces(String text) => text.replaceAll(RegExp(r' +$'), '');
 ///
 /// Rows shorter than [columns] treat missing cells as `''`; rows longer
 /// than [columns] ignore the extra cells. No emitted line carries trailing
-/// whitespace: a left-aligned last column is emitted unpadded (so a short
-/// or missing value contributes nothing), and any residual trailing
-/// whitespace left by a blank right-aligned last column is trimmed from
-/// the assembled line.
+/// whitespace: trailing blank cells (missing or `''`) are omitted from the
+/// line entirely — including their gutter and any [paintCell] call — and
+/// the rightmost remaining cell is treated as the row's last column for
+/// alignment purposes, so a left-aligned one is emitted unpadded.
 List<String> renderTable({
   required List<TableColumn> columns,
   required List<List<String>> rows,
@@ -66,10 +81,13 @@ List<String> renderTable({
     return width;
   });
 
-  String alignedCell(int columnIndex, String raw) {
+  String alignedCell(
+    int columnIndex,
+    String raw, {
+    required bool isLastRendered,
+  }) {
     final TableColumn column = columns[columnIndex];
-    final bool isLast = columnIndex == columnCount - 1;
-    if (isLast && !column.alignRight) {
+    if (isLastRendered && !column.alignRight) {
       return raw;
     }
     return column.alignRight
@@ -77,22 +95,34 @@ List<String> renderTable({
         : _padRight(raw, widths[columnIndex]);
   }
 
-  String buildLine(List<String> cells, {required int rowIndex, required bool isHeader}) {
+  String buildLine(
+    List<String> cells, {
+    required int rowIndex,
+    required bool isHeader,
+  }) {
+    final int lastVisible = _lastVisibleIndex(cells, columnCount);
     final StringBuffer buffer = StringBuffer();
-    for (int i = 0; i < columnCount; i++) {
+    for (int i = 0; i <= lastVisible; i++) {
       if (i > 0) {
         buffer.write('  ');
       }
       final String raw = i < cells.length ? cells[i] : '';
-      final String padded = alignedCell(i, raw);
-      final String emitted =
-          !isHeader && paintCell != null ? paintCell(i, rowIndex, padded) : padded;
+      final String padded = alignedCell(
+        i,
+        raw,
+        isLastRendered: i == lastVisible,
+      );
+      final String emitted = !isHeader && paintCell != null
+          ? paintCell(i, rowIndex, padded)
+          : padded;
       buffer.write(emitted);
     }
-    return _trimTrailingSpaces(buffer.toString());
+    return buffer.toString();
   }
 
-  final List<String> headerCells = columns.map((TableColumn c) => c.header).toList();
+  final List<String> headerCells = columns
+      .map((TableColumn c) => c.header)
+      .toList();
   String headerLine = buildLine(headerCells, rowIndex: -1, isHeader: true);
   if (bold) {
     headerLine = '\x1B[1m$headerLine\x1B[22m';
