@@ -7,6 +7,16 @@ library;
 /// The kind of interactive region a [MonitorHitbox] represents.
 enum MonitorHitKind { serverRow, button, chart, rangeChip, modalScrim }
 
+/// The id prefix every [MonitorHitKind.serverRow] hitbox carries: the id is
+/// `server:<instance>`. Both the builder that emits the hitbox and the
+/// screen that reads it back name the prefix from here, so the two can never
+/// drift apart on the spelling.
+const String serverHitPrefix = 'server:';
+
+/// The id of the [MonitorHitKind.rangeChip] hitbox over the selected-server
+/// panel's badge — clicking it cycles the chart window, exactly as `r` does.
+const String rangeHitId = 'range';
+
 /// A single clickable region within a rendered frame: terminal row [row],
 /// half-open column range `[colStart, colEnd)` (both 0-based), identified by
 /// [id] and typed by [kind] so a caller can dispatch on what was clicked

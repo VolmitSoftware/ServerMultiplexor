@@ -19,6 +19,7 @@ import '../../utils/terminal/theme.dart';
 import 'metric_sample.dart';
 import 'metrics_sampler.dart';
 import 'monitor_detail_model.dart';
+import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
 import 'monitor_keymap.dart';
 import 'monitor_model.dart';
@@ -501,7 +502,7 @@ class MonitorScreen {
       return null;
     }
     final int index = _snapshot.instances.indexWhere(
-      (String instance) => 'server:$instance' == id,
+      (String instance) => '$serverHitPrefix$instance' == id,
     );
     if (index < 0) {
       return null;

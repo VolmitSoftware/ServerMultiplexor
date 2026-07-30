@@ -2,6 +2,7 @@ import 'package:multiplexor/services/monitor/metric_sample.dart';
 import 'package:multiplexor/services/monitor/monitor_detail_model.dart';
 import 'package:multiplexor/services/monitor/monitor_frame_util.dart';
 import 'package:multiplexor/services/monitor/monitor_hitbox.dart';
+import 'package:multiplexor/services/monitor/monitor_landing.dart';
 import 'package:multiplexor/services/monitor/monitor_model.dart';
 import 'package:multiplexor/services/runtime_state.dart';
 import 'package:multiplexor/utils/terminal/ansi.dart';
@@ -77,55 +78,117 @@ MonitorSnapshot twoServers({String? active = 'alpha'}) => MonitorSnapshot(
   activeInstance: active,
 );
 
+/// One running instance and one stopped one — the fleet the state-aware
+/// selection bar and the `n/a` discipline are read against.
+MonitorSnapshot mixedFleet() => MonitorSnapshot(
+  instances: const <String>['alpha', 'gamma'],
+  history: <String, List<MetricSample>>{
+    'alpha': runHistory('alpha'),
+    'gamma': stoppedHistory('gamma'),
+  },
+  consumerName: 'survival',
+  activeInstance: 'alpha',
+);
+
+/// A fleet far taller than any slim list can show, for the scroll window.
+MonitorSnapshot manyServers() {
+  final List<String> names = List<String>.generate(
+    30,
+    (int index) => 'srv-$index',
+  );
+  return MonitorSnapshot(
+    instances: names,
+    history: <String, List<MetricSample>>{
+      for (final String name in names) name: runHistory(name, count: 6),
+    },
+    consumerName: 'survival',
+  );
+}
+
+/// A workspace with nothing in it yet.
+MonitorSnapshot emptyWorkspace() => const MonitorSnapshot(
+  instances: <String>[],
+  history: <String, List<MetricSample>>{},
+  consumerName: 'survival',
+);
+
 List<String> stripAll(List<String> rows) =>
     rows.map(Ansi.strip).toList(growable: false);
 
-/// The `server:<name>` hitbox id prefix [buildMonitorFrame] emits for every
-/// visible instance row.
-const String _serverHitPrefix = 'server:';
+/// The columns the slim server list's name field occupies in a stripped row:
+/// the panel rule and a space (2), the selector and a space (2), then the
+/// 20-column name.
+const int _nameStart = 4;
+const int _nameEnd = 24;
 
-/// Asserts [hits] and the rendered [rows] agree in both directions: every
-/// hit points at the row its own instance was drawn on (name starting at
-/// column 4, right after the panel rule and the selector), and every server
-/// row that carries an instance name has exactly one hit.
-void expectHitsMatchRows(
+/// The instance name rendered on [row] of a stripped frame, or the empty
+/// string when the row is too short to carry one.
+String nameOnRow(String row) => row.length < _nameEnd
+    ? ''
+    : row.substring(_nameStart, _nameEnd).trimRight();
+
+/// The server-row hitboxes among [hits], in emission order.
+List<MonitorHitbox> serverHits(List<MonitorHitbox> hits) => hits
+    .where((MonitorHitbox hit) => hit.kind == MonitorHitKind.serverRow)
+    .toList(growable: false);
+
+/// The id of the [MonitorHitKind.button] hitbox covering ([row], [col]), or
+/// null when no button covers it.
+String? buttonAt(
+  List<MonitorHitbox> hits, {
+  required int row,
+  required int col,
+}) {
+  for (final MonitorHitbox hit in hits) {
+    if (hit.kind == MonitorHitKind.button &&
+        hit.row == row &&
+        col >= hit.colStart &&
+        col < hit.colEnd) {
+      return hit.id;
+    }
+  }
+  return null;
+}
+
+/// Asserts the server hitboxes and the rendered [rows] agree in both
+/// directions: the hits are exactly [window] in order, each points at the
+/// row its own instance was drawn on, and no rendered instance row was left
+/// without a hit.
+void expectServerHits(
   List<String> rows,
   List<MonitorHitbox> hits,
-  List<String> instances,
+  List<String> window,
 ) {
+  final List<MonitorHitbox> servers = serverHits(hits);
+  expect(
+    servers.map((MonitorHitbox hit) => hit.id).toList(),
+    <String>[for (final String name in window) '$serverHitPrefix$name'],
+    reason: 'the visible window, in order',
+  );
+
   final Set<int> hitRows = <int>{};
-  final List<int> hitIndices = <int>[];
-  for (final MonitorHitbox hit in hits) {
-    expect(hit.kind, MonitorHitKind.serverRow);
+  for (final MonitorHitbox hit in servers) {
     expect(hit.colStart, 0);
-    final String name = hit.id.substring(_serverHitPrefix.length);
-    expect(hit.id, startsWith(_serverHitPrefix));
+    expect(hit.colEnd, 28, reason: 'a server hit spans the slim list panel');
+    final String name = hit.id.substring(serverHitPrefix.length);
     expect(
-      rows[hit.row].substring(4),
-      startsWith(name),
-      reason: 'hit row ${hit.row} should start instance $name at column 4',
+      nameOnRow(rows[hit.row]),
+      name,
+      reason: 'hit row ${hit.row} should render instance $name',
     );
     expect(hitRows.add(hit.row), isTrue, reason: 'duplicate hit row');
-    hitIndices.add(instances.indexOf(name));
   }
-  expect(
-    hitIndices,
-    List<int>.generate(hits.length, (int index) => index),
-    reason: 'hits are the first N instances, in order',
-  );
 
   // The reverse direction: no instance row was rendered without a hit.
   for (int row = 0; row < rows.length; row++) {
-    if (hitRows.contains(row) || rows[row].length < 5) {
+    if (hitRows.contains(row)) {
       continue;
     }
-    for (final String name in instances) {
-      expect(
-        rows[row].substring(4),
-        isNot(startsWith(name)),
-        reason: 'row $row renders $name but has no hit',
-      );
-    }
+    expect(
+      window,
+      isNot(contains(nameOnRow(rows[row]))),
+      reason: 'row $row renders an instance but has no hit',
+    );
   }
 }
 
@@ -226,6 +289,37 @@ void main() {
       expect(padded.rows, <String>['abc  ', 'def  ']);
       expect(padded.hitboxes, <MonitorHitbox>[frame.hitboxes.first]);
     });
+
+    test('clamps a hitbox past the right edge and drops one beyond it', () {
+      const MonitorFrame frame = MonitorFrame(
+        rows: <String>['abcdefghij'],
+        hitboxes: <MonitorHitbox>[
+          MonitorHitbox(
+            id: 'wide',
+            row: 0,
+            colStart: 2,
+            colEnd: 40,
+            kind: MonitorHitKind.button,
+          ),
+          MonitorHitbox(
+            id: 'offscreen',
+            row: 0,
+            colStart: 6,
+            colEnd: 9,
+            kind: MonitorHitKind.button,
+          ),
+        ],
+      );
+      final MonitorFrame padded = padFrame(frame, columns: 6, lines: 1);
+      expect(padded.hitboxes.length, 1);
+      expect(padded.hitboxes.single.id, 'wide');
+      expect(padded.hitboxes.single.colStart, 2);
+      expect(
+        padded.hitboxes.single.colEnd,
+        6,
+        reason: 'a click can never land past the last painted column',
+      );
+    });
   });
 
   group('buildResizeRequiredFrame', () {
@@ -261,36 +355,63 @@ void main() {
   });
 
   group('buildMonitorFrame', () {
-    test('renders a complete 80x24 layout with no bottom band', () {
-      final List<String> rows = buildMonitorFrame(
-        snapshot: twoServers(),
-        selectedIndex: 0,
-        frame: 0,
-        columns: 80,
-        lines: 24,
-        theme: plain,
-        range: range,
-        now: now,
-      ).rows;
-      expectExactFrame(rows, 80, 24);
+    MonitorFrame frameOf({
+      MonitorSnapshot? snapshot,
+      int selectedIndex = 0,
+      int columns = 80,
+      int lines = 24,
+      MonitorTheme? theme,
+      String? hoveredId,
+      String? pressedId,
+      Duration window = range,
+      int spinner = 0,
+    }) => buildMonitorFrame(
+      snapshot: snapshot ?? twoServers(),
+      selectedIndex: selectedIndex,
+      frame: spinner,
+      columns: columns,
+      lines: lines,
+      theme: theme ?? plain,
+      range: window,
+      now: now,
+      hoveredId: hoveredId,
+      pressedId: pressedId,
+    );
 
-      final List<String> stripped = stripAll(rows);
-      final String joined = stripped.join('\n');
-      expect(stripped.first, startsWith('┌─'));
-      expect(joined, contains('MULTIPLEXOR'));
-      expect(joined, contains('SERVERS'));
-      expect(joined, contains('survival'));
-      expect(joined, contains('[enter] open'));
-      expect(
-        joined,
-        isNot(contains('· HOST')),
-        reason: '24 lines is below the bottom-band floor of 30',
-      );
-    });
+    test(
+      'stacks header, kpi strip, body, both bars and the footer at 80x24',
+      () {
+        final MonitorFrame frame = frameOf();
+        expectExactFrame(frame.rows, 80, 24);
+        final List<String> rows = stripAll(frame.rows);
+
+        expect(rows[0], startsWith('┌─'));
+        expect(rows.take(4).join('\n'), contains('MULTIPLEXOR'));
+
+        // One three-card strip: every title on the same border row.
+        expect(rows[4], contains('FLEET'));
+        expect(rows[4], contains('TPS'));
+        expect(rows[4], contains('HOST'));
+        expect(rows[6], startsWith('└'));
+
+        // The body: slim list on the left, selected server on the right.
+        expect(rows[7], startsWith('┌─ SERVERS '));
+        expect(rows[7].substring(29), startsWith('┌─ ALPHA '));
+        expect(rows[7], contains('2/2 UP'));
+        expect(rows[7], contains('running · 15m'));
+        expect(rows[20], startsWith('└'));
+
+        expect(rows[21], contains('[ STOP ]'));
+        expect(rows[21], contains('[ DETAIL ]'));
+        expect(rows[22], contains('[ + NEW ]'));
+        expect(rows[22], contains('[ CONSOLES ]'));
+        expect(rows[23], contains('q quit'));
+      },
+    );
 
     test('shows the header roll-up with up/down counts, players and tps', () {
       final List<String> rows = stripAll(
-        buildMonitorFrame(
+        frameOf(
           snapshot: MonitorSnapshot(
             instances: const <String>['alpha', 'beta', 'gamma'],
             history: <String, List<MetricSample>>{
@@ -301,13 +422,8 @@ void main() {
             consumerName: 'survival',
             activeInstance: 'beta',
           ),
-          selectedIndex: 0,
-          frame: 1,
           columns: 100,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
+          spinner: 1,
         ).rows,
       );
       final String header = rows.take(4).join('\n');
@@ -323,79 +439,170 @@ void main() {
 
     test('an unsampled instance counts as neither up nor down', () {
       // MonitorSnapshot documents an instance with no history as "no readings
-      // yet ... never as zeros", and the row itself renders `no data`. The
+      // yet ... never as zeros", and the row itself renders no state. The
       // roll-up has to agree: an instance nothing has been heard from is not
       // a stopped one, so counting it as DOWN invents a fact.
       final List<String> rows = stripAll(
-        buildMonitorFrame(
+        frameOf(
           snapshot: const MonitorSnapshot(
             instances: <String>['alpha', 'beta', 'gamma'],
             history: <String, List<MetricSample>>{},
             consumerName: 'survival',
           ),
-          selectedIndex: 0,
-          frame: 0,
           columns: 100,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
         ).rows,
       );
       final String header = rows.take(4).join('\n');
       expect(header, contains('0 UP'));
       expect(header, contains('0 DOWN'));
       expect(header, contains('3 SERVERS'));
-
-      // The panel's title row, not the facts row that also says "3 SERVERS".
-      final String badge = rows.firstWhere(
-        (String row) => row.startsWith('┌') && row.contains('SERVERS'),
-      );
-      expect(badge, contains('0/3 UP'));
+      expect(rows[7], contains('0/3 UP'), reason: 'the slim list badge');
+      expect(rows.sublist(4, 7).join('\n'), contains('0/3 UP'));
     });
 
     test('a stopped instance still counts as down', () {
       final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: MonitorSnapshot(
-            instances: const <String>['alpha', 'beta'],
-            history: <String, List<MetricSample>>{
-              'alpha': runHistory('alpha'),
-              'beta': stoppedHistory('beta'),
-            },
-            consumerName: 'survival',
-          ),
-          selectedIndex: 0,
-          frame: 0,
-          columns: 100,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
+        frameOf(snapshot: mixedFleet(), columns: 100).rows,
       );
       final String header = rows.take(4).join('\n');
       expect(header, contains('1 UP'));
       expect(header, contains('1 DOWN'));
     });
 
+    test('reads the fleet roll-up into the three kpi cards', () {
+      final String kpi = stripAll(
+        frameOf(columns: 100).rows,
+      ).sublist(4, 7).join('\n');
+      expect(kpi, contains('2/2 UP'));
+      expect(kpi, contains('PLAYERS'));
+      // Both fleet members' last reading, averaged: (18.4 + 15.2) / 2.
+      expect(kpi, contains('16.8'));
+      expect(kpi, contains('MEM'));
+      expect(kpi, contains('CPU'));
+    });
+
+    test('renders every kpi reading as n/a when nothing has been sampled', () {
+      final String kpi = stripAll(
+        frameOf(
+          snapshot: const MonitorSnapshot(
+            instances: <String>['alpha', 'beta'],
+            history: <String, List<MetricSample>>{},
+            consumerName: 'survival',
+          ),
+          columns: 100,
+        ).rows,
+      ).sublist(4, 7).join('\n');
+      expect(kpi, contains('0/2 UP'));
+      expect(
+        RegExp('n/a').allMatches(kpi).length,
+        4,
+        reason: 'players, tps, memory and cpu each read n/a',
+      );
+      expect(
+        kpi,
+        contains('–'),
+        reason: 'an unread meter is a dash run, never an empty bar',
+      );
+    });
+
+    test('marks the selection with an accent selector in the slim list', () {
+      final List<String> rows = stripAll(
+        frameOf(snapshot: twoServers(active: null), selectedIndex: 1).rows,
+      );
+      expect(nameOnRow(rows[8]), 'alpha');
+      expect(nameOnRow(rows[9]), 'beta');
+      expect(rows[8][2], ' ');
+      expect(rows[9][2], '▸');
+      expect(rows[8][25], '●', reason: 'a running instance keeps its bullet');
+    });
+
+    test('shows the selector on a hovered row that is not the selection', () {
+      final List<String> rows = stripAll(
+        frameOf(selectedIndex: 0, hoveredId: '${serverHitPrefix}beta').rows,
+      );
+      expect(rows[8][2], '▸', reason: 'the selection');
+      expect(rows[9][2], '▸', reason: 'the hover');
+    });
+
+    test('paints a hovered row selector with the accent tone', () {
+      final List<String> rows = frameOf(
+        selectedIndex: 0,
+        hoveredId: '${serverHitPrefix}beta',
+        theme: color,
+      ).rows;
+      expect(rows[9], contains('${color.accent}▸'));
+    });
+
+    test(
+      'fills the selected panel with a chart, meters and facts at 132x40',
+      () {
+        final MonitorFrame frame = frameOf(
+          columns: 132,
+          lines: 40,
+          selectedIndex: 1,
+        );
+        expectExactFrame(frame.rows, 132, 40);
+        final List<String> rows = stripAll(frame.rows);
+        expect(rows[7].substring(29), startsWith('┌─ BETA '));
+        expect(rows[7], contains('running · 15m'));
+
+        final String body = rows.sublist(7, 37).join('\n');
+        expect(body, contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
+        expect(
+          RegExp('MEM [█▏▎▍▌▋▊▉─]{14} ').hasMatch(body),
+          isTrue,
+          reason: '14-cell meters at this width: $body',
+        );
+        expect(RegExp('CPU [█▏▎▍▌▋▊▉─]{14} ').hasMatch(body), isTrue);
+        expect(body, contains('PLAYERS'));
+        expect(body, contains('PING'));
+        expect(body, contains('1.21.4'));
+      },
+    );
+
+    test(
+      'renders the selected stopped server without fabricating a number',
+      () {
+        final List<String> rows = stripAll(
+          frameOf(
+            snapshot: mixedFleet(),
+            selectedIndex: 1,
+            columns: 132,
+            lines: 40,
+          ).rows,
+        );
+        expect(rows[7].substring(29), startsWith('┌─ GAMMA '));
+        expect(rows[7], contains('stopped · 15m'));
+
+        // The body only: the KPI strip above it rolls up the whole fleet,
+        // which still has a running member.
+        final List<String> body = rows.sublist(7, 37);
+        final String facts = body
+            .firstWhere((String row) => row.contains('PING'))
+            .substring(29);
+        expect(facts, contains('n/a'));
+        expect(
+          RegExp(r'\d').hasMatch(facts),
+          isFalse,
+          reason: 'a stopped server fabricates no facts: "$facts"',
+        );
+        final String meters = body
+            .firstWhere((String row) => row.contains('MEM'))
+            .substring(29);
+        expect(
+          RegExp(r'\d').hasMatch(meters),
+          isFalse,
+          reason: 'a stopped server fabricates no readings: "$meters"',
+        );
+      },
+    );
+
     test('the chart axis ends on the same clock the header shows', () {
       // The header localizes `now` and the log tail carries local
       // timestamps, so a chart axis left in UTC puts two different clocks
       // in one frame. The right-hand tick is `now`, so it must read the
       // same as the header.
-      final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: twoServers(),
-          selectedIndex: 0,
-          frame: 0,
-          columns: 132,
-          lines: 40,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
-      );
+      final List<String> rows = stripAll(frameOf(columns: 132, lines: 40).rows);
       final DateTime local = now.toLocal();
       final String clock =
           '${local.hour.toString().padLeft(2, '0')}:'
@@ -407,138 +614,80 @@ void main() {
         (String row) => RegExp(r'\d\d:\d\d.*\d\d:\d\d').hasMatch(row),
         orElse: () => '',
       );
-      expect(
-        axis,
-        isNot(isEmpty),
-        reason: 'the bottom band should have a time axis',
-      );
-      // The row runs on into the host card, so the window's end tick is the
-      // last clock on it rather than the one at the end of the line.
+      expect(axis, isNot(isEmpty), reason: 'the chart should have a time axis');
       expect(RegExp(r'\d\d:\d\d').allMatches(axis).last.group(0), clock);
     });
 
-    test('marks the selected instance row with the selector glyph', () {
-      final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: twoServers(active: null),
-          selectedIndex: 1,
-          frame: 0,
-          columns: 80,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
+    test('offers START on a stopped selection and STOP on a running one', () {
+      final List<String> stopped = stripAll(
+        frameOf(snapshot: mixedFleet(), selectedIndex: 1).rows,
       );
-      final String alphaRow = rows.firstWhere(
-        (String row) => row.contains('alpha') && row.contains('running'),
+      expect(stopped[21], contains('[ START ]'));
+      expect(stopped[21], contains('[ DETAIL ]'));
+      expect(stopped[21], contains('[ MORE ]'));
+      expect(stopped[21], isNot(contains('[ STOP ]')));
+      expect(stopped[21], isNot(contains('[ RESTART ]')));
+
+      final List<String> running = stripAll(
+        frameOf(snapshot: mixedFleet(), selectedIndex: 0).rows,
       );
-      final String betaRow = rows.firstWhere(
-        (String row) => row.contains('beta') && row.contains('running'),
-      );
-      expect(betaRow, contains('▸ beta'));
-      expect(alphaRow, isNot(contains('▸')));
+      expect(running[21], contains('[ STOP ]'));
+      expect(running[21], contains('[ RESTART ]'));
+      expect(running[21], contains('[ CONSOLE ]'));
+      expect(running[21], isNot(contains('[ START ]')));
     });
 
-    test('renders a stopped instance with dashes and never a zero', () {
-      final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: MonitorSnapshot(
-            instances: const <String>['alpha', 'gamma'],
-            history: <String, List<MetricSample>>{
-              'alpha': runHistory('alpha'),
-              'gamma': stoppedHistory('gamma'),
-            },
-            consumerName: 'survival',
-          ),
-          selectedIndex: 0,
-          frame: 0,
-          columns: 80,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
-      );
-      final String gammaRow = rows.firstWhere(
-        (String row) => row.contains('gamma'),
-      );
-      expect(gammaRow, contains('stopped'));
-      expect(gammaRow, contains('–'));
+    test('paints only the hovered chip with the accent tone', () {
+      final List<String> rows = frameOf(
+        theme: color,
+        hoveredId: 'act:stop',
+      ).rows;
+      expect(rows[21], contains('${color.bold}${color.accent}[ STOP ]'));
       expect(
-        RegExp(r'\d').hasMatch(gammaRow),
-        isFalse,
-        reason: 'a stopped row fabricates no numbers: "$gammaRow"',
+        rows[21],
+        isNot(contains('${color.bold}${color.accent}[ RESTART ]')),
+      );
+      expect(
+        rows[22],
+        isNot(contains('${color.bold}${color.accent}[ + NEW ]')),
       );
     });
 
-    test('renders the empty-workspace row when there are no instances', () {
-      final List<String> rows = buildMonitorFrame(
-        snapshot: const MonitorSnapshot(
-          instances: <String>[],
-          history: <String, List<MetricSample>>{},
-          consumerName: 'survival',
-        ),
-        selectedIndex: 0,
-        frame: 0,
-        columns: 80,
-        lines: 40,
-        theme: plain,
-        range: range,
-        now: now,
+    test('flashes the pressed chip instead of its hover tone', () {
+      final List<String> rows = frameOf(
+        theme: color,
+        hoveredId: 'ws:new',
+        pressedId: 'ws:new',
       ).rows;
-      expectExactFrame(rows, 80, 40);
-      final String joined = stripAll(rows).join('\n');
+      expect(rows[22], contains('${color.bold}${color.textStrong}[ + NEW ]'));
+    });
+
+    test('renders the empty workspace with a prompt and a new-server chip', () {
+      final MonitorFrame frame = frameOf(snapshot: emptyWorkspace(), lines: 40);
+      expectExactFrame(frame.rows, 80, 40);
+      final List<String> rows = stripAll(frame.rows);
+      final String joined = rows.join('\n');
+
       expect(joined, contains('NO SERVERS'));
-      expect(joined, contains('press n to create one'));
       expect(joined, contains('0/0 UP'));
-      expect(joined, isNot(contains('· HOST')));
-    });
-
-    test('adds the bottom band at 132x40 with a TPS chart and a host card', () {
-      final List<String> rows = buildMonitorFrame(
-        snapshot: twoServers(),
-        selectedIndex: 1,
-        frame: 2,
-        columns: 132,
-        lines: 40,
-        theme: plain,
-        range: range,
-        now: now,
-      ).rows;
-      expectExactFrame(rows, 132, 40);
-
-      final String joined = stripAll(rows).join('\n');
-      expect(joined, contains('┌─ BETA · TPS '));
-      expect(joined, contains('┌─ BETA · HOST '));
-      expect(joined, contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
-      expect(joined, contains('MEM'));
-      expect(joined, contains('CPU'));
-      expect(joined, contains('PING'));
-    });
-
-    test('caps the bottom band so the servers panel absorbs the slack', () {
-      final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: twoServers(),
-          selectedIndex: 0,
-          frame: 0,
-          columns: 132,
-          lines: 40,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
+      expect(serverHits(frame.hitboxes), isEmpty);
+      expect(
+        joined,
+        isNot(contains('[ DETAIL ]')),
+        reason: 'no selection means no selection bar',
       );
-      final int bandTop = rows.indexWhere(
-        (String row) => row.contains('· TPS '),
+
+      final int promptRow = rows.indexWhere(
+        (String row) => row.contains('NO SERVERS'),
       );
-      expect(bandTop, greaterThan(0));
-      // Band + footer fill the rest of the frame, and the band stops at 16.
-      expect(rows.length - 1 - bandTop, 16);
-      // Everything above it belongs to the header (4) and servers panel.
-      expect(bandTop, 4 + 19);
-      expect(rows[bandTop - 1], startsWith('└'));
+      final int chipRow = rows.indexWhere(
+        (String row) => row.contains('[ + NEW ]'),
+      );
+      expect(chipRow, promptRow + 1);
+      final int at = rows[chipRow].indexOf('[ + NEW ]');
+      expect(buttonAt(frame.hitboxes, row: chipRow, col: at), 'ws:new');
+      expect(rows.last, contains('q quit'));
+      expect(rows[rows.length - 2], contains('[ CONSOLES ]'));
     });
 
     test('drops whole footer hints instead of clipping them at 80 columns', () {
@@ -557,18 +706,7 @@ void main() {
         'q quit',
       ];
       for (final int columns in <int>[80, 100, 132, 200]) {
-        final List<String> rows = stripAll(
-          buildMonitorFrame(
-            snapshot: twoServers(),
-            selectedIndex: 0,
-            frame: 0,
-            columns: columns,
-            lines: 24,
-            theme: plain,
-            range: range,
-            now: now,
-          ).rows,
-        );
+        final List<String> rows = stripAll(frameOf(columns: columns).rows);
         final String footer = rows.last.trimRight();
         expect(footer, contains('[enter] open'), reason: 'at $columns');
         expect(footer, contains('d detail'), reason: 'at $columns');
@@ -580,34 +718,14 @@ void main() {
     });
 
     test('shows every footer hint once the terminal is wide enough', () {
-      final List<String> rows = stripAll(
-        buildMonitorFrame(
-          snapshot: twoServers(),
-          selectedIndex: 0,
-          frame: 0,
-          columns: 132,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
-      );
+      final List<String> rows = stripAll(frameOf(columns: 132).rows);
       expect(rows.last, contains('g consoles'));
       expect(rows.last, contains('b build'));
       expect(rows.last, contains('r range'));
     });
 
     test('inlays the wordmark as a gradient run under a truecolor theme', () {
-      final List<String> rows = buildMonitorFrame(
-        snapshot: twoServers(),
-        selectedIndex: 0,
-        frame: 0,
-        columns: 132,
-        lines: 24,
-        theme: color,
-        range: range,
-        now: now,
-      ).rows;
+      final List<String> rows = frameOf(columns: 132, theme: color).rows;
       expect(Ansi.strip(rows.first), contains('MULTIPLEXOR'));
       expect(Ansi.visibleLength(rows.first), 132);
       // A gradient is several colour runs, not the single run a plain
@@ -631,15 +749,24 @@ void main() {
         <int>[1, 1],
       ]) {
         expectExactFrame(
-          buildMonitorFrame(
-            snapshot: twoServers(),
-            selectedIndex: 0,
-            frame: 3,
+          frameOf(columns: size[0], lines: size[1], spinner: 3).rows,
+          size[0],
+          size[1],
+        );
+      }
+    });
+
+    test('stays exact with more instances than the slim list can hold', () {
+      for (final List<int> size in const <List<int>>[
+        <int>[80, 24],
+        <int>[132, 40],
+      ]) {
+        expectExactFrame(
+          frameOf(
+            snapshot: manyServers(),
+            selectedIndex: 17,
             columns: size[0],
             lines: size[1],
-            theme: plain,
-            range: range,
-            now: now,
           ).rows,
           size[0],
           size[1],
@@ -647,59 +774,8 @@ void main() {
       }
     });
 
-    test('stays exact with more instances than the servers panel can hold', () {
-      final List<String> names = List<String>.generate(
-        30,
-        (int index) => 'srv-$index',
-      );
-      final MonitorSnapshot snapshot = MonitorSnapshot(
-        instances: names,
-        history: <String, List<MetricSample>>{
-          for (final String name in names) name: runHistory(name, count: 6),
-        },
-        consumerName: 'survival',
-      );
-      expectExactFrame(
-        buildMonitorFrame(
-          snapshot: snapshot,
-          selectedIndex: 0,
-          frame: 0,
-          columns: 80,
-          lines: 24,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
-        80,
-        24,
-      );
-      expectExactFrame(
-        buildMonitorFrame(
-          snapshot: snapshot,
-          selectedIndex: 0,
-          frame: 0,
-          columns: 132,
-          lines: 40,
-          theme: plain,
-          range: range,
-          now: now,
-        ).rows,
-        132,
-        40,
-      );
-    });
-
     test('falls back to the resize card below the 80x24 floor', () {
-      final List<String> rows = buildMonitorFrame(
-        snapshot: twoServers(),
-        selectedIndex: 0,
-        frame: 0,
-        columns: 70,
-        lines: 20,
-        theme: plain,
-        range: range,
-        now: now,
-      ).rows;
+      final List<String> rows = frameOf(columns: 70, lines: 20).rows;
       expectExactFrame(rows, 70, 20);
       final String joined = stripAll(rows).join('\n');
       expect(joined, contains('RESIZE REQUIRED'));
@@ -708,49 +784,82 @@ void main() {
     });
 
     test('emits zero escape bytes under MonitorTheme.plain()', () {
-      final List<String> rows = buildMonitorFrame(
-        snapshot: twoServers(),
-        selectedIndex: 0,
-        frame: 1,
-        columns: 132,
-        lines: 40,
-        theme: plain,
-        range: range,
-        now: now,
-      ).rows;
-      expect(rows.any((String row) => row.contains('\x1B')), isFalse);
+      for (final MonitorSnapshot snapshot in <MonitorSnapshot>[
+        twoServers(),
+        emptyWorkspace(),
+        manyServers(),
+      ]) {
+        final List<String> rows = frameOf(
+          snapshot: snapshot,
+          columns: 132,
+          lines: 40,
+          spinner: 1,
+          hoveredId: 'act:stop',
+          pressedId: 'ws:new',
+        ).rows;
+        expect(rows.any((String row) => row.contains('\x1B')), isFalse);
+      }
     });
 
     test('paints escapes under a truecolor theme while staying exact', () {
-      final List<String> rows = buildMonitorFrame(
-        snapshot: twoServers(),
-        selectedIndex: 0,
-        frame: 1,
+      final List<String> rows = frameOf(
         columns: 132,
         lines: 40,
         theme: color,
-        range: range,
-        now: now,
+        spinner: 1,
       ).rows;
       expectExactFrame(rows, 132, 40);
       expect(rows.any((String row) => row.contains('\x1B')), isTrue);
     });
   });
 
-  group('buildMonitorFrame server-row hitboxes', () {
+  group('buildMonitorFrame hitboxes', () {
+    MonitorFrame frameOf({
+      MonitorSnapshot? snapshot,
+      int selectedIndex = 0,
+      int columns = 80,
+      int lines = 24,
+    }) => buildMonitorFrame(
+      snapshot: snapshot ?? twoServers(),
+      selectedIndex: selectedIndex,
+      frame: 0,
+      columns: columns,
+      lines: lines,
+      theme: MonitorTheme.plain(),
+      range: range,
+      now: now,
+    );
+
+    /// Asserts the `[ LABEL ]` chip on [row] is covered by a button hitbox
+    /// carrying [id] over exactly its own columns.
+    void expectChip(
+      List<String> rows,
+      List<MonitorHitbox> hits,
+      int row,
+      String id,
+      String label,
+    ) {
+      final int at = rows[row].indexOf('[ $label ]');
+      expect(at, greaterThanOrEqualTo(0), reason: 'no $label chip on row $row');
+      final int last = at + label.length + 3;
+      expect(
+        buttonAt(hits, row: row, col: at),
+        id,
+        reason: '$id first column',
+      );
+      expect(
+        buttonAt(hits, row: row, col: last),
+        id,
+        reason: '$id last column',
+      );
+      expect(buttonAt(hits, row: row, col: at - 1), isNot(id));
+      expect(buttonAt(hits, row: row, col: last + 1), isNot(id));
+    }
+
     test('maps rows to the instance rendered on them at 80x24', () {
       final MonitorSnapshot snapshot = twoServers();
-      final MonitorFrame frame = buildMonitorFrame(
-        snapshot: snapshot,
-        selectedIndex: 0,
-        frame: 0,
-        columns: 80,
-        lines: 24,
-        theme: plain,
-        range: range,
-        now: now,
-      );
-      expectHitsMatchRows(
+      final MonitorFrame frame = frameOf(snapshot: snapshot);
+      expectServerHits(
         stripAll(frame.rows),
         frame.hitboxes,
         snapshot.instances,
@@ -759,81 +868,149 @@ void main() {
 
     test('maps rows to the instance rendered on them at 132x40', () {
       final MonitorSnapshot snapshot = twoServers();
-      final MonitorFrame frame = buildMonitorFrame(
+      final MonitorFrame frame = frameOf(
         snapshot: snapshot,
         selectedIndex: 1,
-        frame: 0,
         columns: 132,
         lines: 40,
-        theme: plain,
-        range: range,
-        now: now,
       );
-      expectHitsMatchRows(
+      expectServerHits(
         stripAll(frame.rows),
         frame.hitboxes,
         snapshot.instances,
       );
     });
 
-    test('only maps the instance rows the panel actually rendered', () {
-      final List<String> names = List<String>.generate(
-        30,
-        (int index) => 'srv-$index',
+    test('puts a button hitbox under every chip on both action bars', () {
+      final MonitorFrame frame = frameOf();
+      final List<String> rows = stripAll(frame.rows);
+      expectChip(rows, frame.hitboxes, 21, 'act:stop', 'STOP');
+      expectChip(rows, frame.hitboxes, 21, 'act:restart', 'RESTART');
+      expectChip(rows, frame.hitboxes, 21, 'act:console', 'CONSOLE');
+      expectChip(rows, frame.hitboxes, 21, 'act:detail', 'DETAIL');
+      expectChip(rows, frame.hitboxes, 21, 'act:more', 'MORE');
+      expectChip(rows, frame.hitboxes, 22, 'ws:new', '+ NEW');
+      expectChip(rows, frame.hitboxes, 22, 'ws:builds', 'BUILDS');
+      expectChip(rows, frame.hitboxes, 22, 'ws:tuning', 'TUNING');
+      expectChip(rows, frame.hitboxes, 22, 'ws:consumer', 'CONSUMER');
+      expectChip(rows, frame.hitboxes, 22, 'ws:consoles', 'CONSOLES');
+      expectChip(rows, frame.hitboxes, 22, 'ws:more', 'MORE');
+    });
+
+    test('swaps in the start chip when the selection is stopped', () {
+      final MonitorFrame frame = frameOf(
+        snapshot: mixedFleet(),
+        selectedIndex: 1,
       );
-      final MonitorSnapshot snapshot = MonitorSnapshot(
-        instances: names,
-        history: <String, List<MetricSample>>{
-          for (final String name in names) name: runHistory(name, count: 6),
-        },
-        consumerName: 'survival',
+      final List<String> rows = stripAll(frame.rows);
+      expectChip(rows, frame.hitboxes, 21, 'act:start', 'START');
+      expect(
+        frame.hitboxes.any((MonitorHitbox hit) => hit.id == 'act:stop'),
+        isFalse,
       );
-      final MonitorFrame frame = buildMonitorFrame(
-        snapshot: snapshot,
+    });
+
+    test('makes the selected-server badge a clickable range chip', () {
+      final MonitorFrame frame = frameOf(columns: 132, lines: 40);
+      final MonitorHitbox chip = frame.hitboxes.firstWhere(
+        (MonitorHitbox hit) => hit.kind == MonitorHitKind.rangeChip,
+      );
+      expect(chip.id, rangeHitId);
+      expect(chip.row, 7);
+      expect(
+        stripAll(frame.rows)[7].substring(chip.colStart, chip.colEnd),
+        'running · 15m',
+      );
+      expect(hitTest(frame.hitboxes, row: 7, col: chip.colStart), rangeHitId);
+    });
+
+    test('follows a deep selection to the end of the fleet', () {
+      final MonitorSnapshot snapshot = manyServers();
+      final MonitorFrame frame = frameOf(snapshot: snapshot, selectedIndex: 29);
+      final List<String> rows = stripAll(frame.rows);
+      // 12 content rows: one marker for the 19 servers above, then the last
+      // eleven.
+      expect(rows[8], contains('+19 more'));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(19));
+      expect(
+        frame.hitboxes.any((MonitorHitbox hit) => hit.row == 8),
+        isFalse,
+        reason: 'a marker row is not clickable',
+      );
+    });
+
+    test('marks both ends when the window sits inside the fleet', () {
+      final MonitorSnapshot snapshot = manyServers();
+      final MonitorFrame frame = frameOf(snapshot: snapshot, selectedIndex: 15);
+      final List<String> rows = stripAll(frame.rows);
+      expect(rows[8], contains('+6 more'));
+      expect(rows[19], contains('+14 more'));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(6, 16));
+    });
+
+    test('marks only the tail when the window sits at the top', () {
+      final MonitorSnapshot snapshot = manyServers();
+      final MonitorFrame frame = frameOf(snapshot: snapshot);
+      final List<String> rows = stripAll(frame.rows);
+      expect(rows[19], contains('+19 more'));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(0, 11));
+    });
+
+    test('emits no hitboxes at all below the size floor', () {
+      expect(frameOf(columns: 70, lines: 20).hitboxes, isEmpty);
+    });
+
+    test('keeps the workspace bar clickable with no instances', () {
+      final MonitorFrame frame = frameOf(
+        snapshot: emptyWorkspace(),
+        columns: 132,
+        lines: 40,
+      );
+      expect(serverHits(frame.hitboxes), isEmpty);
+      expect(
+        frame.hitboxes.any((MonitorHitbox hit) => hit.id.startsWith('act:')),
+        isFalse,
+      );
+      expectChip(stripAll(frame.rows), frame.hitboxes, 38, 'ws:more', 'MORE');
+    });
+  });
+
+  group('renderSelectedPanel', () {
+    List<String> panel(int rows) => stripAll(
+      renderSelectedPanel(
+        snapshot: twoServers(),
         selectedIndex: 0,
-        frame: 0,
-        columns: 80,
-        lines: 24,
+        rows: rows,
+        width: 60,
+        topRow: 0,
+        colOffset: 0,
         theme: plain,
         range: range,
         now: now,
-      );
-      expect(frame.hitboxes, isNotEmpty);
-      expect(frame.hitboxes.length, lessThan(names.length));
-      expectHitsMatchRows(stripAll(frame.rows), frame.hitboxes, names);
+      ).rows,
+    );
+
+    test('keeps the chart, the meters and the facts when the body is tall', () {
+      final List<String> rows = panel(9);
+      expect(rows.length, 9);
+      expect(rows[6], contains('MEM'));
+      expect(rows[7], contains('PING'));
     });
 
-    test('emits no hitboxes below the floor or with no instances', () {
-      expect(
-        buildMonitorFrame(
-          snapshot: twoServers(),
-          selectedIndex: 0,
-          frame: 0,
-          columns: 70,
-          lines: 20,
-          theme: plain,
-          range: range,
-          now: now,
-        ).hitboxes,
-        isEmpty,
-      );
-      expect(
-        buildMonitorFrame(
-          snapshot: const MonitorSnapshot(
-            instances: <String>[],
-            history: <String, List<MetricSample>>{},
-            consumerName: 'survival',
-          ),
-          selectedIndex: 0,
-          frame: 0,
-          columns: 132,
-          lines: 40,
-          theme: plain,
-          range: range,
-          now: now,
-        ).hitboxes,
-        isEmpty,
-      );
+    test('gives up the facts row first when the body tightens', () {
+      final List<String> rows = panel(8);
+      expect(rows.length, 8);
+      expect(rows.join('\n'), contains('MEM'));
+      expect(rows.join('\n'), isNot(contains('PING')));
+    });
+
+    test('gives up the meter row next, never the chart', () {
+      final List<String> rows = panel(7);
+      expect(rows.length, 7);
+      final String joined = rows.join('\n');
+      expect(joined, isNot(contains('MEM')));
+      expect(joined, isNot(contains('PING')));
+      expect(joined, contains('20 ┤'), reason: 'the chart is what is left');
     });
   });
 

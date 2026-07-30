@@ -1,10 +1,12 @@
 /// Frame primitives shared by every monitor view.
 ///
-/// The dashboard (`monitor_model.dart`) and the single-instance detail view
+/// The dashboard (`monitor_model.dart`), the landing panels it composes
+/// (`monitor_landing.dart`) and the single-instance detail view
 /// (`monitor_detail_model.dart`) are separate layouts over the same
-/// vocabulary: one size floor, one resize card, one padding rule, one set of
-/// `n/a`-disciplined cell formatters, one spinner and one range label. They
-/// live here so the two builders can never drift apart on any of them.
+/// vocabulary: one snapshot type, one size floor, one resize card, one
+/// padding rule, one set of `n/a`-disciplined cell formatters, one spinner
+/// and one range label. They live here so the builders can never drift apart
+/// on any of them.
 ///
 /// Everything in this library is pure: no clock reads and no IO.
 library;
@@ -21,6 +23,42 @@ import 'monitor_hitbox.dart';
 /// squeezed, misleading layout.
 const int monitorMinColumns = 80;
 const int monitorMinLines = 24;
+
+/// Everything the dashboard needs to draw one frame: which instances exist,
+/// their metric history (chronological, oldest first), the active consumer
+/// profile's name, and which instance is the active one.
+class MonitorSnapshot {
+  const MonitorSnapshot({
+    required this.instances,
+    required this.history,
+    required this.consumerName,
+    this.activeInstance,
+  });
+
+  /// Instance names in display order.
+  final List<String> instances;
+
+  /// Metric history per instance, oldest sample first. An instance with no
+  /// entry (or an empty list) has no readings yet and renders as such —
+  /// never as zeros.
+  final Map<String, List<MetricSample>> history;
+
+  /// Name of the consumer profile the workspace is pointed at.
+  final String consumerName;
+
+  /// The instance marked active in the workspace, if any.
+  final String? activeInstance;
+
+  /// [instance]'s history, or an empty list when it has none.
+  List<MetricSample> historyFor(String instance) =>
+      history[instance] ?? const <MetricSample>[];
+
+  /// [instance]'s most recent sample, or null when it has none.
+  MetricSample? latestFor(String instance) {
+    final List<MetricSample> samples = historyFor(instance);
+    return samples.isEmpty ? null : samples.last;
+  }
+}
 
 /// The short label for a chart/window [range]: the four cycled ranges get
 /// their canonical names, anything else falls back to a compact duration.
@@ -57,19 +95,39 @@ List<String> padMonitorFrame({
 }
 
 /// Pads [frame] to exactly [lines] rows of exactly [columns] visible columns
-/// via [padMonitorFrame], and drops every hitbox whose [MonitorHitbox.row]
-/// falls at or past [lines] — a hitbox over a row that padding clipped away
-/// can never be clicked, so it has no business surviving in the result.
+/// via [padMonitorFrame], and clips its hitboxes to the same rectangle: a
+/// hitbox over a row or a column that padding clipped away can never be
+/// clicked, so it has no business surviving in the result.
+///
+/// A hitbox past the last row, or starting past the last column, is dropped
+/// whole; one that merely runs past the right edge keeps the columns that
+/// were actually painted.
 MonitorFrame padFrame(
   MonitorFrame frame, {
   required int columns,
   required int lines,
 }) {
+  final int width = columns < 0 ? 0 : columns;
+  final List<MonitorHitbox> clipped = <MonitorHitbox>[];
+  for (final MonitorHitbox hitbox in frame.hitboxes) {
+    if (hitbox.row >= lines || hitbox.colStart >= width) {
+      continue;
+    }
+    clipped.add(
+      hitbox.colEnd <= width
+          ? hitbox
+          : MonitorHitbox(
+              id: hitbox.id,
+              row: hitbox.row,
+              colStart: hitbox.colStart,
+              colEnd: width,
+              kind: hitbox.kind,
+            ),
+    );
+  }
   return MonitorFrame(
     rows: padMonitorFrame(rows: frame.rows, columns: columns, lines: lines),
-    hitboxes: frame.hitboxes
-        .where((MonitorHitbox hitbox) => hitbox.row < lines)
-        .toList(growable: false),
+    hitboxes: clipped.toList(growable: false),
   );
 }
 

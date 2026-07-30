@@ -1,52 +1,30 @@
-import '../../utils/charts/braille_chart.dart';
-import '../../utils/charts/meter.dart';
-import '../../utils/charts/sparkline.dart';
-import '../../utils/duration_format.dart';
-import '../../utils/terminal/ansi.dart';
+/// The landing frame of the command centre: the whole dashboard, composed
+/// top-down from a fixed row budget.
+///
+/// The blocks themselves live in `monitor_landing.dart`; what is here is the
+/// budget that decides how many rows each one gets, the header and footer
+/// that bracket them, the two action bars, and the hitbox map the screen
+/// clicks against.
+///
+/// Everything in this library is pure: no clock reads and no IO.
+library;
+
+import '../../utils/terminal/button.dart';
 import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
 import '../runtime_state.dart';
 import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
+import 'monitor_landing.dart';
 
-/// Rows for the header panel (two content rows plus borders) and the footer.
+/// The frame's fixed row budget, top-down: the header panel, the KPI strip,
+/// one row per action bar, and the footer hint. Everything left over is the
+/// body — at the 24-line floor that is 14 rows.
 const int _headerRows = 4;
+const int _kpiRows = 3;
+const int _barRows = 1;
 const int _footerRows = 1;
-
-/// Terminal height at or above which the bottom band (chart + host card) is
-/// drawn, the smallest band that can carry a readable chart (two panel
-/// borders plus five plot rows), and the tallest band worth drawing. Below
-/// [_bandMinRows] the servers panel takes the frame instead; above
-/// [_bandMaxRows] the extra rows go to the servers panel, where blank rows
-/// read as room for more servers rather than as a stretched host card.
-const int _bandMinLines = 30;
-const int _bandMinRows = 7;
-const int _bandMaxRows = 16;
-
-/// Bounds on a server row's elastic TPS trend, and the cells in the host
-/// card's MEM and CPU meters. The trend absorbs the slack a wide terminal
-/// leaves — spending it on data rather than on a gap — but stops at
-/// [_maxRowSparkCells], past which a typical history no longer fills it and
-/// the row degenerates into a run of gap glyphs.
-const int _minRowSparkCells = 16;
-const int _maxRowSparkCells = 48;
-const int _hostMeterCells = 12;
-
-/// Server-row column widths: the name column's ceiling, the state name
-/// (`restarting` is the longest state), `:port`, `players/max`, and the
-/// trailing TPS reading.
-const int _maxNameColumn = 20;
-const int _stateColumn = 10;
-const int _portColumn = 6;
-const int _playersColumn = 7;
-const int _tpsColumn = 4;
-
-/// Columns a server row spends outside its name column and its trailing
-/// trend: the selector, the state glyph, the state name, the port, the
-/// player count, and the five single spaces between them.
-const int _rowFixedColumns =
-    1 + 1 + 1 + 1 + 1 + _stateColumn + 1 + _portColumn + 1 + _playersColumn;
 
 /// Separator between footer hints.
 const String _hintSeparator = ' · ';
@@ -65,132 +43,56 @@ const String _footerDropOrder =
     'b build,c consumer,n new,g consoles,O console,X kill,S stop,'
     'R restart,r range';
 
-/// Everything the dashboard needs to draw one frame: which instances exist,
-/// their metric history (chronological, oldest first), the active consumer
-/// profile's name, and which instance is the active one.
-class MonitorSnapshot {
-  const MonitorSnapshot({
-    required this.instances,
-    required this.history,
-    required this.consumerName,
-    this.activeInstance,
-  });
+/// The selection action bar's chips. Which set is drawn follows the
+/// selection's own state: you cannot stop what is not running, and starting
+/// what already runs is not an action anyone means.
+const ButtonSpec _detailButton = ButtonSpec(id: 'act:detail', label: 'DETAIL');
+const ButtonSpec _moreButton = ButtonSpec(id: 'act:more', label: 'MORE');
 
-  /// Instance names in display order.
-  final List<String> instances;
+const List<ButtonSpec> _stoppedButtons = <ButtonSpec>[
+  ButtonSpec(id: 'act:start', label: 'START'),
+  _detailButton,
+  _moreButton,
+];
 
-  /// Metric history per instance, oldest sample first. An instance with no
-  /// entry (or an empty list) has no readings yet and renders as such —
-  /// never as zeros.
-  final Map<String, List<MetricSample>> history;
+const List<ButtonSpec> _liveButtons = <ButtonSpec>[
+  ButtonSpec(id: 'act:stop', label: 'STOP'),
+  ButtonSpec(id: 'act:restart', label: 'RESTART'),
+  ButtonSpec(id: 'act:console', label: 'CONSOLE'),
+  _detailButton,
+  _moreButton,
+];
 
-  /// Name of the consumer profile the workspace is pointed at.
-  final String consumerName;
-
-  /// The instance marked active in the workspace, if any.
-  final String? activeInstance;
-
-  /// [instance]'s history, or an empty list when it has none.
-  List<MetricSample> historyFor(String instance) =>
-      history[instance] ?? const <MetricSample>[];
-
-  /// [instance]'s most recent sample, or null when it has none.
-  MetricSample? latestFor(String instance) {
-    final List<MetricSample> samples = historyFor(instance);
-    return samples.isEmpty ? null : samples.last;
-  }
-}
-
-/// The resolved row geometry of a monitor frame: the servers panel's total
-/// rows (borders included), how many instances got a row, how many did not
-/// fit (summarised on the last content row), and the bottom band's rows
-/// (zero when there is no band).
-///
-/// [buildMonitorFrame] derives both the rendered rows and the server-row
-/// hitboxes from this, so a click target can never drift from what was
-/// drawn.
-class _MonitorLayout {
-  const _MonitorLayout({
-    required this.serverPanelRows,
-    required this.visibleInstances,
-    required this.hiddenInstances,
-    required this.bandRows,
-  });
-
-  final int serverPanelRows;
-  final int visibleInstances;
-  final int hiddenInstances;
-  final int bandRows;
-
-  /// Content rows inside the servers panel.
-  int get serverContentRows => serverPanelRows < 2 ? 0 : serverPanelRows - 2;
-
-  /// Absolute, zero-based frame row of the first instance row.
-  int get firstServerContentRow => _headerRows + 1;
-}
-
-/// Splits [lines] between the servers panel and the bottom band. The band
-/// only appears at [_bandMinLines] and above, with at least one instance,
-/// and only when both it and a non-degenerate servers panel fit. It is
-/// capped at [_bandMaxRows]: the servers panel absorbs whatever a tall
-/// terminal leaves over.
-_MonitorLayout _resolveLayout({
-  required int instanceCount,
-  required int lines,
-}) {
-  final int available = lines - _headerRows - _footerRows;
-  final int body = available < 0 ? 0 : available;
-
-  int serverPanelRows = body;
-  int bandRows = 0;
-  if (lines >= _bandMinLines && instanceCount > 0) {
-    final int natural = instanceCount + 2;
-    final int capped = body - _bandMinRows;
-    int panel = natural < capped ? natural : capped;
-    if (panel >= 3) {
-      int band = body - panel;
-      if (band > _bandMaxRows) {
-        band = _bandMaxRows;
-        panel = body - band;
-      }
-      serverPanelRows = panel;
-      bandRows = band;
-    }
-  }
-
-  final int contentRows = serverPanelRows < 2 ? 0 : serverPanelRows - 2;
-  int visible = instanceCount < contentRows ? instanceCount : contentRows;
-  if (visible < instanceCount && visible > 0) {
-    // The last content row is spent on the overflow note instead of a row
-    // nobody could click.
-    visible -= 1;
-  }
-  return _MonitorLayout(
-    serverPanelRows: serverPanelRows,
-    visibleInstances: visible,
-    hiddenInstances: instanceCount - visible,
-    bandRows: bandRows,
-  );
-}
+/// The workspace action bar's chips — the things that act on the workspace
+/// rather than on whichever server happens to be selected.
+const List<ButtonSpec> _workspaceButtons = <ButtonSpec>[
+  newInstanceButton,
+  ButtonSpec(id: 'ws:builds', label: 'BUILDS'),
+  ButtonSpec(id: 'ws:tuning', label: 'TUNING'),
+  ButtonSpec(id: 'ws:consumer', label: 'CONSUMER'),
+  ButtonSpec(id: 'ws:consoles', label: 'CONSOLES'),
+  ButtonSpec(id: 'ws:more', label: 'MORE'),
+];
 
 /// Builds the full-screen dashboard frame: exactly [lines] rows of exactly
 /// [columns] visible columns, ready to be painted as-is.
 ///
 /// Below the [monitorMinColumns] x [monitorMinLines] floor the frame
 /// degrades to [buildResizeRequiredFrame]. Above it the layout is a header
-/// panel, a servers panel (one row per instance), an optional bottom band
-/// (TPS chart plus host card for the selected instance, from
-/// [_bandMinLines] rows up), and a one-row footer hint.
+/// panel, a three-card KPI strip, a body (the slim server list beside the
+/// selected server's panel), a state-aware selection action bar, the
+/// workspace action bar, and a one-row footer hint. An empty workspace drops
+/// the selection bar and spends its body on a prompt instead.
 ///
 /// Pure: no clock reads and no IO. [now] must be UTC — sample timestamps
 /// are UTC and chart windows are `[now - range, now]` — and is the only
 /// notion of "current" the frame has. The header clock is rendered in local
 /// time from it.
 ///
-/// [hoveredId] and [pressedId] are accepted but not yet consumed by any
-/// layout decision — they exist so callers can thread hover/press state
-/// through now; the frame renders identically regardless of their value
-/// until a later change reads them.
+/// [hoveredId] and [pressedId] select the interaction state of whatever they
+/// name: a button chip renders hovered or pressed, and a hovered server row
+/// shows its selector. Both null (the `--once` snapshot) renders every
+/// region in its resting state.
 MonitorFrame buildMonitorFrame({
   required MonitorSnapshot snapshot,
   required int selectedIndex,
@@ -214,52 +116,98 @@ MonitorFrame buildMonitorFrame({
     );
   }
 
-  final _MonitorLayout layout = _resolveLayout(
-    instanceCount: snapshot.instances.length,
-    lines: lines,
+  final int total = snapshot.instances.length;
+  final bool hasInstances = total > 0;
+  final int selected = selectedIndex < 0
+      ? 0
+      : (selectedIndex >= total ? total - 1 : selectedIndex);
+
+  final MonitorRollup rollup = MonitorRollup.of(
+    snapshot,
+    windowStart: now.subtract(range),
+    windowEnd: now,
   );
+
+  final int bodyTop = _headerRows + _kpiRows;
+  final int bars = hasInstances ? _barRows * 2 : _barRows;
+  final int budget = lines - bodyTop - bars - _footerRows;
+  final int bodyRows = budget < 0 ? 0 : budget;
 
   final List<String> rows = <String>[
     ..._headerPanel(
       snapshot: snapshot,
+      rollup: rollup,
       frame: frame,
       columns: columns,
       theme: theme,
       range: range,
       now: now,
     ),
-    ..._serversPanel(
+    ...renderKpiStrip(rollup: rollup, columns: columns, theme: theme),
+  ];
+  final List<MonitorHitbox> hitboxes = <MonitorHitbox>[];
+
+  if (hasInstances) {
+    final MonitorPanelRender list = renderServerList(
       snapshot: snapshot,
-      layout: layout,
-      selectedIndex: selectedIndex,
-      columns: columns,
+      rollup: rollup,
+      selectedIndex: selected,
+      rows: bodyRows,
+      topRow: bodyTop,
+      theme: theme,
+      hoveredId: hoveredId,
+    );
+    final MonitorPanelRender panel = renderSelectedPanel(
+      snapshot: snapshot,
+      selectedIndex: selected,
+      rows: bodyRows,
+      width: columns - serverListWidth - 1,
+      topRow: bodyTop,
+      colOffset: serverListWidth + 1,
       theme: theme,
       range: range,
       now: now,
-    ),
-    if (layout.bandRows > 0)
-      ..._bottomBand(
-        snapshot: snapshot,
-        selectedIndex: selectedIndex,
-        rows: layout.bandRows,
-        columns: columns,
-        theme: theme,
-        range: range,
-        now: now,
-      ),
-    theme.paint(_footerHints(columns), theme.faint),
-  ];
+    );
+    rows.addAll(joinBlocks(<List<String>>[list.rows, panel.rows]));
+    hitboxes
+      ..addAll(list.hitboxes)
+      ..addAll(panel.hitboxes);
 
-  final List<MonitorHitbox> hitboxes = <MonitorHitbox>[
-    for (int index = 0; index < layout.visibleInstances; index++)
-      MonitorHitbox(
-        id: 'server:${snapshot.instances[index]}',
-        kind: MonitorHitKind.serverRow,
-        row: layout.firstServerContentRow + index,
-        colStart: 0,
-        colEnd: columns,
+    final ButtonRowRender bar = layoutButtonRow(
+      buttons: _selectionButtons(
+        snapshot.latestFor(snapshot.instances[selected]),
       ),
-  ];
+      width: columns,
+      theme: theme,
+      hoveredId: hoveredId,
+      pressedId: pressedId,
+    );
+    rows.add(bar.row);
+    hitboxes.addAll(_buttonHits(bar.spans, rows.length - 1));
+  } else {
+    final MonitorPanelRender body = renderEmptyBody(
+      rows: bodyRows,
+      columns: columns,
+      topRow: bodyTop,
+      theme: theme,
+      hoveredId: hoveredId,
+      pressedId: pressedId,
+    );
+    rows.addAll(body.rows);
+    hitboxes.addAll(body.hitboxes);
+  }
+
+  final ButtonRowRender workspace = layoutButtonRow(
+    buttons: _workspaceButtons,
+    width: columns,
+    theme: theme,
+    hoveredId: hoveredId,
+    pressedId: pressedId,
+  );
+  rows.add(workspace.row);
+  hitboxes.addAll(_buttonHits(workspace.spans, rows.length - 1));
+
+  rows.add(theme.paint(_footerHints(columns), theme.faint));
 
   return padFrame(
     MonitorFrame(rows: rows, hitboxes: hitboxes),
@@ -267,6 +215,28 @@ MonitorFrame buildMonitorFrame({
     lines: lines,
   );
 }
+
+/// The chips the selection bar draws for a selection whose latest reading is
+/// [latest]. Anything that is not demonstrably running — stopped, or never
+/// sampled at all — gets the start set.
+List<ButtonSpec> _selectionButtons(MetricSample? latest) {
+  final RuntimeState? state = latest?.state;
+  final bool live = state != null && state != RuntimeState.stopped;
+  return live ? _liveButtons : _stoppedButtons;
+}
+
+/// The hitboxes for one laid-out button row, drawn on frame row [row].
+List<MonitorHitbox> _buttonHits(List<ButtonSpan> spans, int row) =>
+    <MonitorHitbox>[
+      for (final ButtonSpan span in spans)
+        MonitorHitbox(
+          id: span.id,
+          kind: MonitorHitKind.button,
+          row: row,
+          colStart: span.colStart,
+          colEnd: span.colEnd,
+        ),
+    ];
 
 /// The footer hint row for a [columns]-wide frame: as many of
 /// [_monitorFooterHints] as fit, dropped whole and highest rank first, so
@@ -286,6 +256,7 @@ String _footerHints(int columns) {
 /// fleet roll-up row and a faint workspace-facts row.
 List<String> _headerPanel({
   required MonitorSnapshot snapshot,
+  required MonitorRollup rollup,
   required int frame,
   required int columns,
   required MonitorTheme theme,
@@ -298,45 +269,19 @@ List<String> _headerPanel({
       '${local.hour.toString().padLeft(2, '0')}:'
       '${local.minute.toString().padLeft(2, '0')}';
 
-  int up = 0;
-  int down = 0;
-  int players = 0;
-  bool anyPlayers = false;
-  double tpsTotal = 0;
-  int tpsCount = 0;
-  for (final String instance in snapshot.instances) {
-    final MetricSample? latest = snapshot.latestFor(instance);
-    // Unsampled is neither up nor down, so these can sum under SERVERS.
-    if (latest?.state == RuntimeState.stopped) {
-      down += 1;
-    } else if (latest != null) {
-      up += 1;
-    }
-    final int? instancePlayers = latest?.players;
-    if (instancePlayers != null) {
-      players += instancePlayers;
-      anyPlayers = true;
-    }
-    final double? tps = latest?.tps;
-    if (tps != null) {
-      tpsTotal += tps;
-      tpsCount += 1;
-    }
-  }
-  final double? averageTps = tpsCount == 0 ? null : tpsTotal / tpsCount;
-
-  final String upTone = up > 0 ? theme.ok : theme.faint;
+  final double? meanTps = rollup.meanTps;
+  final String upTone = rollup.up > 0 ? theme.ok : theme.faint;
   final String summary =
       '${theme.paint(glyphs.bulletOn, upTone)} '
-      '${theme.paint('$up UP', upTone)} · '
-      '${theme.paint('$down DOWN', theme.faint)}'
-      '   PLAYERS ${theme.paint(anyPlayers ? '$players' : 'n/a', anyPlayers && players > 0 ? theme.accent : theme.faint)}'
-      '   AVG TPS ${theme.paint(averageTps == null ? 'n/a' : averageTps.toStringAsFixed(1), theme.tpsTone(averageTps))}';
+      '${theme.paint('${rollup.up} UP', upTone)} · '
+      '${theme.paint('${rollup.down} DOWN', theme.faint)}'
+      '   PLAYERS ${theme.paint(rollup.anyPlayers ? '${rollup.players}' : 'n/a', rollup.anyPlayers && rollup.players > 0 ? theme.accent : theme.faint)}'
+      '   AVG TPS ${theme.paint(meanTps == null ? 'n/a' : meanTps.toStringAsFixed(1), theme.tpsTone(meanTps))}';
 
   final String facts =
       'ACTIVE ${snapshot.activeInstance ?? 'none'} · '
       'RANGE ${rangeLabel(range)} · '
-      '${snapshot.instances.length} SERVERS';
+      '${rollup.total} SERVERS';
 
   return renderPanel(
     // The wordmark is the one title the panel does not style itself: the
@@ -351,324 +296,3 @@ List<String> _headerPanel({
     theme: theme,
   );
 }
-
-/// The servers panel: one row per instance, or the empty-workspace prompt.
-List<String> _serversPanel({
-  required MonitorSnapshot snapshot,
-  required _MonitorLayout layout,
-  required int selectedIndex,
-  required int columns,
-  required MonitorTheme theme,
-  required Duration range,
-  required DateTime now,
-}) {
-  final int inner = columns - 4 < 0 ? 0 : columns - 4;
-  final int contentRows = layout.serverContentRows;
-  final List<String> content = <String>[];
-
-  // UP means non-stopped here, exactly as the header roll-up counts it, so
-  // the badge and the row above it can never disagree about the same fleet.
-  // A starting or restarting server is not down.
-  int up = 0;
-  for (final String instance in snapshot.instances) {
-    final MetricSample? latest = snapshot.latestFor(instance);
-    if (latest != null && latest.state != RuntimeState.stopped) {
-      up += 1;
-    }
-  }
-
-  if (snapshot.instances.isEmpty) {
-    const String prompt = 'NO SERVERS — press n to create one';
-    final int blank = (contentRows - 1) ~/ 2;
-    for (int index = 0; index < contentRows; index++) {
-      content.add(
-        index == blank
-            ? _center(theme.paint(prompt, theme.faint), prompt.length, inner)
-            : '',
-      );
-    }
-  } else {
-    int nameColumn = 4;
-    for (int index = 0; index < layout.visibleInstances; index++) {
-      final int length = snapshot.instances[index].length;
-      if (length > nameColumn) {
-        nameColumn = length;
-      }
-    }
-    if (nameColumn > _maxNameColumn) {
-      nameColumn = _maxNameColumn;
-    }
-    // The trend takes everything the fixed columns, one gap and the TPS
-    // reading leave; too little for a readable trend and it is dropped so
-    // the reading itself still lands on the right edge.
-    int sparkCells = inner - nameColumn - _rowFixedColumns - _tpsColumn - 2;
-    if (sparkCells > _maxRowSparkCells) {
-      sparkCells = _maxRowSparkCells;
-    }
-    if (sparkCells < _minRowSparkCells) {
-      sparkCells = 0;
-      final int room = inner - _rowFixedColumns - _tpsColumn - 1;
-      if (nameColumn > room) {
-        nameColumn = room < 4 ? 4 : room;
-      }
-    }
-
-    final DateTime windowStart = now.subtract(range);
-    for (int index = 0; index < layout.visibleInstances; index++) {
-      final String instance = snapshot.instances[index];
-      content.add(
-        _serverRow(
-          instance: instance,
-          latest: snapshot.latestFor(instance),
-          history: snapshot.historyFor(instance),
-          selected: index == selectedIndex,
-          active: instance == snapshot.activeInstance,
-          nameColumn: nameColumn,
-          sparkCells: sparkCells,
-          inner: inner,
-          theme: theme,
-          windowStart: windowStart,
-          windowEnd: now,
-        ),
-      );
-    }
-    if (layout.hiddenInstances > 0 && content.length < contentRows) {
-      content.add(
-        theme.paint(
-          '  ${theme.glyphs.dash} ${layout.hiddenInstances} more '
-          '(resize to see every server)',
-          theme.faint,
-        ),
-      );
-    }
-    while (content.length < contentRows) {
-      content.add('');
-    }
-  }
-
-  return renderPanel(
-    title: 'SERVERS',
-    badge: '$up/${snapshot.instances.length} UP',
-    content: content,
-    width: columns,
-    theme: theme,
-    emphasis: PanelEmphasis.active,
-  );
-}
-
-/// One instance row. A stopped or unsampled instance never fabricates a
-/// number: its port, players, trend and TPS all render as dashes.
-String _serverRow({
-  required String instance,
-  required MetricSample? latest,
-  required List<MetricSample> history,
-  required bool selected,
-  required bool active,
-  required int nameColumn,
-  required int sparkCells,
-  required int inner,
-  required MonitorTheme theme,
-  required DateTime windowStart,
-  required DateTime windowEnd,
-}) {
-  final MonitorGlyphs glyphs = theme.glyphs;
-  final RuntimeState? state = latest?.state;
-  final bool live = state != null && state != RuntimeState.stopped;
-
-  final String selector = selected
-      ? theme.paint(glyphs.selector, theme.accent)
-      : ' ';
-  final String name = theme.paint(
-    _fit(instance, nameColumn),
-    selected || active ? theme.textStrong : theme.text,
-  );
-
-  final String glyph = live
-      ? theme.paint(
-          glyphs.bulletOn,
-          state == RuntimeState.running ? theme.ok : theme.warn,
-        )
-      : theme.paint(glyphs.bulletOff, theme.faint);
-  final String stateText = theme.paint(
-    _fit(monitorStateText(latest), _stateColumn),
-    state == null ? theme.faint : theme.statusTone(state),
-  );
-
-  final int? port = latest?.port;
-  final String portText = theme.paint(
-    _fit(port == null ? glyphs.dash : ':$port', _portColumn),
-    live && port != null ? theme.muted : theme.faint,
-  );
-
-  final int? players = latest?.players;
-  final String playersText = theme.paint(
-    _fit(monitorPlayersText(latest, theme), _playersColumn),
-    players != null && players > 0 ? theme.accent : theme.faint,
-  );
-
-  final double? tps = latest?.tps;
-  final String tpsText = theme.paint(
-    monitorTpsText(tps, theme).padLeft(_tpsColumn),
-    theme.tpsTone(tps),
-  );
-
-  String right = tpsText;
-  if (sparkCells > 0) {
-    final String trend = live
-        ? renderSparkline(
-            values: _tpsWindow(history, windowStart, windowEnd),
-            width: sparkCells,
-            theme: theme,
-            min: 0,
-            max: 20,
-          )
-        : theme.paint(glyphs.dash * sparkCells, theme.faint);
-    right = '$trend $right';
-  }
-
-  final String left =
-      '$selector $name $glyph $stateText $portText $playersText';
-  final int leftWidth = inner - Ansi.visibleLength(right) - 1;
-  if (leftWidth <= 0) {
-    return Ansi.clipVisible(left, inner);
-  }
-  return '${Ansi.padVisible(Ansi.clipVisible(left, leftWidth), leftWidth)} '
-      '$right';
-}
-
-/// The bottom band: the selected instance's TPS chart beside its host card.
-List<String> _bottomBand({
-  required MonitorSnapshot snapshot,
-  required int selectedIndex,
-  required int rows,
-  required int columns,
-  required MonitorTheme theme,
-  required Duration range,
-  required DateTime now,
-}) {
-  final int index = selectedIndex < 0
-      ? 0
-      : (selectedIndex >= snapshot.instances.length
-            ? snapshot.instances.length - 1
-            : selectedIndex);
-  final String instance = snapshot.instances[index];
-  final List<MetricSample> history = snapshot.historyFor(instance);
-  final String label = instance.toUpperCase();
-
-  final int leftWidth = columns * 3 ~/ 5;
-  final int rightWidth = columns - leftWidth - 1;
-  final int innerRows = rows - 2;
-
-  final List<String> chart = renderBrailleChart(
-    series: <ChartSeries>[
-      ChartSeries(
-        label: 'tps',
-        points: <ChartPoint>[
-          for (final MetricSample sample in history)
-            ChartPoint(ts: sample.ts, value: sample.tps),
-        ],
-      ),
-    ],
-    width: leftWidth - 4,
-    height: innerRows,
-    start: now.subtract(range),
-    end: now,
-    theme: theme,
-    forcedLow: 0,
-    forcedHigh: 20,
-  );
-
-  return joinBlocks(<List<String>>[
-    renderPanel(
-      title: '$label · TPS',
-      badge: rangeLabel(range),
-      content: chart,
-      width: leftWidth,
-      theme: theme,
-    ),
-    renderPanel(
-      title: '$label · HOST',
-      content: _hostCard(
-        latest: history.isEmpty ? null : history.last,
-        history: history,
-        rows: innerRows,
-        theme: theme,
-      ),
-      width: rightWidth,
-      theme: theme,
-    ),
-  ]);
-}
-
-/// The host card's content rows: memory and CPU meters over the observed
-/// window, then uptime/players and ping/version. Padded to [rows] so the
-/// card keeps its own bottom border when joined beside a taller chart.
-List<String> _hostCard({
-  required MetricSample? latest,
-  required List<MetricSample> history,
-  required int rows,
-  required MonitorTheme theme,
-}) {
-  int? peakRss;
-  for (final MetricSample sample in history) {
-    final int? seen = sample.rssBytes;
-    if (seen != null && (peakRss == null || seen > peakRss)) {
-      peakRss = seen;
-    }
-  }
-  final int? rss = latest?.rssBytes;
-  final double? memFraction = rss == null || peakRss == null || peakRss <= 0
-      ? null
-      : rss / peakRss;
-  final double? cpu = latest?.cpuPercent;
-  final double? cpuFraction = cpu == null
-      ? null
-      : (cpu / 100).clamp(0.0, 1.0).toDouble();
-  final int? uptime = latest?.uptimeSeconds;
-  final int? latency = latest?.latencyMs;
-  // A blank version string is missing data, not a version.
-  final String? version = latest?.version;
-  final String versionText = version == null || version.isEmpty
-      ? theme.glyphs.dash
-      : version;
-
-  final List<String> content = <String>[
-    'MEM  ${renderMeter(fraction: memFraction, cells: _hostMeterCells, theme: theme)} '
-        '${theme.paint(formatBytes(rss), rss == null ? theme.faint : theme.text)}',
-    'CPU  ${renderMeter(fraction: cpuFraction, cells: _hostMeterCells, theme: theme)} '
-        '${theme.paint(formatCpuPercent(cpu), cpu == null ? theme.faint : theme.text)}',
-    theme.paint(
-      'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}'
-      ' · ${monitorNumberText(latest?.players, theme)} PLAYERS',
-      theme.muted,
-    ),
-    theme.paint(
-      'PING ${latency == null ? 'n/a' : '${latency}ms'} · $versionText',
-      theme.muted,
-    ),
-  ];
-  final List<String> sized = content.take(rows < 0 ? 0 : rows).toList();
-  while (sized.length < rows) {
-    sized.add('');
-  }
-  return sized;
-}
-
-/// The `n/a`-safe TPS series for the sparkline: every in-window sample in
-/// order, nulls kept so a gap stays a gap.
-List<double?> _tpsWindow(
-  List<MetricSample> history,
-  DateTime start,
-  DateTime end,
-) => <double?>[
-  for (final MetricSample sample in history)
-    if (!sample.ts.isBefore(start) && !sample.ts.isAfter(end)) sample.tps,
-];
-
-/// Clips or pads the already-plain [text] to exactly [width] columns.
-String _fit(String text, int width) =>
-    text.length > width ? text.substring(0, width) : text.padRight(width);
-
-/// Centers [painted] (whose visible width is [visible]) in [width] columns.
-String _center(String painted, int visible, int width) =>
-    visible >= width ? painted : '${' ' * ((width - visible) ~/ 2)}$painted';
