@@ -20,6 +20,12 @@ class Ansi {
   /// Subtle dark background used for the selected menu row (256-color).
   static const String bgHighlight = '\x1B[48;5;236m';
 
+  /// Foreground escape sequence for the 256-color palette [index] (0-255).
+  static String fg256(int index) => '\x1B[38;5;${index}m';
+
+  /// Foreground escape sequence for a truecolor RGB triple.
+  static String fgRgb(int r, int g, int b) => '\x1B[38;2;$r;$g;${b}m';
+
   static String style(String text, String codes) => '$codes$text$reset';
 
   /// Length of [text] without ANSI escape sequences.

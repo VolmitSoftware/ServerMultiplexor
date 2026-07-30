@@ -32,4 +32,57 @@ void main() {
       expect(formatCompactDuration(const Duration(days: 2, hours: 3)), '2d 3h');
     });
   });
+
+  group('formatBytes', () {
+    test('renders n/a for null', () {
+      expect(formatBytes(null), 'n/a');
+    });
+
+    test('renders sub-kilobyte counts with a B suffix', () {
+      expect(formatBytes(512), '512B');
+    });
+
+    test('renders kilobytes with one decimal below 10', () {
+      expect(formatBytes(1536), '1.5K');
+    });
+
+    test('renders megabytes with no decimal at or above 10', () {
+      expect(formatBytes(88 * 1024 * 1024), '88M');
+    });
+
+    test('renders gigabytes with one decimal below 10', () {
+      expect(formatBytes(6553600000).startsWith('6.1G'), isTrue);
+    });
+
+    test('renders zero bytes', () {
+      expect(formatBytes(0), '0B');
+    });
+  });
+
+  group('formatCompactNumber', () {
+    test('renders n/a for null', () {
+      expect(formatCompactNumber(null), 'n/a');
+    });
+
+    test('renders sub-thousand values with no suffix', () {
+      expect(formatCompactNumber(999), '999');
+    });
+
+    test('renders thousands with one decimal below 10k', () {
+      expect(formatCompactNumber(1234), '1.2k');
+    });
+
+    test('renders tens of thousands with no decimal', () {
+      expect(formatCompactNumber(12345), '12k');
+    });
+
+    test('renders millions with no decimal at or above 10M', () {
+      expect(formatCompactNumber(88000000), '88M');
+    });
+
+    test('stays within five characters', () {
+      expect(formatCompactNumber(1234).length, lessThanOrEqualTo(5));
+      expect(formatCompactNumber(88000000).length, lessThanOrEqualTo(5));
+    });
+  });
 }
