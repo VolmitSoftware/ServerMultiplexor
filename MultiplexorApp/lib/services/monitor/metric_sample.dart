@@ -369,10 +369,14 @@ InstanceFlags? metricsTsvFlags(String line) {
 /// Every instance's flags from a whole `runtime metrics` capture, keyed by
 /// instance name and in row order.
 ///
-/// Rows [metricsTsvFlags] rejects are skipped, as are rows with an empty name
-/// — the same discipline [MetricSample.fromMetricsTsv] applies, so a capture
-/// parses to the same set of instances either way. A repeated name keeps the
-/// last row.
+/// Rows [metricsTsvFlags] rejects are skipped, as are rows with an empty
+/// name. That is *nearly* the set [MetricSample.fromMetricsTsv] accepts —
+/// both need 9 columns and a non-empty name — but the two validate different
+/// cells, so the sets are not identical: a row with an unreadable state name
+/// yields flags but no sample, and a row with an unexpected lock or
+/// isolation token yields a sample but no flags. Either way the instance is
+/// still listed by the sampler; it simply falls back to [MonitorSnapshot]'s
+/// default flags for that sweep. A repeated name keeps the last row.
 Map<String, InstanceFlags> metricsTsvFlagsByInstance(String capture) {
   final Map<String, InstanceFlags> result = <String, InstanceFlags>{};
   for (final String line in capture.split('\n')) {

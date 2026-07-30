@@ -422,7 +422,9 @@ MonitorPanelRender renderServerList({
 ///
 /// The badge — `<state> · <range>` — is a range chip: clicking it cycles the
 /// window, exactly as `r` does. It only becomes a target when the panel is
-/// actually wide enough to inlay it.
+/// actually wide enough to inlay it, and it answers [hoveredId] the way
+/// every other target does: under the pointer it takes the accent tone the
+/// button chips use, so a clickable badge does not look like decoration.
 MonitorPanelRender renderSelectedPanel({
   required MonitorSnapshot snapshot,
   required int selectedIndex,
@@ -433,6 +435,7 @@ MonitorPanelRender renderSelectedPanel({
   required MonitorTheme theme,
   required Duration range,
   required DateTime now,
+  String? hoveredId,
 }) {
   final String instance = snapshot.instances[selectedIndex];
   final List<MetricSample> history = snapshot.historyFor(instance);
@@ -490,10 +493,16 @@ MonitorPanelRender renderSelectedPanel({
   // the right edge, the badge, and the fill it drops the badge for when the
   // title and badge together do not fit.
   final bool badgeFits = width - 8 - title.length - badge.length >= 0;
+  // Hover is only honored where the chip is actually a target: a badge the
+  // panel dropped for width has no hitbox, so nothing can be over it.
+  final bool badgeHovered = badgeFits && hoveredId == rangeHitId;
   return MonitorPanelRender(
     rows: renderPanel(
       title: title,
       badge: badge,
+      styledBadge: badgeHovered
+          ? theme.paint(badge, '${theme.bold}${theme.accent}')
+          : null,
       content: content,
       width: width,
       theme: theme,
@@ -575,7 +584,7 @@ MonitorPanelRender renderEmptyBody({
 
 /// The `+ NEW` button, shared by the workspace bar and the empty-workspace
 /// prompt so both routes carry the same id.
-const ButtonSpec newInstanceButton = ButtonSpec(id: 'ws:new', label: '+ NEW');
+const ButtonSpec newInstanceButton = ButtonSpec(id: wsNewHitId, label: '+ NEW');
 
 /// One row of the slim list: `▸ name ●`. The selector marks the selection
 /// and the hovered row alike; the name is strong for the selection and the

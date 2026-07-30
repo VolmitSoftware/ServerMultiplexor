@@ -47,19 +47,22 @@ const String _footerDropOrder =
 /// The selection action bar's chips. Which set is drawn follows the
 /// selection's own state: you cannot stop what is not running, and starting
 /// what already runs is not an action anyone means.
-const ButtonSpec _detailButton = ButtonSpec(id: 'act:detail', label: 'DETAIL');
-const ButtonSpec _moreButton = ButtonSpec(id: 'act:more', label: 'MORE');
+const ButtonSpec _detailButton = ButtonSpec(
+  id: actDetailHitId,
+  label: 'DETAIL',
+);
+const ButtonSpec _moreButton = ButtonSpec(id: actMoreHitId, label: 'MORE');
 
 const List<ButtonSpec> _stoppedButtons = <ButtonSpec>[
-  ButtonSpec(id: 'act:start', label: 'START'),
+  ButtonSpec(id: actStartHitId, label: 'START'),
   _detailButton,
   _moreButton,
 ];
 
 const List<ButtonSpec> _liveButtons = <ButtonSpec>[
-  ButtonSpec(id: 'act:stop', label: 'STOP'),
-  ButtonSpec(id: 'act:restart', label: 'RESTART'),
-  ButtonSpec(id: 'act:console', label: 'CONSOLE'),
+  ButtonSpec(id: actStopHitId, label: 'STOP'),
+  ButtonSpec(id: actRestartHitId, label: 'RESTART'),
+  ButtonSpec(id: actConsoleHitId, label: 'CONSOLE'),
   _detailButton,
   _moreButton,
 ];
@@ -68,11 +71,11 @@ const List<ButtonSpec> _liveButtons = <ButtonSpec>[
 /// rather than on whichever server happens to be selected.
 const List<ButtonSpec> _workspaceButtons = <ButtonSpec>[
   newInstanceButton,
-  ButtonSpec(id: 'ws:builds', label: 'BUILDS'),
-  ButtonSpec(id: 'ws:tuning', label: 'TUNING'),
-  ButtonSpec(id: 'ws:consumer', label: 'CONSUMER'),
-  ButtonSpec(id: 'ws:consoles', label: 'CONSOLES'),
-  ButtonSpec(id: 'ws:more', label: 'MORE'),
+  ButtonSpec(id: wsBuildsHitId, label: 'BUILDS'),
+  ButtonSpec(id: wsTuningHitId, label: 'TUNING'),
+  ButtonSpec(id: wsConsumerHitId, label: 'CONSUMER'),
+  ButtonSpec(id: wsConsolesHitId, label: 'CONSOLES'),
+  ButtonSpec(id: wsMoreHitId, label: 'MORE'),
 ];
 
 /// Builds the full-screen dashboard frame: exactly [lines] rows of exactly
@@ -168,6 +171,7 @@ MonitorFrame buildMonitorFrame({
       theme: theme,
       range: range,
       now: now,
+      hoveredId: hoveredId,
     );
     rows.addAll(joinBlocks(<List<String>>[list.rows, panel.rows]));
     hitboxes

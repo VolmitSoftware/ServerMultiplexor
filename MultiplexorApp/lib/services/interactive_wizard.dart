@@ -205,9 +205,14 @@ class InteractiveWizard {
   /// The monitor's suspension callback. The screen brackets the call with
   /// its own terminal transitions, so all this adds is a clean canvas and an
   /// absolute guarantee that nothing escapes: an exception thrown here
-  /// propagates out of [MonitorScreen.run] and would end the session, so
-  /// even a lost stdin is reported rather than rethrown. Quick actions do
-  /// not prompt, so that last case is belt and braces.
+  /// propagates out of [MonitorScreen.run] and would end the session.
+  ///
+  /// That guarantee is load-bearing now, not belt and braces. What runs
+  /// through here is no longer only the non-prompting quick actions: every
+  /// card button and action-bar chip lands here too, and those flows do
+  /// prompt — for a port, a PIN, a confirmation. A lost stdin mid-prompt is
+  /// therefore reachable, and it is reported and swallowed rather than
+  /// rethrown, because there is still a dashboard to return to.
   Future<void> _suspendedFlow(Future<void> Function() flow) async {
     Ui.clearScreen();
     try {
@@ -325,6 +330,12 @@ class InteractiveWizard {
   /// Every workspace action the card, the workspace bar, and the `n`/`b`
   /// keys can dispatch. Same suspension contract as
   /// [_monitorInstanceAction].
+  ///
+  /// The card offers START ALL and STOP ALL unconditionally — it is a fixed
+  /// grid, not the old menu that hid entries it had no work for — so this is
+  /// where "nothing to do" is answered. Saying so and pausing is the point:
+  /// a suspension that runs no command and returns immediately reads as a
+  /// flash of the screen and nothing else.
   Future<void> _monitorWorkspaceAction(WorkspaceModalAction action) async {
     switch (action) {
       case WorkspaceModalAction.buildTuning:
@@ -334,9 +345,21 @@ class InteractiveWizard {
       case WorkspaceModalAction.createMany:
         await _createMany();
       case WorkspaceModalAction.startAll:
-        await _startAllStopped(await Ui.shielded(_loadInstanceRows));
+        final List<_InstanceRow> rows = await Ui.shielded(_loadInstanceRows);
+        if (!rows.any((_InstanceRow r) => r.state == RuntimeState.stopped)) {
+          Ui.note('No stopped servers.');
+          await Ui.pause();
+          return;
+        }
+        await _startAllStopped(rows);
       case WorkspaceModalAction.stopAll:
-        await _stopAllRunning(await Ui.shielded(_loadInstanceRows));
+        final List<_InstanceRow> rows = await Ui.shielded(_loadInstanceRows);
+        if (!rows.any((_InstanceRow r) => r.state != RuntimeState.stopped)) {
+          Ui.note('No running servers.');
+          await Ui.pause();
+          return;
+        }
+        await _stopAllRunning(rows);
       case WorkspaceModalAction.wipe:
         await _wipeEverything();
       case WorkspaceModalAction.newInstance:

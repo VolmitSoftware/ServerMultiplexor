@@ -17,6 +17,48 @@ const String serverHitPrefix = 'server:';
 /// panel's badge — clicking it cycles the chart window, exactly as `r` does.
 const String rangeHitId = 'range';
 
+/// The selection action bar's button ids: what the chips over the selected
+/// server do. `monitor_model.dart` builds the chips from these and
+/// `monitor_screen.dart` dispatches on them, so — like [serverHitPrefix] —
+/// emitter and dispatcher name every one of them from here and cannot drift
+/// apart on a spelling.
+const String actStartHitId = 'act:start';
+const String actStopHitId = 'act:stop';
+const String actRestartHitId = 'act:restart';
+const String actConsoleHitId = 'act:console';
+const String actDetailHitId = 'act:detail';
+const String actMoreHitId = 'act:more';
+
+/// The workspace action bar's button ids: what the chips act on the
+/// workspace as a whole do. [wsNewHitId] is also the id of the `+ NEW` chip
+/// the empty-workspace body draws, so both routes dispatch the same way.
+const String wsNewHitId = 'ws:new';
+const String wsBuildsHitId = 'ws:builds';
+const String wsTuningHitId = 'ws:tuning';
+const String wsConsumerHitId = 'ws:consumer';
+const String wsConsolesHitId = 'ws:consoles';
+const String wsMoreHitId = 'ws:more';
+
+/// Every action-bar id there is, selection bar first. Both halves of the
+/// contract are pinned to this list: the builders emit exactly these ids
+/// (across the states that select between them) and the screen dispatches on
+/// exactly these ids, so a chip can never be drawn with an id nothing acts
+/// on, nor acted on under an id nothing draws.
+const List<String> monitorBarHitIds = <String>[
+  actStartHitId,
+  actStopHitId,
+  actRestartHitId,
+  actConsoleHitId,
+  actDetailHitId,
+  actMoreHitId,
+  wsNewHitId,
+  wsBuildsHitId,
+  wsTuningHitId,
+  wsConsumerHitId,
+  wsConsolesHitId,
+  wsMoreHitId,
+];
+
 /// A single clickable region within a rendered frame: terminal row [row],
 /// half-open column range `[colStart, colEnd)` (both 0-based), identified by
 /// [id] and typed by [kind] so a caller can dispatch on what was clicked

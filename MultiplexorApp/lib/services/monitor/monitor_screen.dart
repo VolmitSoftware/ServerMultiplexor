@@ -68,22 +68,6 @@ const String _leaveAltScreen = '\x1B[?1049l\x1B[?25h';
 /// returns added before it can be written in raw mode.
 const String _fullFramePrefix = '\x1B[H\x1B[2J';
 
-/// The id prefixes and ids the selection and workspace action bars emit.
-/// `monitor_model.dart` builds the chips that carry them; this screen is what
-/// reads them back, so the two files are the only pair that has to agree.
-const String _actStartHitId = 'act:start';
-const String _actStopHitId = 'act:stop';
-const String _actRestartHitId = 'act:restart';
-const String _actConsoleHitId = 'act:console';
-const String _actDetailHitId = 'act:detail';
-const String _actMoreHitId = 'act:more';
-const String _wsNewHitId = 'ws:new';
-const String _wsBuildsHitId = 'ws:builds';
-const String _wsTuningHitId = 'ws:tuning';
-const String _wsConsumerHitId = 'ws:consumer';
-const String _wsConsolesHitId = 'ws:consoles';
-const String _wsMoreHitId = 'ws:more';
-
 /// Why the monitor screen stopped: either the user left it, or it is
 /// handing off to a flow the dashboard itself does not implement.
 ///
@@ -686,37 +670,42 @@ class MonitorScreen {
 
   /// Activation on the dashboard itself: server rows, the selection bar, the
   /// workspace bar, and the range chip.
+  ///
+  /// Every case is one of [monitorBarHitIds] (or [rangeHitId], or a
+  /// [serverHitPrefix] row), named from `monitor_hitbox.dart` — the same
+  /// constants the builders draw their chips from, so this switch and the
+  /// bars cannot drift apart on an id.
   Future<MonitorResult?> _activateBase(String id) async {
     if (id.startsWith(serverHitPrefix)) {
       _activateServerRow(id.substring(serverHitPrefix.length));
       return null;
     }
     switch (id) {
-      case _actStartHitId:
+      case actStartHitId:
         await _runInstanceAction(InstanceModalAction.start);
-      case _actStopHitId:
+      case actStopHitId:
         await _runInstanceAction(InstanceModalAction.stop);
-      case _actRestartHitId:
+      case actRestartHitId:
         await _runInstanceAction(InstanceModalAction.restart);
-      case _actConsoleHitId:
+      case actConsoleHitId:
         await _runInstanceAction(InstanceModalAction.console);
-      case _actDetailHitId:
+      case actDetailHitId:
         _enterDetail();
-      case _actMoreHitId:
+      case actMoreHitId:
         _openInstanceModal(_actionTarget());
-      case _wsNewHitId:
+      case wsNewHitId:
         await _runWorkspaceAction(WorkspaceModalAction.newInstance);
-      case _wsBuildsHitId:
+      case wsBuildsHitId:
         await _runWorkspaceAction(WorkspaceModalAction.pullBuilds);
-      case _wsTuningHitId:
+      case wsTuningHitId:
         await _runWorkspaceAction(WorkspaceModalAction.buildTuning);
-      case _wsConsumerHitId:
+      case wsConsumerHitId:
         // The one hand-off that still ends the session: a new profile means
         // a new sampler and a new trend store.
         return const MonitorSwitchConsumer();
-      case _wsConsolesHitId:
+      case wsConsolesHitId:
         await _runQuickAction(MonitorAction.consolesGrid);
-      case _wsMoreHitId:
+      case wsMoreHitId:
         _modal = const WorkspaceModal();
         _clearPointer();
       case rangeHitId:

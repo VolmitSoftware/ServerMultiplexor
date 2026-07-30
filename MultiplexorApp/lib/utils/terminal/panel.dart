@@ -37,6 +37,8 @@ String _forceWidth(String text, int width) {
 /// own styling of [title] — it is measured with [Ansi.visibleLength] and
 /// clipped with [Ansi.clipVisible], so a caller-owned run (a gradient
 /// wordmark, say) keeps its escapes without breaking the width invariant.
+/// [styledBadge] does the same for the badge, which the panel otherwise
+/// paints faint: it is what lets a caller show the badge as hovered.
 ///
 /// If title and badge together overflow [width], the badge is dropped
 /// first. If the title alone still overflows, it is clipped to fit
@@ -46,6 +48,7 @@ String _buildTopBorder({
   required String title,
   required String? styledTitle,
   required String? badge,
+  required String? styledBadge,
   required int width,
   required MonitorTheme theme,
   required String borderTone,
@@ -62,14 +65,15 @@ String _buildTopBorder({
   final String inlay = styledTitle ?? theme.paint(title, titleTone);
 
   if (badge != null) {
+    final String badgeInlay = styledBadge ?? theme.paint(badge, theme.faint);
     final int fill =
-        width - 8 - Ansi.visibleLength(inlay) - Ansi.visibleLength(badge);
+        width - 8 - Ansi.visibleLength(inlay) - Ansi.visibleLength(badgeInlay);
     if (fill >= 0) {
       final StringBuffer buffer = StringBuffer()
         ..write(theme.paint('${glyphs.frameTl}${glyphs.frameH} ', borderTone))
         ..write(inlay)
         ..write(theme.paint(' ${glyphs.frameH * fill} ', borderTone))
-        ..write(theme.paint(badge, theme.faint))
+        ..write(badgeInlay)
         ..write(theme.paint(' ${glyphs.frameH}${glyphs.frameTr}', borderTone));
       return _forceWidth(buffer.toString(), width);
     }
@@ -105,6 +109,7 @@ List<String> renderPanel({
   required String title,
   String? styledTitle,
   String? badge,
+  String? styledBadge,
   required List<String> content,
   required int width,
   required MonitorTheme theme,
@@ -127,6 +132,7 @@ List<String> renderPanel({
       title: title,
       styledTitle: styledTitle,
       badge: badge,
+      styledBadge: styledBadge,
       width: safeWidth,
       theme: theme,
       borderTone: borderTone,

@@ -39,8 +39,16 @@ class InstanceFlags {
 }
 
 /// The flags of an instance nothing is known about: an instance whose row
-/// never made it into a capture is neither locked nor isolated, which is
-/// exactly what the card should offer to change.
+/// never made it into a capture is treated as neither locked nor isolated.
+///
+/// This fails open — an unread locked instance offers LOCK and keeps its
+/// destructive chips live — and that is deliberate. These flags decide what
+/// a *card* draws, not what a command permits: `instance delete` and
+/// `instance reset` both call `_ensureUnlocked` themselves, so a click that
+/// reaches a locked instance is refused at the command layer with its PIN
+/// prompt intact. Failing closed instead would mean a missed capture
+/// silently greys out working buttons and offers UNLOCK on an unlocked
+/// instance — a worse lie, and one nothing downstream corrects.
 const InstanceFlags _defaultFlags = InstanceFlags(
   locked: false,
   isolated: false,

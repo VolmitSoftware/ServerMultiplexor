@@ -957,6 +957,36 @@ void main() {
       expect(hitTest(frame.hitboxes, row: 6, col: chip.colStart), rangeHitId);
     });
 
+    test('gives the range chip accent feedback under the pointer', () {
+      final MonitorTheme color = MonitorTheme.detect(
+        env: <String, String>{'COLORTERM': 'truecolor'},
+        isTty: true,
+      );
+      String badgeRow({String? hoveredId}) => buildMonitorFrame(
+        snapshot: twoServers(),
+        selectedIndex: 0,
+        frame: 0,
+        columns: 132,
+        lines: 40,
+        theme: color,
+        range: range,
+        now: now,
+        hoveredId: hoveredId,
+      ).rows[6];
+
+      final String hovered = badgeRow(hoveredId: rangeHitId);
+      // Same text either way; only the badge's tone moves, and it moves to
+      // the accent the button chips use for hover.
+      expect(stripAll(<String>[hovered]), stripAll(<String>[badgeRow()]));
+      expect(hovered, contains('${color.bold}${color.accent}running · 15m'));
+      expect(badgeRow(), contains('${color.faint}running · 15m'));
+      expect(
+        badgeRow(hoveredId: '${serverHitPrefix}alpha'),
+        badgeRow(),
+        reason: 'a pointer somewhere else leaves the badge at rest',
+      );
+    });
+
     test('follows a deep selection to the end of the fleet', () {
       final MonitorSnapshot snapshot = manyServers();
       final MonitorFrame frame = frameOf(snapshot: snapshot, selectedIndex: 29);
@@ -1005,6 +1035,41 @@ void main() {
         isFalse,
       );
       expectChip(stripAll(frame.rows), frame.hitboxes, 38, 'ws:more', 'MORE');
+    });
+
+    // The bars and `monitor_screen.dart`'s activation switch are pinned to
+    // the same list of constants. These two assertions are the emitter half
+    // of that contract: everything drawn is a known id, and every known id
+    // is drawn somewhere. The dispatcher half is structural — the switch
+    // cases *are* these constants, so an id that survives here reaches an
+    // action by name rather than by a matching pair of string literals.
+    test('draws only ids from monitorBarHitIds', () {
+      final Set<String> drawn = <String>{
+        for (final MonitorFrame frame in <MonitorFrame>[
+          frameOf(snapshot: twoServers(), columns: 132, lines: 40),
+          frameOf(snapshot: mixedFleet(), selectedIndex: 1),
+          frameOf(snapshot: emptyWorkspace(), columns: 132, lines: 40),
+        ])
+          for (final MonitorHitbox hit in frame.hitboxes)
+            if (hit.kind == MonitorHitKind.button) hit.id,
+      };
+      expect(drawn.difference(monitorBarHitIds.toSet()), isEmpty);
+    });
+
+    test('draws every id in monitorBarHitIds across the bar states', () {
+      final Set<String> drawn = <String>{
+        for (final MonitorFrame frame in <MonitorFrame>[
+          // A running selection draws STOP/RESTART/CONSOLE, a stopped one
+          // draws START, and an empty workspace draws the `+ NEW` prompt —
+          // between them every chip the dashboard has.
+          frameOf(snapshot: twoServers(), columns: 132, lines: 40),
+          frameOf(snapshot: mixedFleet(), selectedIndex: 1),
+          frameOf(snapshot: emptyWorkspace(), columns: 132, lines: 40),
+        ])
+          for (final MonitorHitbox hit in frame.hitboxes)
+            if (hit.kind == MonitorHitKind.button) hit.id,
+      };
+      expect(monitorBarHitIds.toSet().difference(drawn), isEmpty);
     });
   });
 
