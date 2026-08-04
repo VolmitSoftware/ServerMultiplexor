@@ -7,8 +7,13 @@ import 'ansi.dart';
 /// Terminal color capability, from no color at all through 24-bit truecolor.
 enum ColorDepth { none, basic, ansi256, truecolor }
 
-/// Named color ramps used for continuous data (load) and the brand wordmark.
-enum MonitorRamp { load, title }
+/// Named color ramps used for continuous data and the brand wordmark.
+///
+/// [load] reads as a temperature — calm at 0, crit at 1 — for readings where
+/// high is bad (CPU, memory). [tps] is the same ramp reversed, for readings
+/// where high is health: a full tick rate is calm green and a collapsing one
+/// falls toward crit.
+enum MonitorRamp { load, tps, title }
 
 /// Resolves the terminal color depth from the environment. Never guesses up:
 /// an unrecognized or absent hint falls back to the safest usable depth.
@@ -206,6 +211,10 @@ class _Ramps {
     ToneToken(rgb: <int>[224, 82, 92], ansi256: 167, basic: 1),
   ];
 
+  /// [load] backwards: health rather than heat, for TPS. Derived rather
+  /// than authored so the two ramps can never drift apart stop by stop.
+  static final List<ToneToken> tps = load.reversed.toList(growable: false);
+
   /// Brand wordmark ramp: cyan through to blue.
   static const List<ToneToken> title = <ToneToken>[
     ToneToken(rgb: <int>[0, 255, 255], ansi256: 51, basic: 6),
@@ -219,6 +228,7 @@ class _Ramps {
 
   static List<ToneToken> forRamp(MonitorRamp ramp) => switch (ramp) {
     MonitorRamp.load => load,
+    MonitorRamp.tps => tps,
     MonitorRamp.title => title,
   };
 }

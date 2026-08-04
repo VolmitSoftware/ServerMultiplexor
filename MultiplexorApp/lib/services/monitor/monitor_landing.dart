@@ -1,6 +1,6 @@
 /// The landing view's panels: the fleet roll-up every card reads, the KPI
-/// strip across the top, the slim server list, the big selected-server panel
-/// and the empty-workspace prompt.
+/// strip across the top, the full-width fleet table, the compact
+/// selected-server card and the empty-workspace prompt.
 ///
 /// `monitor_model.dart` owns the frame's row budget and composes these into
 /// one frame; each function here renders one block of exactly the size it is
@@ -22,11 +22,28 @@ import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
 
-/// Width of the slim server list, and the columns its name field gets: the
-/// panel's four columns of chrome, the selector, the status bullet and the
-/// single space on either side of the name.
-const int serverListWidth = 28;
-const int _serverNameColumn = serverListWidth - 8;
+/// Columns the fleet table spends left of its first column: the selector,
+/// the status bullet and the space after each.
+const int _tablePrefix = 4;
+
+/// Columns between adjacent fleet-table columns.
+const int _tableGap = 2;
+
+/// The fleet table's fixed column widths. NAME, STATE and TPS always render;
+/// the rest give way whole — a clipped reading hides data without admitting
+/// to it — in [_tableDropOrder] as the terminal narrows.
+const int _colNameWidth = 20;
+const int _colStateWidth = 10;
+const int _colPlayersWidth = 7;
+const int _colTpsWidth = 5;
+const int _colTrendWidth = 14;
+const int _colMemWidth = 6;
+const int _colCpuWidth = 5;
+const int _colUpWidth = 7;
+
+/// Cells the trend sparkline may grow to when a wide terminal leaves slack;
+/// past this a typical window no longer fills it.
+const int _maxTrendCells = 26;
 
 /// The KPI strip's fleet card. The brief sizes it by its content —
 /// `N/M UP · P PLAYERS`, 18 columns at one digit per count — and a panel
@@ -63,17 +80,12 @@ const int _kpiMaxSparkCells = 48;
 const int _kpiHostFixed = 12;
 const int _kpiMaxMeterCells = 16;
 
-/// Columns the selected-server panel's meter row spends outside its two
-/// meters and its two readings (`MEM `, a space, `  CPU `, a space), and the
-/// ceiling on each meter. Sized against the rendered readings for the same
-/// reason as [_kpiHostFixed].
-const int _panelMetersFixed = 12;
-const int _panelMeterCells = 14;
-
-/// Content rows the selected-server panel keeps for its chart at minimum,
-/// and the rows below it: a blank, the meter row and the facts row.
+/// Rows the selected-server card keeps for its charts at minimum (three plot
+/// rows and the time axis), the narrowest chart the card lays side by side,
+/// and the gap between adjacent charts.
 const int _minChartRows = 4;
-const int _panelTrailerRows = 3;
+const int _minChartWidth = 36;
+const int _chartGap = 2;
 
 /// A rendered block plus the clickable regions drawn on it, in absolute
 /// frame coordinates.
@@ -274,7 +286,7 @@ List<String> renderKpiStrip({
   );
   final String tps =
       '${theme.paint((meanTps == null ? 'n/a' : meanTps.toStringAsFixed(1)).padLeft(4), theme.tpsTone(meanTps))} '
-      '${renderSparkline(values: rollup.tpsSeries, width: sparkCells, theme: theme, min: 0, max: 20)}';
+      '${renderSparkline(values: rollup.tpsSeries, width: sparkCells, theme: theme, min: 0, max: 20, ramp: MonitorRamp.tps)}';
 
   final int? rssSum = rollup.rssSum;
   final int? peakRssSum = rollup.peakRssSum;
@@ -318,37 +330,129 @@ List<String> renderKpiStrip({
   ]);
 }
 
-/// The slim server list: one `▸ name ●` row per instance the panel can show,
-/// exactly [rows] rows tall (borders included), with a server-row hitbox
-/// under every instance row.
+/// One column of the fleet table.
+enum _TableColumn { name, state, players, tps, trend, mem, cpu, up }
+
+/// The column headers, and which columns right-align (the numeric readings,
+/// so their units line up down the table).
+const Map<_TableColumn, String> _tableHeaders = <_TableColumn, String>{
+  _TableColumn.name: 'NAME',
+  _TableColumn.state: 'STATE',
+  _TableColumn.players: 'PLAYERS',
+  _TableColumn.tps: 'TPS',
+  _TableColumn.trend: 'TREND',
+  _TableColumn.mem: 'MEM',
+  _TableColumn.cpu: 'CPU',
+  _TableColumn.up: 'UP',
+};
+const Set<_TableColumn> _rightAligned = <_TableColumn>{
+  _TableColumn.players,
+  _TableColumn.tps,
+  _TableColumn.mem,
+  _TableColumn.cpu,
+  _TableColumn.up,
+};
+
+/// The order columns give way in when the terminal cannot hold them all.
+/// The trend goes first: the selected card carries the real charts, and a
+/// sparkline is the one cell whose loss hides no number.
+const List<_TableColumn> _tableDropOrder = <_TableColumn>[
+  _TableColumn.trend,
+  _TableColumn.up,
+  _TableColumn.cpu,
+  _TableColumn.mem,
+  _TableColumn.players,
+];
+
+/// The columns that fit in [inner] and their widths: fixed widths, dropped
+/// whole in [_tableDropOrder] until the row fits, with a wide terminal's
+/// slack going to the trend sparkline (up to [_maxTrendCells]).
+({List<_TableColumn> columns, Map<_TableColumn, int> widths}) _planTable(
+  int inner,
+) {
+  final Map<_TableColumn, int> widths = <_TableColumn, int>{
+    _TableColumn.name: _colNameWidth,
+    _TableColumn.state: _colStateWidth,
+    _TableColumn.players: _colPlayersWidth,
+    _TableColumn.tps: _colTpsWidth,
+    _TableColumn.trend: _colTrendWidth,
+    _TableColumn.mem: _colMemWidth,
+    _TableColumn.cpu: _colCpuWidth,
+    _TableColumn.up: _colUpWidth,
+  };
+  final List<_TableColumn> columns = _TableColumn.values.toList();
+
+  int needed() {
+    int total = _tablePrefix + _tableGap * (columns.length - 1);
+    for (final _TableColumn column in columns) {
+      total += widths[column]!;
+    }
+    return total;
+  }
+
+  for (final _TableColumn drop in _tableDropOrder) {
+    if (needed() <= inner) {
+      break;
+    }
+    columns.remove(drop);
+  }
+
+  if (columns.contains(_TableColumn.trend)) {
+    final int slack = inner - needed();
+    if (slack > 0) {
+      widths[_TableColumn.trend] = _clampInt(
+        _colTrendWidth + slack,
+        _colTrendWidth,
+        _maxTrendCells,
+      );
+    }
+  }
+
+  return (columns: columns, widths: widths);
+}
+
+/// The full-width fleet table: a faint column-header row, then one reading
+/// row per instance the panel can show, exactly [rows] rows tall (borders
+/// included), with a full-width server-row hitbox under every instance row.
 ///
 /// A fleet taller than the panel scrolls: the window follows the selection,
 /// and each clipped end spends one row on a faint `+N more` marker. A marker
-/// is a label, not a target, so it gets no hitbox.
+/// is a label, not a target, so it gets no hitbox. Rows the fleet does not
+/// need stay blank — an empty table viewport, not a fabricated reading.
 MonitorPanelRender renderServerList({
   required MonitorSnapshot snapshot,
   required MonitorRollup rollup,
   required int selectedIndex,
   required int rows,
+  required int width,
   required int topRow,
   required MonitorTheme theme,
+  required DateTime windowStart,
+  required DateTime windowEnd,
   String? hoveredId,
 }) {
   final int contentRows = rows < 2 ? 0 : rows - 2;
+  final int inner = width - 4 < 0 ? 0 : width - 4;
   final int total = snapshot.instances.length;
+  final ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan =
+      _planTable(inner);
 
-  int slots = contentRows;
+  // The header row comes out of the content budget first: a table whose
+  // columns nothing names is a guessing game.
+  final int serverArea = contentRows < 1 ? 0 : contentRows - 1;
+
+  int slots = serverArea;
   int offset = 0;
-  if (total > contentRows) {
+  if (total > serverArea) {
     // Something is always clipped, so at least one row goes to a marker; a
     // window with fleet on both sides needs two.
-    slots = contentRows - 1;
+    slots = serverArea - 1;
     offset = _windowOffset(selectedIndex, slots, total);
     if (offset > 0 && offset + slots < total) {
-      slots = contentRows - 2;
+      slots = serverArea - 2;
       offset = _windowOffset(selectedIndex, slots, total);
     }
-    if (slots < 1 && contentRows > 0) {
+    if (slots < 1 && serverArea > 0) {
       // A panel too short for a window and its markers still shows the
       // selection: the row the user is on outranks the note saying there is
       // more of the fleet elsewhere.
@@ -363,7 +467,7 @@ MonitorPanelRender renderServerList({
 
   // Markers are drawn only out of rows the window itself did not need, so
   // the panel can never be handed more content than it has room for.
-  int spare = contentRows - (end - offset);
+  int spare = serverArea - (end - offset);
   bool above = offset > 0 && spare > 0;
   if (above) {
     spare -= 1;
@@ -372,6 +476,9 @@ MonitorPanelRender renderServerList({
 
   final List<String> content = <String>[];
   final List<MonitorHitbox> hitboxes = <MonitorHitbox>[];
+  if (contentRows > 0) {
+    content.add(_tableHeaderRow(plan: plan, theme: theme));
+  }
   if (above) {
     content.add(theme.paint('+$offset more', theme.faint));
   }
@@ -383,17 +490,21 @@ MonitorPanelRender renderServerList({
         kind: MonitorHitKind.serverRow,
         row: topRow + 1 + content.length,
         colStart: 0,
-        colEnd: serverListWidth,
+        colEnd: width,
       ),
     );
     content.add(
-      _serverListRow(
+      _serverTableRow(
+        plan: plan,
         instance: instance,
         latest: snapshot.latestFor(instance),
+        history: snapshot.historyFor(instance),
         selected: index == selectedIndex,
         hovered: hoveredId == '$serverHitPrefix$instance',
         active: instance == snapshot.activeInstance,
         theme: theme,
+        windowStart: windowStart,
+        windowEnd: windowEnd,
       ),
     );
   }
@@ -409,7 +520,7 @@ MonitorPanelRender renderServerList({
       title: 'SERVERS',
       badge: '${rollup.up}/${rollup.total} UP',
       content: content,
-      width: serverListWidth,
+      width: width,
       theme: theme,
       emphasis: PanelEmphasis.active,
     ),
@@ -417,8 +528,170 @@ MonitorPanelRender renderServerList({
   );
 }
 
-/// The selected-server panel: a forced `0..20` TPS chart over the window,
-/// then a memory/CPU meter row and a facts row.
+/// The table's column-header row, faint, aligned exactly as the reading
+/// rows below it are.
+String _tableHeaderRow({
+  required ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan,
+  required MonitorTheme theme,
+}) {
+  final StringBuffer row = StringBuffer(' ' * _tablePrefix);
+  for (int index = 0; index < plan.columns.length; index++) {
+    if (index > 0) {
+      row.write(' ' * _tableGap);
+    }
+    final _TableColumn column = plan.columns[index];
+    row.write(
+      _fitCell(
+        _tableHeaders[column]!,
+        plan.widths[column]!,
+        right: _rightAligned.contains(column),
+      ),
+    );
+  }
+  return theme.paint(row.toString(), theme.faint);
+}
+
+/// One reading row of the fleet table: `▸ ● name  state  …`. The selector
+/// marks the selection and the hovered row alike; the name is strong for
+/// the selection and the workspace's active instance; every missing reading
+/// is the dash glyph, never a zero.
+String _serverTableRow({
+  required ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan,
+  required String instance,
+  required MetricSample? latest,
+  required List<MetricSample> history,
+  required bool selected,
+  required bool hovered,
+  required bool active,
+  required MonitorTheme theme,
+  required DateTime windowStart,
+  required DateTime windowEnd,
+}) {
+  final MonitorGlyphs glyphs = theme.glyphs;
+  final RuntimeState? state = latest?.state;
+  final bool live = state != null && state != RuntimeState.stopped;
+  final String dash = glyphs.dash;
+
+  final String selector = selected || hovered
+      ? theme.paint(glyphs.selector, theme.accent)
+      : ' ';
+  final String bullet = live
+      ? theme.paint(glyphs.bulletOn, theme.statusTone(state))
+      : theme.paint(glyphs.bulletOff, theme.faint);
+
+  final StringBuffer row = StringBuffer('$selector $bullet ');
+  for (int index = 0; index < plan.columns.length; index++) {
+    if (index > 0) {
+      row.write(' ' * _tableGap);
+    }
+    final _TableColumn column = plan.columns[index];
+    final int cellWidth = plan.widths[column]!;
+    switch (column) {
+      case _TableColumn.name:
+        final String tone = selected || active
+            ? theme.textStrong
+            : (live ? theme.text : theme.faint);
+        row.write(theme.paint(_fitCell(instance, cellWidth), tone));
+      case _TableColumn.state:
+        final String tone = live ? theme.statusTone(state) : theme.faint;
+        row.write(theme.paint(_fitCell(monitorStateText(latest), cellWidth), tone));
+      case _TableColumn.players:
+        final String text = monitorPlayersText(latest, theme);
+        final String tone = latest?.players == null ? theme.faint : theme.text;
+        row.write(theme.paint(_fitCell(text, cellWidth, right: true), tone));
+      case _TableColumn.tps:
+        final double? tps = latest?.tps;
+        row.write(
+          theme.paint(
+            _fitCell(monitorTpsText(tps, theme), cellWidth, right: true),
+            theme.tpsTone(tps),
+          ),
+        );
+      case _TableColumn.trend:
+        row.write(
+          _trendCell(
+            history: history,
+            cells: cellWidth,
+            theme: theme,
+            windowStart: windowStart,
+            windowEnd: windowEnd,
+          ),
+        );
+      case _TableColumn.mem:
+        final int? rss = latest?.rssBytes;
+        row.write(
+          theme.paint(
+            _fitCell(rss == null ? dash : formatBytes(rss), cellWidth,
+                right: true),
+            rss == null ? theme.faint : theme.text,
+          ),
+        );
+      case _TableColumn.cpu:
+        final double? cpu = latest?.cpuPercent;
+        row.write(
+          theme.paint(
+            _fitCell(cpu == null ? dash : _wholePercent(cpu), cellWidth,
+                right: true),
+            cpu == null ? theme.faint : theme.text,
+          ),
+        );
+      case _TableColumn.up:
+        final int? uptime = latest?.uptimeSeconds;
+        row.write(
+          theme.paint(
+            _fitCell(
+              uptime == null
+                  ? dash
+                  : formatCompactDuration(Duration(seconds: uptime)),
+              cellWidth,
+              right: true,
+            ),
+            uptime == null ? theme.faint : theme.text,
+          ),
+        );
+    }
+  }
+  return row.toString();
+}
+
+/// One instance's trend sparkline over the window: its TPS when it has any
+/// (pinned `0..20`), otherwise its CPU (pinned `0..100`, the reading a mod
+/// server without RCON still has). A window with neither renders gaps.
+String _trendCell({
+  required List<MetricSample> history,
+  required int cells,
+  required MonitorTheme theme,
+  required DateTime windowStart,
+  required DateTime windowEnd,
+}) {
+  final List<double?> tps = <double?>[];
+  final List<double?> cpu = <double?>[];
+  bool anyTps = false;
+  for (final MetricSample sample in history) {
+    if (sample.ts.isBefore(windowStart) || sample.ts.isAfter(windowEnd)) {
+      continue;
+    }
+    if (sample.tps != null) {
+      anyTps = true;
+    }
+    tps.add(sample.tps);
+    cpu.add(sample.cpuPercent);
+  }
+  return renderSparkline(
+    values: anyTps ? tps : cpu,
+    width: cells,
+    theme: theme,
+    min: 0,
+    max: anyTps ? 20 : 100,
+    ramp: anyTps ? MonitorRamp.tps : MonitorRamp.load,
+  );
+}
+
+/// The selected-server card: compact, and sized by `monitor_model.dart` to
+/// the selection's own state — a live server gets small charts side by side
+/// (TPS when the window has any, then CPU and memory as the width allows)
+/// over a facts row; a stopped or unsampled one gets a single quiet line,
+/// because there is nothing live to plot.
 ///
 /// The badge — `<state> · <range>` — is a range chip: clicking it cycles the
 /// window, exactly as `r` does. It only becomes a target when the panel is
@@ -445,46 +718,19 @@ MonitorPanelRender renderSelectedPanel({
 
   final int contentRows = rows < 2 ? 0 : rows - 2;
   final int inner = width - 4 < 0 ? 0 : width - 4;
+  final bool live = latest != null && latest.state != RuntimeState.stopped;
 
-  // The facts row is the first thing a tight panel gives up, then the meter
-  // row; the chart is the panel's reason to exist. Unreachable at any size
-  // the frame floor admits (24 lines leave 12 content rows) — it is here so
-  // a future row budget cannot silently produce a broken panel.
-  int trailer = _panelTrailerRows;
-  if (contentRows - trailer < _minChartRows) {
-    trailer = _panelTrailerRows - 1;
-  }
-  if (contentRows - trailer < _minChartRows) {
-    trailer = 0;
-  }
-  final int chartRows = contentRows - trailer;
-
-  final List<String> content = <String>[
-    ...renderBrailleChart(
-      series: <ChartSeries>[
-        ChartSeries(
-          label: 'tps',
-          points: <ChartPoint>[
-            for (final MetricSample sample in history)
-              ChartPoint(ts: sample.ts, value: sample.tps),
-          ],
-        ),
-      ],
-      width: inner,
-      height: chartRows,
-      start: now.subtract(range),
-      end: now,
-      theme: theme,
-      forcedLow: 0,
-      forcedHigh: 20,
-    ),
-    if (trailer > 0) ...<String>[
-      '',
-      _metersRow(latest: latest, history: history, inner: inner, theme: theme),
-    ],
-    if (trailer > _panelTrailerRows - 1)
-      _factsRow(latest: latest, inner: inner, theme: theme),
-  ];
+  final List<String> content = live
+      ? _liveCard(
+          history: history,
+          latest: latest,
+          inner: inner,
+          contentRows: contentRows,
+          theme: theme,
+          range: range,
+          now: now,
+        )
+      : <String>[if (contentRows > 0) _idleRow(latest: latest, theme: theme)];
   while (content.length < contentRows) {
     content.add('');
   }
@@ -519,6 +765,174 @@ MonitorPanelRender renderSelectedPanel({
           ]
         : const <MonitorHitbox>[],
   );
+}
+
+/// The live card's content: a faint label row, up to three small charts side
+/// by side, a blank, and the facts row. When the rows are not there the card
+/// gives its trimmings up in that order — blank first, then facts, then the
+/// labels — because the charts are the card's reason to exist.
+List<String> _liveCard({
+  required List<MetricSample> history,
+  required MetricSample latest,
+  required int inner,
+  required int contentRows,
+  required MonitorTheme theme,
+  required Duration range,
+  required DateTime now,
+}) {
+  bool labels = true;
+  bool blank = true;
+  bool facts = true;
+  int chartRows = contentRows - 3;
+  if (chartRows < _minChartRows) {
+    blank = false;
+    chartRows = contentRows - 2;
+  }
+  if (chartRows < _minChartRows) {
+    facts = false;
+    chartRows = contentRows - 1;
+  }
+  if (chartRows < _minChartRows) {
+    labels = false;
+    chartRows = contentRows;
+  }
+  if (chartRows < 0) {
+    chartRows = 0;
+  }
+
+  final DateTime start = now.subtract(range);
+  bool anyTps = false;
+  for (final MetricSample sample in history) {
+    if (sample.tps != null &&
+        !sample.ts.isBefore(start) &&
+        !sample.ts.isAfter(now)) {
+      anyTps = true;
+      break;
+    }
+  }
+
+  final List<
+    ({
+      String title,
+      List<ChartPoint> points,
+      double? low,
+      double? high,
+      MonitorRamp ramp,
+    })
+  >
+  candidates = <
+    ({
+      String title,
+      List<ChartPoint> points,
+      double? low,
+      double? high,
+      MonitorRamp ramp,
+    })
+  >[
+    if (anyTps)
+      (
+        title: 'TPS',
+        points: _chartPoints(history, (MetricSample s) => s.tps),
+        low: 0,
+        high: 20,
+        ramp: MonitorRamp.tps,
+      ),
+    (
+      title: 'CPU %',
+      points: _chartPoints(history, (MetricSample s) => s.cpuPercent),
+      low: 0,
+      high: 100,
+      ramp: MonitorRamp.load,
+    ),
+    (
+      title: 'MEM MiB',
+      points: _chartPoints(
+        history,
+        (MetricSample s) =>
+            s.rssBytes == null ? null : s.rssBytes! / 1048576,
+      ),
+      low: null,
+      high: null,
+      ramp: MonitorRamp.load,
+    ),
+  ];
+
+  int fit = 1;
+  for (int count = candidates.length; count >= 1; count--) {
+    if (count * _minChartWidth + (count - 1) * _chartGap <= inner) {
+      fit = count;
+      break;
+    }
+  }
+  final List<int> widths = List<int>.generate(fit, (int index) {
+    final int base = (inner - _chartGap * (fit - 1)) ~/ fit;
+    if (index < fit - 1) {
+      return base;
+    }
+    return inner - _chartGap * (fit - 1) - base * (fit - 1);
+  });
+
+  final List<String> content = <String>[];
+  if (labels) {
+    final StringBuffer labelRow = StringBuffer();
+    for (int index = 0; index < fit; index++) {
+      if (index > 0) {
+        labelRow.write(' ' * _chartGap);
+      }
+      labelRow.write(_fitCell(candidates[index].title, widths[index]));
+    }
+    content.add(theme.paint(labelRow.toString(), theme.muted));
+  }
+  content.addAll(
+    joinBlocks(<List<String>>[
+      for (int index = 0; index < fit; index++)
+        renderBrailleChart(
+          series: <ChartSeries>[
+            ChartSeries(
+              label: candidates[index].title,
+              points: candidates[index].points,
+            ),
+          ],
+          width: widths[index],
+          height: chartRows,
+          start: start,
+          end: now,
+          theme: theme,
+          forcedLow: candidates[index].low,
+          forcedHigh: candidates[index].high,
+          ramp: candidates[index].ramp,
+        ),
+    ], gap: ' ' * _chartGap),
+  );
+  if (blank) {
+    content.add('');
+  }
+  if (facts) {
+    content.add(_factsRow(latest: latest, inner: inner, theme: theme));
+  }
+  return content;
+}
+
+/// Maps [history] to chart points via [read], keeping nulls as gaps.
+List<ChartPoint> _chartPoints(
+  List<MetricSample> history,
+  double? Function(MetricSample sample) read,
+) => <ChartPoint>[
+  for (final MetricSample sample in history)
+    ChartPoint(ts: sample.ts, value: read(sample)),
+];
+
+/// The idle card's one line: the state in its own tone, and what would bring
+/// the server to life — no fabricated facts, no empty chart grid.
+String _idleRow({required MetricSample? latest, required MonitorTheme theme}) {
+  final String state = monitorStateText(latest);
+  final String tone = latest == null
+      ? theme.faint
+      : theme.statusTone(latest.state);
+  final String hint = latest == null
+      ? 'waiting for a first sample'
+      : 'START to launch';
+  return '${theme.paint(state, tone)}${theme.paint(' · $hint', theme.faint)}';
 }
 
 /// The body of a workspace with nothing in it: a centered prompt over a
@@ -586,74 +1000,7 @@ MonitorPanelRender renderEmptyBody({
 /// prompt so both routes carry the same id.
 const ButtonSpec newInstanceButton = ButtonSpec(id: wsNewHitId, label: '+ NEW');
 
-/// One row of the slim list: `▸ name ●`. The selector marks the selection
-/// and the hovered row alike; the name is strong for the selection and the
-/// workspace's active instance; a stopped instance's whole row goes faint,
-/// because there is nothing live about it to read.
-String _serverListRow({
-  required String instance,
-  required MetricSample? latest,
-  required bool selected,
-  required bool hovered,
-  required bool active,
-  required MonitorTheme theme,
-}) {
-  final MonitorGlyphs glyphs = theme.glyphs;
-  final RuntimeState? state = latest?.state;
-  final bool live = state != null && state != RuntimeState.stopped;
-
-  final String selector = selected || hovered
-      ? theme.paint(glyphs.selector, theme.accent)
-      : ' ';
-  final String nameTone = selected || active
-      ? theme.textStrong
-      : (live ? theme.text : theme.faint);
-  final String name = theme.paint(_fit(instance, _serverNameColumn), nameTone);
-  final String bullet = live
-      ? theme.paint(glyphs.bulletOn, theme.statusTone(state))
-      : theme.paint(glyphs.bulletOff, theme.faint);
-
-  return '$selector $name $bullet';
-}
-
-/// The selected-server panel's meter row: memory against the largest reading
-/// in this instance's window, and CPU against one whole core.
-String _metersRow({
-  required MetricSample? latest,
-  required List<MetricSample> history,
-  required int inner,
-  required MonitorTheme theme,
-}) {
-  int? peakRss;
-  for (final MetricSample sample in history) {
-    final int? seen = sample.rssBytes;
-    if (seen != null && (peakRss == null || seen > peakRss)) {
-      peakRss = seen;
-    }
-  }
-  final int? rss = latest?.rssBytes;
-  final double? memFraction = rss == null || peakRss == null || peakRss <= 0
-      ? null
-      : rss / peakRss;
-  final double? cpu = latest?.cpuPercent;
-  final double? cpuFraction = cpu == null
-      ? null
-      : (cpu / 100).clamp(0.0, 1.0).toDouble();
-  final String memText = formatBytes(rss);
-  final String cpuText = formatCpuPercent(cpu);
-  final int cells = _clampInt(
-    (inner - _panelMetersFixed - memText.length - cpuText.length) ~/ 2,
-    0,
-    _panelMeterCells,
-  );
-
-  return 'MEM ${renderMeter(fraction: memFraction, cells: cells, theme: theme)} '
-      '${theme.paint(memText, rss == null ? theme.faint : theme.text)}'
-      '  CPU ${renderMeter(fraction: cpuFraction, cells: cells, theme: theme)} '
-      '${theme.paint(cpuText, cpu == null ? theme.faint : theme.text)}';
-}
-
-/// The selected-server panel's facts row. A fact leaves whole when the row
+/// The selected-server card's facts row. A fact leaves whole when the row
 /// runs out of columns — a clipped fact hides a reading without admitting to
 /// it — and every missing reading is a dash or an `n/a`, never a zero.
 String _factsRow({
@@ -669,6 +1016,8 @@ String _factsRow({
     'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}',
     '${monitorPlayersText(latest, theme)} PLAYERS',
     'PING ${latency == null ? 'n/a' : '${latency}ms'}',
+    'MEM ${formatBytes(latest?.rssBytes)}',
+    'CPU ${formatCpuPercent(latest?.cpuPercent)}',
     version == null || version.isEmpty ? theme.glyphs.dash : version,
   ];
   while (facts.length > 1 && facts.join(' · ').length > inner) {
@@ -692,13 +1041,19 @@ int _windowOffset(int selected, int slots, int total) {
 }
 
 /// [percent] rounded to a whole percent, or `n/a` when there is no reading.
-/// The KPI strip trades the decimal place for the columns it costs.
+/// The KPI strip and the fleet table trade the decimal place for the columns
+/// it costs.
 String _wholePercent(double? percent) =>
     percent == null ? 'n/a' : '${percent.round()}%';
 
-/// Clips or pads the already-plain [text] to exactly [width] columns.
-String _fit(String text, int width) =>
-    text.length > width ? text.substring(0, width) : text.padRight(width);
+/// Clips or pads the already-plain [text] to exactly [width] columns,
+/// left-aligned unless [right].
+String _fitCell(String text, int width, {bool right = false}) {
+  if (text.length > width) {
+    return text.substring(0, width);
+  }
+  return right ? text.padLeft(width) : text.padRight(width);
+}
 
 /// Centers [painted] (whose visible width is [visible]) in [width] columns.
 String _center(String painted, int visible, int width) => visible >= width

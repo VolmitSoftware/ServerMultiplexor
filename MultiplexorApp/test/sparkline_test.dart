@@ -367,6 +367,30 @@ void main() {
         '$high${_glyphAt(MonitorGlyphs.unicode.spark, 7)}${truecolor.reset}',
       );
     });
+
+    test('a tps sparkline paints its ceiling green and its floor hot', () {
+      final String rendered = renderSparkline(
+        values: <double?>[0, 20],
+        width: 2,
+        theme: truecolor,
+        min: 0,
+        max: 20,
+        ramp: MonitorRamp.tps,
+      );
+      final String dying = truecolor.rampTone(MonitorRamp.tps, 0);
+      final String healthy = truecolor.rampTone(MonitorRamp.tps, 1);
+      expect(
+        rendered,
+        '$dying${_glyphAt(MonitorGlyphs.unicode.spark, 0)}${truecolor.reset}'
+        '$healthy${_glyphAt(MonitorGlyphs.unicode.spark, 7)}${truecolor.reset}',
+      );
+      expect(
+        healthy,
+        truecolor.rampTone(MonitorRamp.load, 0),
+        reason: 'a full tick rate is the calm green end of the ramp',
+      );
+      expect(dying, truecolor.crit, reason: 'a dead tick rate is crit');
+    });
   });
 
   // MonitorTheme exposes only plain() and detect(), both hardcoded to

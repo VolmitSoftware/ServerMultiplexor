@@ -632,6 +632,33 @@ void main() {
       expect(rows[rows.length - 2].contains(coolest), isTrue);
     });
 
+    test('a tps chart paints its ceiling calm and its floor hot', () {
+      // TPS is health, not heat: the 20-TPS line at the top of the plot is
+      // the green end of the ramp, and a sagging line heats up as it falls.
+      final MonitorTheme theme = MonitorTheme.detect(
+        env: <String, String>{'COLORTERM': 'truecolor'},
+        isTty: true,
+      );
+      final List<String> rows = renderBrailleChart(
+        series: <ChartSeries>[
+          ChartSeries(label: 'tps', points: _ramp(count: 60)),
+        ],
+        width: 40,
+        height: 8,
+        start: _windowStart,
+        end: _windowEnd,
+        theme: theme,
+        forcedLow: 0,
+        forcedHigh: 59,
+        ramp: MonitorRamp.tps,
+      );
+      expect(rows.first.contains(theme.rampTone(MonitorRamp.load, 0)), isTrue);
+      expect(
+        rows[rows.length - 2].contains(theme.rampTone(MonitorRamp.load, 1)),
+        isTrue,
+      );
+    });
+
     test('adjacent cells sharing a tone share one escape sequence', () {
       final MonitorTheme theme = MonitorTheme.detect(
         env: <String, String>{'COLORTERM': 'truecolor'},

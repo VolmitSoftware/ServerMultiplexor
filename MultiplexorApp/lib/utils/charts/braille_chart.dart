@@ -100,9 +100,11 @@ class _CellOverride {
 /// [MonitorGlyphs.latest] painted [MonitorTheme.accent].
 ///
 /// Cell precedence is: override glyph, then braille ink, then event, then
-/// grid, then space. Ink is painted by the [MonitorRamp.load] gradient (single
-/// series, hot at the top) or by owning series (multi-series, mixed cells
-/// neutral); adjacent cells sharing a tone share one escape sequence.
+/// grid, then space. Ink is painted by the [ramp] gradient (single series;
+/// [MonitorRamp.load] by default, hot at the top — [MonitorRamp.tps] inverts
+/// that for readings where high is health) or by owning series (multi-series,
+/// mixed cells neutral); adjacent cells sharing a tone share one escape
+/// sequence.
 ///
 /// When there is no data to draw — no series, all samples null, all samples
 /// outside the window, or a non-positive window — the frame still renders with
@@ -122,6 +124,7 @@ List<String> renderBrailleChart({
   double? forcedLow,
   double? forcedHigh,
   List<DateTime> events = const <DateTime>[],
+  MonitorRamp ramp = MonitorRamp.load,
 }) {
   final int outWidth = width < 0 ? 0 : width;
   final int outHeight = height < 0 ? 0 : height;
@@ -355,7 +358,7 @@ List<String> renderBrailleChart({
             ? theme.glyphs.meterFull
             : String.fromCharCode(0x2800 + mask[index]);
         if (single) {
-          tone = theme.rampTone(MonitorRamp.load, 1 - cellY / (plotRows - 1));
+          tone = theme.rampTone(ramp, 1 - cellY / (plotRows - 1));
         } else if (owner[index] == _ownerMixed) {
           tone = theme.textStrong;
         } else {

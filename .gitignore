@@ -6,6 +6,7 @@
 *.iml
 
 # AI tooling artifacts (apply anywhere in repo)
+docs/superpowers/
 .claude/
 .claude_context/
 claude.md

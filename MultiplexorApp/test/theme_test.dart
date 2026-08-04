@@ -590,6 +590,20 @@ void main() {
       expect(theme.rampTone(MonitorRamp.load, 1.0), theme.crit);
     });
 
+    test('the tps ramp runs the load ramp backwards: full TPS is calm', () {
+      // A TPS reading is health, not heat: 20 sits at the ramp's green end
+      // and a collapsing tick rate falls toward crit.
+      final MonitorTheme theme = MonitorTheme.detect(
+        env: <String, String>{'COLORTERM': 'truecolor'},
+        isTty: true,
+      );
+      expect(
+        theme.rampTone(MonitorRamp.tps, 1.0),
+        theme.rampTone(MonitorRamp.load, 0.0),
+      );
+      expect(theme.rampTone(MonitorRamp.tps, 0.0), theme.crit);
+    });
+
     test('rampTone(load, 1.0) equals the crit encoding at ansi256 depth', () {
       final MonitorTheme theme = MonitorTheme.detect(
         env: <String, String>{'TERM': 'xterm-256color'},

@@ -55,8 +55,9 @@ enum SparkAggregate {
 
 /// Renders [values] as a fixed-width sparkline, one glyph per cell from
 /// [MonitorGlyphs.spark] (an 8-step intensity ramp), each non-null cell
-/// painted [MonitorRamp.load] by its normalized value. Missing samples
-/// (`null`) never render as a fabricated zero; they render
+/// painted [ramp] by its normalized value — [MonitorRamp.load] by default,
+/// [MonitorRamp.tps] for readings where high is health rather than heat.
+/// Missing samples (`null`) never render as a fabricated zero; they render
 /// [MonitorGlyphs.sparkGap] painted [MonitorTheme.faint].
 ///
 /// - When `values.length > width`, samples are bucket-downsampled: bucket
@@ -79,6 +80,7 @@ String renderSparkline({
   double? min,
   double? max,
   SparkAggregate aggregate = SparkAggregate.mean,
+  MonitorRamp ramp = MonitorRamp.load,
 }) {
   if (width <= 0) {
     return '';
@@ -114,7 +116,7 @@ String renderSparkline({
     );
     final String tone = value == null
         ? theme.faint
-        : theme.rampTone(MonitorRamp.load, cell.fraction);
+        : theme.rampTone(ramp, cell.fraction);
     output.write(theme.paint(cell.glyph, tone));
   }
   return output.toString();

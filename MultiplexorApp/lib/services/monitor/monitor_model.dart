@@ -27,6 +27,19 @@ const int _kpiRows = 3;
 const int _barRows = 1;
 const int _footerRows = 1;
 
+/// How the body splits between the fleet table and the selected-server card.
+///
+/// The card is sized to the selection's own state, and the table absorbs the
+/// rest: an idle selection has nothing to plot, so its card is one quiet
+/// line ([_idleCardRows]); a live one expands into charts, growing from
+/// [_minLiveCardRows] toward [_maxLiveCardRows] with whatever rows the whole
+/// fleet does not need, and never pushing the table below [_minListRows]
+/// (its borders, the column header and one instance row).
+const int _minListRows = 4;
+const int _idleCardRows = 3;
+const int _minLiveCardRows = 9;
+const int _maxLiveCardRows = 15;
+
 /// Separator between footer hints.
 const String _hintSeparator = ' · ';
 
@@ -89,10 +102,11 @@ const List<ButtonSpec> _workspaceButtons = <ButtonSpec>[
 ///
 /// Below the [monitorMinColumns] x [monitorMinLines] floor the frame
 /// degrades to [buildResizeRequiredFrame]. Above it the layout is a header
-/// panel, a three-card KPI strip, a body (the slim server list beside the
-/// selected server's panel), a state-aware selection action bar, the
-/// workspace action bar, and a one-row footer hint. An empty workspace drops
-/// the selection bar and spends its body on a prompt instead.
+/// panel, a three-card KPI strip, a body (the full-width fleet table over
+/// the selected server's card, split state-dependently — see
+/// [_minLiveCardRows]), a state-aware selection action bar, the workspace
+/// action bar, and a one-row footer hint. An empty workspace drops the
+/// selection bar and spends its body on a prompt instead.
 ///
 /// Pure: no clock reads and no IO. [now] must be UTC — sample timestamps
 /// are UTC and chart windows are `[now - range, now]` — and is the only
@@ -158,36 +172,71 @@ MonitorFrame buildMonitorFrame({
   final List<MonitorHitbox> hitboxes = <MonitorHitbox>[];
 
   if (hasInstances) {
+    final MetricSample? selectedLatest = snapshot.latestFor(
+      snapshot.instances[selected],
+    );
+    final bool selectedLive =
+        selectedLatest != null && selectedLatest.state != RuntimeState.stopped;
+
+    // The card's rows: sized to the selection's state, fed by the rows the
+    // whole fleet does not need, and never starving the table below its own
+    // floor. A body too short for even the idle card (unreachable above the
+    // frame floor) gives everything to the table.
+    int cardRows;
+    if (selectedLive) {
+      cardRows = bodyRows - (total + 3);
+      if (cardRows < _minLiveCardRows) {
+        cardRows = _minLiveCardRows;
+      }
+      if (cardRows > _maxLiveCardRows) {
+        cardRows = _maxLiveCardRows;
+      }
+    } else {
+      cardRows = _idleCardRows;
+    }
+    final int cardCeiling = bodyRows - _minListRows;
+    if (cardRows > cardCeiling) {
+      cardRows = cardCeiling;
+    }
+    if (cardRows < _idleCardRows) {
+      cardRows = 0;
+    }
+    final int listRows = bodyRows - cardRows;
+
     final MonitorPanelRender list = renderServerList(
       snapshot: snapshot,
       rollup: rollup,
       selectedIndex: selected,
-      rows: bodyRows,
+      rows: listRows,
+      width: columns,
       topRow: bodyTop,
       theme: theme,
+      windowStart: now.subtract(range),
+      windowEnd: now,
       hoveredId: hoveredId,
     );
-    final MonitorPanelRender panel = renderSelectedPanel(
-      snapshot: snapshot,
-      selectedIndex: selected,
-      rows: bodyRows,
-      width: columns - serverListWidth - 1,
-      topRow: bodyTop,
-      colOffset: serverListWidth + 1,
-      theme: theme,
-      range: range,
-      now: now,
-      hoveredId: hoveredId,
-    );
-    rows.addAll(joinBlocks(<List<String>>[list.rows, panel.rows]));
-    hitboxes
-      ..addAll(list.hitboxes)
-      ..addAll(panel.hitboxes);
+    rows.addAll(list.rows);
+    hitboxes.addAll(list.hitboxes);
+
+    if (cardRows > 0) {
+      final MonitorPanelRender panel = renderSelectedPanel(
+        snapshot: snapshot,
+        selectedIndex: selected,
+        rows: cardRows,
+        width: columns,
+        topRow: bodyTop + listRows,
+        colOffset: 0,
+        theme: theme,
+        range: range,
+        now: now,
+        hoveredId: hoveredId,
+      );
+      rows.addAll(panel.rows);
+      hitboxes.addAll(panel.hitboxes);
+    }
 
     final ButtonRowRender bar = layoutButtonRow(
-      buttons: _selectionButtons(
-        snapshot.latestFor(snapshot.instances[selected]),
-      ),
+      buttons: _selectionButtons(selectedLatest),
       width: columns,
       theme: theme,
       hoveredId: hoveredId,

@@ -39,20 +39,24 @@ const String _detailFooterHint =
 /// yields its filename on a POSIX host.
 final RegExp _pathSeparator = RegExp(r'[\\/]');
 
-/// One chart in the detail grid: its panel title, the series it plots, and
-/// the bounds pinned on its vertical axis (null means auto-scaled).
+/// One chart in the detail grid: its panel title, the series it plots, the
+/// bounds pinned on its vertical axis (null means auto-scaled), and the
+/// gradient its ink reads in — [MonitorRamp.tps] for TPS, where high is
+/// health rather than heat.
 class _DetailChart {
   const _DetailChart({
     required this.title,
     required this.points,
     this.forcedLow,
     this.forcedHigh,
+    this.ramp = MonitorRamp.load,
   });
 
   final String title;
   final List<ChartPoint> points;
   final double? forcedLow;
   final double? forcedHigh;
+  final MonitorRamp ramp;
 }
 
 /// Builds the single-instance detail frame: exactly [lines] rows of exactly
@@ -201,6 +205,7 @@ List<_DetailChart> _resolveCharts({
       points: _series(history, (MetricSample s) => s.tps),
       forcedLow: 0,
       forcedHigh: 20,
+      ramp: MonitorRamp.tps,
     ),
     _DetailChart(
       title: 'CPU %',
@@ -376,6 +381,7 @@ List<String> _chartPanel({
       theme: theme,
       forcedLow: chart.forcedLow,
       forcedHigh: chart.forcedHigh,
+      ramp: chart.ramp,
     ),
     width: width,
     theme: theme,
