@@ -65,7 +65,7 @@ Pull latest builds refreshes the newest build of every platform the active consu
 - **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. They never share state. The active profile is set with `consumer use`.
 - **Instance** — one server install inside a consumer. Lives at `consumers/<profile>/instances/<name>` (or under `~/.multiplexor/instance-store/...` if the workspace path contains `[` or `]`). Metadata is in `.server-source` (type, launch mode, jar path, isolated flag, and lock state + hashed PIN).
 - **Active instance** — the default target when an instance name is omitted. Set with `instance activate`.
-- **Dropins** — plugin or mod jars under `consumers/<profile>/dropins/plugins` or `consumers/<profile>/dropins/mods`. On `runtime start` and via the watcher, these jars are copied into every non-isolated instance's `plugins/` (or `mods/`) folder.
+- **Dropins** — plugin or mod jars under `consumers/<profile>/dropins/plugins` or `consumers/<profile>/dropins/mods`. On `runtime start` and via the watcher, these jars are copied into every non-isolated instance's `plugins/` (or `mods/`) folder. Automatic sync tracks the last synchronized SHA-256 per instance: it updates untouched jars but preserves and warns about unknown or locally modified jars. An explicit `plugins sync` or `mods sync` remains authoritative and replaces them.
 - **Isolated instance** — opts out of all shared state: no dropin sync, no Iris pack symlink, no shared `ops.json` merge. Created with `server create --isolated` or toggled later with `instance isolated <name> true`.
 - **Shared plugin data** — `consumers/plugin-consumers/shared-plugin-data/` holds Iris packs and a merged `ops.json` for non-isolated plugin instances.
 - **Build cache** — `consumers/<profile>/builds/<type>/` holds versioned server jars. `server create --type ...` resolves jars from here; `--auto-build` refreshes from upstream first.
@@ -129,7 +129,7 @@ Single `server create` and `build <type>` commands must run under the consumer t
 | Command | What it does |
 |---------|--------------|
 | `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, clickable action bars, and the wizard's flows behind the cards and `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
-| `runtime start [instance] [--no-console]` | Start the instance and attach its console. `--no-console` returns immediately. |
+| `runtime start [instance] [--no-console]` | Safely sync dropins, start the instance, and attach its console. Locally modified instance jars are preserved with a warning. `--no-console` returns immediately. |
 | `runtime stop [instance] [--graceful]` | Force-stop the instance immediately (kills the tmux session, then SIGTERM/SIGKILL any tracked pids). With `--graceful`, sends `stop` to the server console and waits up to 60s for a clean world-save shutdown, falling back to a force-stop on timeout. |
 | `runtime restart [instance] [--no-console]` | Stop and start again. Attaches console unless `--no-console`. |
 | `runtime console [instance]` | Attach to a running console. Esc detaches; the server keeps running. Mouse wheel scrolls; drag-select copies to clipboard. |
@@ -157,8 +157,8 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 | Command | What it does |
 |---------|--------------|
 | `plugins show-source` (or `mods show-source`) | Print the absolute dropin folder. |
-| `plugins sync [instance\|--all] [--clean]` | Copy dropins into one instance or every instance. `--clean` clears existing jars first. Isolated instances are skipped with `[SKIP]`. |
-| `plugins watch-start` | Start a background daemon that re-syncs whenever a dropin jar changes. |
+| `plugins sync [instance\|--all] [--clean]` | Authoritatively copy dropins into one instance or every instance, replacing same-name local jars. `--clean` clears existing jars first. Isolated instances are skipped with `[SKIP]`. |
+| `plugins watch-start` | Start a background daemon that re-syncs whenever a dropin jar changes. Untouched previously synchronized jars update automatically; locally modified jars are preserved with a warning. |
 | `plugins watch-stop` | Stop the watcher daemon. |
 | `plugins watch-status` | Print whether the watcher is running. |
 | `plugins iris-packs-path` | Print the shared Iris packs directory (`plugin` consumer only). |
@@ -306,6 +306,7 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   dropins/plugins or dropins/mods   # dropin jars (manual and content-managed)
   instances/<name>/                 # one server's worldroot
     .server-source                # type, launch mode, jar path, isolated flag
+    .multiplexor-dropins.json     # last synchronized jar hashes
     server.jar                    # symlink into builds/
     plugins/ or mods/             # synced from dropin-source
   shared-plugin-data/             # plugin-only: iris packs + merged ops.json

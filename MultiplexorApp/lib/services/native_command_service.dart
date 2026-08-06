@@ -15,6 +15,7 @@ import '../utils/process_runner.dart';
 import '../utils/table.dart';
 import '../utils/terminal/ansi.dart';
 import 'consumer_service.dart';
+import 'dropin_sync_policy.dart';
 import 'manager_context.dart';
 import 'monitor/metric_sample.dart';
 import 'rcon_client.dart';
@@ -1339,6 +1340,7 @@ class NativeCommandService {
               clean: clean,
               sourceModsOverride: mods,
               strict: true,
+              preserveLocalChanges: false,
             );
             io.write(
               '[OK] Copied ${report.copiedJars.length} jar(s) -> $instance',
@@ -1364,6 +1366,7 @@ class NativeCommandService {
           clean: clean,
           sourceModsOverride: mods,
           strict: true,
+          preserveLocalChanges: false,
         );
         io.write('[OK] Copied ${report.copiedJars.length} jar(s) -> $target');
         if (report.copiedJars.isNotEmpty) {
@@ -2785,6 +2788,7 @@ class NativeCommandService {
         clean: cleanDropins,
         sourceModsOverride: !_isPluginConsumer(profile),
         strict: true,
+        preserveLocalChanges: false,
       );
       io.write('[SYNC] ${report.copiedJars.length} jar(s) synced to $instance');
     }
@@ -3367,6 +3371,7 @@ class NativeCommandService {
         clean: clean,
         sourceModsOverride: !_isPluginConsumer(profile),
         strict: true,
+        preserveLocalChanges: false,
       );
       io.write('[SYNC] $instance copied ${report.copiedJars.length} jar(s)');
     }
@@ -3466,13 +3471,15 @@ class NativeCommandService {
       profile: profile,
       args: <String>[commandName, 'watch-daemon'],
     );
+    final String daemonShellCommand =
+        'cd ${_shellQuote(context.rootDir)} && $daemonCommand >> ${_shellQuote(logFilePath)} 2>&1';
 
     final result = await _runProcess('tmux', <String>[
       'new-session',
       '-d',
       '-s',
       session,
-      'sh -lc ${_shellQuote('cd ${_shellQuote(context.rootDir)} && $daemonCommand')}',
+      'sh -lc ${_shellQuote(daemonShellCommand)}',
     ]);
     if (result.exitCode != 0) {
       throw _NativeCommandException(
@@ -3578,6 +3585,7 @@ class NativeCommandService {
             clean: false,
             sourceModsOverride: mods,
             strict: false,
+            preserveLocalChanges: true,
           );
           if (report.copiedJars.isNotEmpty) {
             io.write(
@@ -3593,6 +3601,14 @@ class NativeCommandService {
             for (final failed in report.failedJars) {
               io.error('[WARN] Watch sync failed for $instance: $failed');
             }
+          }
+          if (report.preservedJars.isNotEmpty) {
+            io.error(
+              '[WARN] Watch sync preserved local jar(s) in $instance: ${report.preservedJars.join(', ')}',
+            );
+            io.error(
+              '[WARN] Run ${mods ? 'mods' : 'plugins'} sync $instance to replace them from dropins.',
+            );
           }
         } catch (e, st) {
           io.error('[WARN] Watch sync failed for $instance: $e');
@@ -3616,6 +3632,7 @@ class NativeCommandService {
             instance,
             sourceJarPath,
             strict: false,
+            preserveLocalChanges: true,
           );
           if (report.copiedJars.isNotEmpty) {
             io.write('[SYNC] $instance copied ${report.copiedJars.join(', ')}');
@@ -3629,6 +3646,14 @@ class NativeCommandService {
             for (final failed in report.failedJars) {
               io.error('[WARN] Watch sync failed for $instance: $failed');
             }
+          }
+          if (report.preservedJars.isNotEmpty) {
+            io.error(
+              '[WARN] Watch sync preserved local jar(s) in $instance: ${report.preservedJars.join(', ')}',
+            );
+            io.error(
+              '[WARN] Run ${mods ? 'mods' : 'plugins'} sync $instance to replace them from dropins.',
+            );
           }
         } catch (e, st) {
           io.error('[WARN] Watch sync failed for $instance: $e');
@@ -5726,6 +5751,7 @@ class NativeCommandService {
       clean: false,
       sourceModsOverride: false,
       strict: false,
+      preserveLocalChanges: true,
     );
     if (startupSync.copiedJars.isNotEmpty) {
       io.write(
@@ -5737,6 +5763,14 @@ class NativeCommandService {
       for (final failed in startupSync.failedJars) {
         io.error('[WARN] Startup sync failed for $instance: $failed');
       }
+    }
+    if (startupSync.preservedJars.isNotEmpty) {
+      io.error(
+        '[WARN] Startup preserved locally modified jar(s) in $instance: ${startupSync.preservedJars.join(', ')}',
+      );
+      io.error(
+        '[WARN] Run ${_isPluginConsumer(profile) ? 'plugins' : 'mods'} sync $instance to replace them from dropins.',
+      );
     }
 
     await _runtimePrepareInstancePort(profile, instance, io);
@@ -7621,6 +7655,7 @@ class NativeCommandService {
     required bool clean,
     required bool sourceModsOverride,
     required bool strict,
+    required bool preserveLocalChanges,
   }) {
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
@@ -7630,6 +7665,7 @@ class NativeCommandService {
     if (_instanceIsolated(profile, instance)) {
       return const _DropinSyncReport(
         copiedJars: <String>[],
+        preservedJars: <String>[],
         failedJars: <String>[],
       );
     }
@@ -7644,35 +7680,73 @@ class NativeCommandService {
     );
     targetDir.createSync(recursive: true);
 
-    if (clean) {
-      for (final entity in targetDir.listSync()) {
-        if (entity is File && entity.path.endsWith('.jar')) {
-          entity.deleteSync();
+    final List<String> copied = <String>[];
+    final List<String> preserved = <String>[];
+    final List<String> failed = <String>[];
+    try {
+      _withDropinSyncLock(profile, instance, () {
+        if (clean) {
+          for (final FileSystemEntity entity in targetDir.listSync()) {
+            if (entity is File && entity.path.endsWith('.jar')) {
+              entity.deleteSync();
+            }
+          }
         }
-      }
-    }
 
-    final copied = <String>[];
-    final failed = <String>[];
-    final jars =
-        sourceDir
-            .listSync()
-            .whereType<File>()
-            .where((entity) => entity.path.toLowerCase().endsWith('.jar'))
-            .toList(growable: false)
-          ..sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
+        final Map<String, String> synchronizedHashes = _loadDropinSyncHashes(
+          profile,
+          instance,
+          failed,
+        );
+        if (clean) {
+          synchronizedHashes.clear();
+        }
+        final List<File> jars =
+            sourceDir
+                .listSync()
+                .whereType<File>()
+                .where(
+                  (File entity) => entity.path.toLowerCase().endsWith('.jar'),
+                )
+                .toList(growable: false)
+              ..sort(
+                (File a, File b) =>
+                    p.basename(a.path).compareTo(p.basename(b.path)),
+              );
 
-    for (final entity in jars) {
-      try {
-        final targetPath = p.join(targetDir.path, p.basename(entity.path));
-        final sourceStat = entity.statSync();
-        _deletePathEntity(targetPath, recursive: true);
-        entity.copySync(targetPath);
-        File(targetPath).setLastModifiedSync(sourceStat.modified);
-        copied.add(p.basename(entity.path));
-      } catch (e) {
-        failed.add('${p.basename(entity.path)}: $e');
-      }
+        for (final File entity in jars) {
+          try {
+            final String jarName = p.basename(entity.path);
+            final String syncKey = _dropinSyncJarKey(targetSubdir, jarName);
+            final String targetPath = p.join(targetDir.path, jarName);
+            final String sourceHash = _sha256File(entity);
+            if (preserveLocalChanges) {
+              final DropinSyncDecision decision = _automaticDropinSyncDecision(
+                sourceHash: sourceHash,
+                targetPath: targetPath,
+                synchronizedHash: synchronizedHashes[syncKey],
+              );
+              if (decision == DropinSyncDecision.preserveLocal) {
+                preserved.add(jarName);
+                continue;
+              }
+              if (decision == DropinSyncDecision.unchanged) {
+                synchronizedHashes[syncKey] = sourceHash;
+                continue;
+              }
+            }
+            _copyDropinJar(entity, targetPath);
+            synchronizedHashes[syncKey] = sourceHash;
+            copied.add(jarName);
+          } catch (e) {
+            failed.add('${p.basename(entity.path)}: $e');
+          }
+        }
+
+        _saveDropinSyncHashes(profile, instance, synchronizedHashes, failed);
+      });
+    } catch (e) {
+      failed.add('dropin sync transaction failed: $e');
     }
 
     if (strict && failed.isNotEmpty) {
@@ -7682,7 +7756,11 @@ class NativeCommandService {
       );
     }
 
-    return _DropinSyncReport(copiedJars: copied, failedJars: failed);
+    return _DropinSyncReport(
+      copiedJars: copied,
+      preservedJars: preserved,
+      failedJars: failed,
+    );
   }
 
   _DropinSyncReport _pluginsSyncOneJarToInstance(
@@ -7690,6 +7768,7 @@ class NativeCommandService {
     String instance,
     String sourceJarPath, {
     required bool strict,
+    required bool preserveLocalChanges,
   }) {
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
@@ -7698,6 +7777,7 @@ class NativeCommandService {
     if (_instanceIsolated(profile, instance)) {
       return const _DropinSyncReport(
         copiedJars: <String>[],
+        preservedJars: <String>[],
         failedJars: <String>[],
       );
     }
@@ -7706,6 +7786,7 @@ class NativeCommandService {
     if (!sourceFile.existsSync()) {
       return const _DropinSyncReport(
         copiedJars: <String>[],
+        preservedJars: <String>[],
         failedJars: <String>[],
       );
     }
@@ -7716,18 +7797,44 @@ class NativeCommandService {
     );
     targetDir.createSync(recursive: true);
 
-    final copied = <String>[];
-    final failed = <String>[];
-    final jarName = p.basename(sourceFile.path);
+    final List<String> copied = <String>[];
+    final List<String> preserved = <String>[];
+    final List<String> failed = <String>[];
+    final String jarName = p.basename(sourceFile.path);
     try {
-      final targetPath = p.join(targetDir.path, jarName);
-      final sourceStat = sourceFile.statSync();
-      _deletePathEntity(targetPath, recursive: true);
-      sourceFile.copySync(targetPath);
-      File(targetPath).setLastModifiedSync(sourceStat.modified);
-      copied.add(jarName);
+      _withDropinSyncLock(profile, instance, () {
+        final Map<String, String> synchronizedHashes = _loadDropinSyncHashes(
+          profile,
+          instance,
+          failed,
+        );
+        final String syncKey = _dropinSyncJarKey(targetSubdir, jarName);
+        final String targetPath = p.join(targetDir.path, jarName);
+        final String sourceHash = _sha256File(sourceFile);
+        if (preserveLocalChanges) {
+          final DropinSyncDecision decision = _automaticDropinSyncDecision(
+            sourceHash: sourceHash,
+            targetPath: targetPath,
+            synchronizedHash: synchronizedHashes[syncKey],
+          );
+          if (decision == DropinSyncDecision.preserveLocal) {
+            preserved.add(jarName);
+          } else if (decision == DropinSyncDecision.unchanged) {
+            synchronizedHashes[syncKey] = sourceHash;
+          } else {
+            _copyDropinJar(sourceFile, targetPath);
+            synchronizedHashes[syncKey] = sourceHash;
+            copied.add(jarName);
+          }
+        } else {
+          _copyDropinJar(sourceFile, targetPath);
+          synchronizedHashes[syncKey] = sourceHash;
+          copied.add(jarName);
+        }
+        _saveDropinSyncHashes(profile, instance, synchronizedHashes, failed);
+      });
     } catch (e) {
-      failed.add('$jarName: $e');
+      failed.add('could not sync $jarName: $e');
     }
 
     if (strict && failed.isNotEmpty) {
@@ -7737,7 +7844,190 @@ class NativeCommandService {
       );
     }
 
-    return _DropinSyncReport(copiedJars: copied, failedJars: failed);
+    return _DropinSyncReport(
+      copiedJars: copied,
+      preservedJars: preserved,
+      failedJars: failed,
+    );
+  }
+
+  DropinSyncDecision _automaticDropinSyncDecision({
+    required String sourceHash,
+    required String targetPath,
+    required String? synchronizedHash,
+  }) {
+    final FileSystemEntityType targetType = FileSystemEntity.typeSync(
+      targetPath,
+      followLinks: false,
+    );
+    if (targetType != FileSystemEntityType.notFound &&
+        targetType != FileSystemEntityType.file) {
+      return DropinSyncDecision.preserveLocal;
+    }
+    final String? targetHash = targetType == FileSystemEntityType.file
+        ? _sha256File(File(targetPath))
+        : null;
+    return DropinSyncPolicy.decide(
+      sourceHash: sourceHash,
+      targetHash: targetHash,
+      synchronizedHash: synchronizedHash,
+    );
+  }
+
+  void _copyDropinJar(File sourceFile, String targetPath) {
+    final FileStat sourceStat = sourceFile.statSync();
+    final String temporaryPath =
+        '$targetPath.next.$pid.${DateTime.now().microsecondsSinceEpoch}';
+    final File temporary = File(temporaryPath);
+    try {
+      sourceFile.copySync(temporaryPath);
+      temporary.setLastModifiedSync(sourceStat.modified);
+      final FileSystemEntityType targetType = FileSystemEntity.typeSync(
+        targetPath,
+        followLinks: false,
+      );
+      if (targetType == FileSystemEntityType.directory) {
+        _deletePathEntity(targetPath, recursive: true);
+      }
+      try {
+        temporary.renameSync(targetPath);
+      } on FileSystemException {
+        if (!Platform.isWindows ||
+            FileSystemEntity.typeSync(targetPath, followLinks: false) ==
+                FileSystemEntityType.notFound) {
+          rethrow;
+        }
+        _deletePathEntity(targetPath, recursive: true);
+        temporary.renameSync(targetPath);
+      }
+    } finally {
+      temporary.deleteSyncSafe();
+    }
+  }
+
+  T _withDropinSyncLock<T>(
+    ConsumerProfile profile,
+    String instance,
+    T Function() operation,
+  ) {
+    final String lockPath = _dropinSyncLockPath(profile, instance);
+    final FileSystemEntityType lockType = FileSystemEntity.typeSync(
+      lockPath,
+      followLinks: false,
+    );
+    if (lockType != FileSystemEntityType.notFound &&
+        lockType != FileSystemEntityType.file) {
+      throw FileSystemException(
+        'Dropin sync lock is not a regular file',
+        lockPath,
+      );
+    }
+    final RandomAccessFile lockFile = File(
+      lockPath,
+    ).openSync(mode: FileMode.append);
+    bool locked = false;
+    try {
+      lockFile.lockSync(FileLock.exclusive);
+      locked = true;
+      return operation();
+    } finally {
+      try {
+        if (locked) {
+          lockFile.unlockSync();
+        }
+      } finally {
+        lockFile.closeSync();
+      }
+    }
+  }
+
+  Map<String, String> _loadDropinSyncHashes(
+    ConsumerProfile profile,
+    String instance,
+    List<String> failures,
+  ) {
+    final String statePath = _dropinSyncStatePath(profile, instance);
+    final FileSystemEntityType stateType = FileSystemEntity.typeSync(
+      statePath,
+      followLinks: false,
+    );
+    if (stateType == FileSystemEntityType.notFound) {
+      return <String, String>{};
+    }
+    if (stateType != FileSystemEntityType.file) {
+      failures.add('sync state is not a regular file: $statePath');
+      return <String, String>{};
+    }
+    try {
+      final Object? decoded = jsonDecode(File(statePath).readAsStringSync());
+      if (decoded is! Map<String, dynamic> || decoded['schema'] != 1) {
+        throw const FormatException('unsupported dropin sync state');
+      }
+      final Object? jarsValue = decoded['jars'];
+      if (jarsValue is! Map<String, dynamic>) {
+        throw const FormatException('missing dropin sync jar hashes');
+      }
+      final Map<String, String> hashes = <String, String>{};
+      for (final MapEntry<String, dynamic> entry in jarsValue.entries) {
+        final Object? value = entry.value;
+        if (value is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(value)) {
+          hashes[entry.key] = value;
+        }
+      }
+      return hashes;
+    } catch (e) {
+      failures.add('invalid dropin sync state: $e');
+      return <String, String>{};
+    }
+  }
+
+  void _saveDropinSyncHashes(
+    ConsumerProfile profile,
+    String instance,
+    Map<String, String> hashes,
+    List<String> failures,
+  ) {
+    final String statePath = _dropinSyncStatePath(profile, instance);
+    final FileSystemEntityType stateType = FileSystemEntity.typeSync(
+      statePath,
+      followLinks: false,
+    );
+    if (stateType != FileSystemEntityType.notFound &&
+        stateType != FileSystemEntityType.file) {
+      failures.add('sync state is not a regular file: $statePath');
+      return;
+    }
+    final List<String> jarNames = hashes.keys.toList(growable: false)..sort();
+    final Map<String, String> sortedHashes = <String, String>{};
+    for (final String jarName in jarNames) {
+      sortedHashes[jarName] = hashes[jarName]!;
+    }
+    final String temporaryPath =
+        '$statePath.next.$pid.${DateTime.now().microsecondsSinceEpoch}';
+    final File temporary = File(temporaryPath);
+    try {
+      temporary.writeAsStringSync(
+        '${const JsonEncoder.withIndent('  ').convert(<String, Object>{'schema': 1, 'jars': sortedHashes})}\n',
+        flush: true,
+      );
+      temporary.renameSync(statePath);
+    } catch (e) {
+      failures.add('could not save dropin sync state: $e');
+    } finally {
+      temporary.deleteSyncSafe();
+    }
+  }
+
+  String _dropinSyncStatePath(ConsumerProfile profile, String instance) {
+    return p.join(_instanceDir(profile, instance), '.multiplexor-dropins.json');
+  }
+
+  String _dropinSyncLockPath(ConsumerProfile profile, String instance) {
+    return p.join(_instanceDir(profile, instance), '.multiplexor-dropins.lock');
+  }
+
+  String _dropinSyncJarKey(String targetSubdir, String jarName) {
+    return '$targetSubdir/$jarName';
   }
 
   String _instanceDropinTargetSubdir(ConsumerProfile profile, String instance) {
@@ -9556,9 +9846,14 @@ class _RuntimeTargetArgs {
 }
 
 class _DropinSyncReport {
-  const _DropinSyncReport({required this.copiedJars, required this.failedJars});
+  const _DropinSyncReport({
+    required this.copiedJars,
+    required this.preservedJars,
+    required this.failedJars,
+  });
 
   final List<String> copiedJars;
+  final List<String> preservedJars;
   final List<String> failedJars;
 }
 
