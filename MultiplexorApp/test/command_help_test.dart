@@ -49,5 +49,21 @@ void main() {
       expect(lines.join('\n'), contains('Unknown help topic: missing'));
       expect(lines.join('\n'), contains('Available help topics:'));
     });
+
+    test('documents Mineflayer gameplay commands', () {
+      final lines = <String>[];
+      final code = printCliHelpForArgs(
+        <String>['help', 'gameplay'],
+        write: lines.add,
+        error: lines.add,
+      );
+
+      expect(code, 0);
+      expect(lines.first, 'Multiplexor gameplay');
+      expect(lines.join('\n'), contains('gameplay prepare [instance]'));
+      expect(lines.join('\n'), contains('gameplay run <scenario> [instance]'));
+      expect(lines.join('\n'), contains('--viewer-port <port>'));
+      expect(lines.join('\n'), contains('--no-viewer'));
+    });
   });
 }

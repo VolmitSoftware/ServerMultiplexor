@@ -26,3 +26,8 @@ Default output is `../multiplexor`.
 - Workspace root detection is location-agnostic.
 - Running in an empty folder bootstraps the required workspace layout.
 - Command execution is native Dart (no shell backend).
+- `tool/mineflayer/` is the pinned Node 22 gameplay harness used by the
+  `gameplay` CLI namespace. Install it through `../start.sh gameplay setup`;
+  each run publishes its loopback Prismarine Viewer URL in terminal output,
+  the JSON report, and an immediate viewer-state artifact. Dependencies and
+  generated reports stay in ignored consumer state.

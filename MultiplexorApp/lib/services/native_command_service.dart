@@ -16,6 +16,7 @@ import '../utils/table.dart';
 import '../utils/terminal/ansi.dart';
 import 'consumer_service.dart';
 import 'dropin_sync_policy.dart';
+import 'gameplay_test_service.dart';
 import 'manager_context.dart';
 import 'monitor/metric_sample.dart';
 import 'rcon_client.dart';
@@ -97,6 +98,8 @@ class NativeCommandService {
         return _dispatchTemplate(rest, io);
       case 'content':
         return _dispatchContent(rest, io);
+      case 'gameplay':
+        return _dispatchGameplay(rest, io);
       case 'consumer':
         return _dispatchConsumer(rest, io);
       case 'instance':
@@ -254,6 +257,332 @@ class NativeCommandService {
           2,
         );
     }
+  }
+
+  Future<int> _dispatchGameplay(List<String> args, _NativeIoBuffer io) async {
+    final String sub = args.isEmpty ? 'doctor' : args.first;
+    final List<String> rest = args.isEmpty ? const <String>[] : args.sublist(1);
+    final GameplayTestService harness = GameplayTestService(context: context);
+
+    switch (sub) {
+      case 'setup':
+        return harness.setup(write: io.write, error: io.error);
+      case 'doctor':
+        final _FlexibleArgs parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'json'},
+        );
+        return harness.doctor(
+          json: parsed.flag('json'),
+          write: io.write,
+          error: io.error,
+        );
+      case 'list':
+        final _FlexibleArgs parsed = _parseFlexibleArgs(
+          rest,
+          booleanFlags: const <String>{'json'},
+        );
+        return harness.list(
+          json: parsed.flag('json'),
+          write: io.write,
+          error: io.error,
+        );
+      case 'prepare':
+        final _FlexibleArgs parsed = _parseFlexibleArgs(rest);
+        final String instance = _resolveGameplayInstance(
+          parsed.option('instance') ??
+              (parsed.positionals.isEmpty ? null : parsed.positionals.first),
+        );
+        await _prepareGameplayInstance(_activeConsumer, instance, io);
+        return 0;
+      case 'run':
+        return _dispatchGameplayRun(rest, harness, io);
+      default:
+        throw _NativeCommandException(
+          'Usage: gameplay <setup|doctor|list|prepare|run> ...',
+          2,
+        );
+    }
+  }
+
+  Future<int> _dispatchGameplayRun(
+    List<String> args,
+    GameplayTestService harness,
+    _NativeIoBuffer io,
+  ) async {
+    final _FlexibleArgs parsed = _parseFlexibleArgs(
+      args,
+      booleanFlags: const <String>{
+        'json',
+        'no-op',
+        'no-viewer',
+        'prepare',
+        'start',
+        'stop-after',
+      },
+    );
+    final bool json = parsed.flag('json');
+    final _NativeIoBuffer operationIo = json
+        ? _NativeIoBuffer(stream: false)
+        : io;
+    final String? scenario =
+        parsed.option('scenario') ??
+        (parsed.positionals.isEmpty ? null : parsed.positionals.first);
+    if (scenario == null || scenario.trim().isEmpty) {
+      throw _NativeCommandException(
+        'Usage: gameplay run <scenario> [instance] [--start] [--stop-after]',
+        2,
+      );
+    }
+    final String? positionalInstance = parsed.positionals.length > 1
+        ? parsed.positionals[1]
+        : null;
+    final String instance = _resolveGameplayInstance(
+      parsed.option('instance') ?? positionalInstance,
+    );
+    final ConsumerProfile profile = _activeConsumer;
+    if (!_instanceExists(profile, instance)) {
+      throw _NativeCommandException('Instance not found: $instance', 2);
+    }
+
+    final String auth = (parsed.option('auth') ?? 'offline').toLowerCase();
+    if (auth != 'offline' && auth != 'microsoft') {
+      throw _NativeCommandException('--auth must be offline or microsoft', 2);
+    }
+    if (auth == 'offline' && !_instanceIsolated(profile, instance)) {
+      throw _NativeCommandException(
+        'Offline gameplay testing is restricted to isolated instances: $instance',
+        2,
+      );
+    }
+
+    RuntimeState state = await _runtimeStateOf(profile, instance);
+    if (parsed.flag('prepare')) {
+      if (state != RuntimeState.stopped) {
+        throw _NativeCommandException(
+          'Stop $instance before using --prepare',
+          2,
+        );
+      }
+      await _prepareGameplayInstance(profile, instance, operationIo);
+    }
+    if (auth == 'offline' &&
+        _instanceGetProperty(profile, instance, 'online-mode') != 'false') {
+      throw _NativeCommandException(
+        'Offline gameplay auth is not prepared. Run: gameplay prepare $instance',
+        2,
+      );
+    }
+
+    final int startupTimeout = _gameplayPositiveSeconds(
+      parsed.option('startup-timeout'),
+      fallback: 180,
+      option: '--startup-timeout',
+    );
+    final int assertionTimeout = _gameplayPositiveSeconds(
+      parsed.option('assertion-timeout'),
+      fallback: 10,
+      option: '--assertion-timeout',
+    );
+    final int connectTimeout = _gameplayPositiveSeconds(
+      parsed.option('connect-timeout'),
+      fallback: 30,
+      option: '--connect-timeout',
+    );
+    final int scenarioTimeout = _gameplayPositiveSeconds(
+      parsed.option('timeout'),
+      fallback: 30,
+      option: '--timeout',
+    );
+    final int? viewerPort = _gameplayOptionalPort(
+      parsed.option('viewer-port'),
+      option: '--viewer-port',
+    );
+    final String username =
+        parsed.option('username') ??
+        'VolmitQA${_instanceGetServerPort(profile, instance) % 10000}';
+    if (auth == 'offline' &&
+        !RegExp(r'^[A-Za-z0-9_]{1,16}$').hasMatch(username)) {
+      throw _NativeCommandException(
+        'Offline --username must be 1-16 letters, numbers, or underscores',
+        2,
+      );
+    }
+    if (state == RuntimeState.stopped && !parsed.flag('start')) {
+      throw _NativeCommandException(
+        '$instance is stopped. Start it first or pass --start.',
+        2,
+      );
+    }
+
+    final bool wasRunning = state != RuntimeState.stopped;
+    bool startedHere = false;
+    try {
+      if (state == RuntimeState.stopped) {
+        await _runtimeStart(profile, instance, operationIo);
+        startedHere = true;
+      }
+
+      final MinecraftPingResult? ping = await _awaitMinecraftPing(
+        profile,
+        instance,
+        timeout: Duration(seconds: startupTimeout),
+      );
+      if (ping == null) {
+        throw _NativeCommandException(
+          '$instance did not become ready within ${startupTimeout}s',
+          1,
+        );
+      }
+      if (!json) {
+        io.write(
+          '[OK] Gameplay target ready: $instance ${ping.versionName} '
+          '(${ping.online}/${ping.max} players)',
+        );
+      }
+
+      if (auth == 'offline' && !parsed.flag('no-op')) {
+        final ProcessResult opResult = await _runProcess('tmux', <String>[
+          'send-keys',
+          '-t',
+          _tmuxSessionName(profile, instance),
+          'op $username',
+          'Enter',
+        ]);
+        if (opResult.exitCode != 0) {
+          throw _NativeCommandException(
+            'Failed to grant operator status to $username: ${opResult.stderr}',
+            1,
+          );
+        }
+        if (!json) {
+          io.write('[OK] Gameplay bot operator enabled: $username');
+        }
+      }
+
+      final String configuredHost = _instanceGetServerIp(profile, instance);
+      final String host =
+          configuredHost == '0.0.0.0' ||
+              configuredHost == '::' ||
+              configuredHost.trim().isEmpty
+          ? '127.0.0.1'
+          : configuredHost;
+      final String? sourceVersion = _serverSource(profile, instance)['mc'];
+      final String profilesFolder =
+          parsed.option('profiles-folder') ??
+          p.join(
+            Platform.environment['HOME'] ?? context.rootDir,
+            '.multiplexor',
+            'mineflayer-profiles',
+          );
+      final GameplayTestRun run = GameplayTestRun(
+        artifactsDirectory: p.join(
+          _consumerRoot(profile),
+          'state',
+          'gameplay-tests',
+          instance,
+        ),
+        assertionTimeoutSeconds: assertionTimeout,
+        auth: auth,
+        command: parsed.option('command'),
+        connectTimeoutSeconds: connectTimeout,
+        effect: parsed.option('effect'),
+        expected: parsed.option('expect'),
+        host: host,
+        instance: instance,
+        json: json,
+        logPath: _runtimeLogFile(profile, instance),
+        port: _instanceGetServerPort(profile, instance),
+        profilesFolder: auth == 'microsoft' ? profilesFolder : null,
+        scenario: File(scenario).existsSync()
+            ? File(scenario).absolute.path
+            : scenario,
+        timeoutSeconds: scenarioTimeout,
+        username: username,
+        version: parsed.option('version') ?? sourceVersion,
+        viewerEnabled: !parsed.flag('no-viewer'),
+        viewerPort: viewerPort,
+      );
+      return await harness.run(run: run, write: io.write, error: io.error);
+    } finally {
+      if (startedHere && parsed.flag('stop-after')) {
+        await _runtimeGracefulStop(profile, instance, operationIo);
+      } else if (parsed.flag('stop-after') && wasRunning && !json) {
+        io.write(
+          '[INFO] $instance was already running; --stop-after left it running',
+        );
+      }
+    }
+  }
+
+  String _resolveGameplayInstance(String? input) {
+    final String? instance = input?.trim().isNotEmpty == true
+        ? input!.trim()
+        : _currentInstance(_activeConsumer);
+    if (instance == null || instance.isEmpty) {
+      throw _NativeCommandException('No active instance set', 2);
+    }
+    return instance;
+  }
+
+  Future<void> _prepareGameplayInstance(
+    ConsumerProfile profile,
+    String instance,
+    _NativeIoBuffer io,
+  ) async {
+    if (!_instanceExists(profile, instance)) {
+      throw _NativeCommandException('Instance not found: $instance', 2);
+    }
+    if (!_instanceIsolated(profile, instance)) {
+      throw _NativeCommandException(
+        'Gameplay preparation is restricted to isolated instances: $instance',
+        2,
+      );
+    }
+    if (await _runtimeStateOf(profile, instance) != RuntimeState.stopped) {
+      throw _NativeCommandException(
+        'Stop $instance before gameplay preparation',
+        2,
+      );
+    }
+    _instanceSetProperties(profile, instance, const <String, String>{
+      'enforce-secure-profile': 'false',
+      'enforce-whitelist': 'false',
+      'online-mode': 'false',
+      'server-ip': '127.0.0.1',
+      'spawn-protection': '0',
+      'white-list': 'false',
+    });
+    io.write(
+      '[OK] Gameplay auth prepared: $instance '
+      '(isolated, loopback-only, offline auth)',
+    );
+  }
+
+  int _gameplayPositiveSeconds(
+    String? raw, {
+    required int fallback,
+    required String option,
+  }) {
+    if (raw == null) {
+      return fallback;
+    }
+    final int? value = int.tryParse(raw);
+    if (value == null || value < 1) {
+      throw _NativeCommandException('$option must be a positive integer', 2);
+    }
+    return value;
+  }
+
+  int? _gameplayOptionalPort(String? raw, {required String option}) {
+    if (raw == null) {
+      return null;
+    }
+    final int? value = int.tryParse(raw);
+    if (value == null || value < 1 || value > 65535) {
+      throw _NativeCommandException('$option must be between 1 and 65535', 2);
+    }
+    return value;
   }
 
   Future<int> _dispatchInstanceDeleteAll(
@@ -1655,6 +1984,18 @@ class NativeCommandService {
     await requireTool('java', const <String>['-version']);
     await requireTool('git', const <String>['--version']);
     await requireTool('tmux', const <String>['-V']);
+    await requireTool('node', const <String>['--version']);
+    await requireTool('npm', const <String>['--version']);
+    final GameplayTestService gameplayHarness = GameplayTestService(
+      context: context,
+    );
+    add(
+      gameplayHarness.installed ? 'PASS' : 'FAIL',
+      'Mineflayer harness',
+      gameplayHarness.installed
+          ? gameplayHarness.harnessDirectory
+          : 'not installed; run gameplay setup',
+    );
 
     final seenPorts = <int, String>{};
     for (final profile in ConsumerProfile.values) {
@@ -8948,6 +9289,39 @@ class NativeCommandService {
       return line.substring(prefix.length).trim();
     }
     return null;
+  }
+
+  void _instanceSetProperties(
+    ConsumerProfile profile,
+    String instance,
+    Map<String, String> values,
+  ) {
+    _ensureLocalServerProperties(profile, instance);
+    final File file = File(_instanceServerProperties(profile, instance));
+    final List<String> lines = file.readAsLinesSync();
+    final Set<String> remaining = values.keys.toSet();
+    final List<String> next = <String>[];
+
+    for (final String raw in lines) {
+      final String trimmed = raw.trim();
+      if (trimmed.startsWith('#') || !trimmed.contains('=')) {
+        next.add(raw);
+        continue;
+      }
+      final String key = trimmed.substring(0, trimmed.indexOf('='));
+      final String? value = values[key];
+      if (value == null) {
+        next.add(raw);
+        continue;
+      }
+      if (remaining.remove(key)) {
+        next.add('$key=$value');
+      }
+    }
+    for (final String key in remaining) {
+      next.add('$key=${values[key]}');
+    }
+    file.writeAsStringSync('${next.join('\n')}\n');
   }
 
   /// Enables RCON in server.properties for Paper-family instances so the

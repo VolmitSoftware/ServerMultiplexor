@@ -9,6 +9,7 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 - `dart` 3.10+ (`./start.sh` compiles `MultiplexorApp/` on demand)
 - `java` 17+ (or whatever your target server requires)
 - `git`, `tmux` (tmux is required for `runtime start` / `runtime console`)
+- Node.js 22+ and npm (required for Mineflayer gameplay tests)
 
 ## Quick Start
 
@@ -72,6 +73,7 @@ Pull latest builds refreshes the newest build of every platform the active consu
 - **Content lockfile** — `consumers/<profile>/state/content-lock.yaml` tracks jars installed by `content install` so they can be updated, removed, and re-synced through the existing dropin pipeline.
 - **Template** — `.multiplexor/templates/<name>.yaml` captures a reusable server blueprint: server type/version, JVM settings, isolation, server.properties overrides, and optional dropin sync behavior.
 - **Backup** — `consumers/<profile>/backups/<instance>/<backup-id>/` stores a restorable snapshot with checksums and a manifest. Backups are used manually and by `instance safe-update`.
+- **Gameplay test** — a Mineflayer scenario run against an actual instance. Built-ins cover connection, command responses, and status effects; custom `.mjs` scenarios can assert any protocol-visible player behavior. Reports stay under ignored per-consumer state.
 
 ## CLI Reference
 
@@ -149,6 +151,24 @@ Single `server create` and `build <type>` commands must run under the consumer t
 | `runtime settings reset` | Restore default runtime settings. |
 
 Paper/Spigot/Purpur `/restart` is wired to a per-instance `multiplexor-restart.sh`, so `/restart` re-enters Multiplexor instead of exiting permanently. While that script waits, the instance reports `restarting`.
+
+### gameplay — Mineflayer player-protocol QA
+
+The harness is pinned under `MultiplexorApp/tool/mineflayer/`; `gameplay setup` installs it locally with npm. Offline bots are restricted to stopped, isolated instances: `gameplay prepare` binds the server to loopback, disables online authentication and whitelisting, and removes spawn protection. It never weakens a shared instance. `--start` starts a stopped target, while `--stop-after` only stops an instance that the gameplay command itself started.
+
+Every gameplay run starts a first-person Prismarine web feed on a free loopback port. The reachable URL is printed as soon as the feed is ready, included under `viewer.url` in the JSON report, and written immediately to `state/gameplay-tests/<instance>/viewer-<port>.json`; the state file changes from `active` to `closed` when the run ends. Use `--viewer-port <port>` when a stable port is useful or `--no-viewer` only when the feed is intentionally unnecessary.
+
+| Command | What it does |
+|---------|--------------|
+| `gameplay setup` | Install the pinned Mineflayer, pathfinder, and Prismarine Viewer dependencies with `npm ci`. |
+| `gameplay doctor [--json]` | Verify Node and the pinned gameplay dependency versions. |
+| `gameplay list [--json]` | List built-in scenarios. |
+| `gameplay prepare [instance]` | Prepare a stopped, isolated instance for loopback-only offline bot authentication. |
+| `gameplay run <scenario> [instance] [flags]` | Run a built-in name or `.mjs` scenario. Supports `--prepare`, `--start`, `--stop-after`, `--username`, `--timeout`, `--command`, `--expect`, `--effect`, `--viewer-port`, `--no-viewer`, `--no-op`, and `--json`. |
+
+The built-in `connect` scenario validates login, spawn, position, health, and connection stability. `command` requires `--command` plus an `--expect` regular expression. `effect` optionally runs `--command` and requires the named `--effect`. Custom modules default-export `{ name, description, async run(context) }`; the context supplies `bot`, `step`, `expect`, `command`, `waitForEvent`, `waitForMessage`, `sleep`, server metadata, and a safe-by-default pathfinder configuration.
+
+Mineflayer 4.37.1 requires Node 22+ and currently supports vanilla Java protocols through 1.21.11. Newer 26.x servers are outside its advertised protocol range until upstream adds support. Gameplay results prove protocol-visible behavior, not client rendering, resource packs, sound, camera behavior, client mods, or human feel.
 
 ### plugins / mods — dropin sources & sync
 
@@ -280,6 +300,11 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 # Run diagnostics when setup or runtime behavior looks suspicious
 ./start.sh doctor
 
+# Install Mineflayer once, then run a self-cleaning player-protocol smoke test
+./start.sh gameplay setup
+./start.sh server create gameplay-qa --jar /absolute/path/paper-1.21.11.jar --type paper --isolated
+./start.sh gameplay run connect gameplay-qa --prepare --start --stop-after
+
 # Try an update safely on staging before touching the original
 ./start.sh instance safe-update lobby --mc 1.21.11 --auto-build
 
@@ -313,8 +338,10 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   state/runtime/                  # tmux logs, pid files
   state/trends/                   # per-instance metric history for the monitor
   state/content-lock.yaml          # managed plugin/mod manifest
+  state/gameplay-tests/             # ignored Mineflayer JSON reports
 .multiplexor/templates/             # reusable server blueprints
 .multiplexor/workspace.yaml         # workspace marker
+MultiplexorApp/tool/mineflayer/      # pinned Mineflayer harness and scenarios
 active-instance                   # symlink to the active instance
 ```
 

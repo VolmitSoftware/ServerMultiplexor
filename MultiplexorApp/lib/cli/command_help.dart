@@ -113,6 +113,13 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'remove <name>',
     'sync [instance|--all] [--clean]',
   ]),
+  CommandHelpGroup('gameplay', <String>[
+    'setup',
+    'doctor [--json]',
+    'list [--json]',
+    'prepare [instance]',
+    'run <scenario> [instance] [--start] [--stop-after] [--prepare] [--username <name>] [--auth <offline|microsoft>] [--timeout <seconds>] [--startup-timeout <seconds>] [--connect-timeout <seconds>] [--assertion-timeout <seconds>] [--command <text>] [--expect <regex>] [--effect <name>] [--viewer-port <port>] [--no-viewer] [--no-op] [--json]',
+  ]),
   CommandHelpGroup('doctor', <String>['[--fix] [--json]']),
 ];
 
@@ -204,6 +211,11 @@ void writeGlobalHelp(void Function(String line) write) {
     write,
     './start.sh doctor',
     'check local tools, workspace state, and instance metadata',
+  );
+  _writeHelpCommand(
+    write,
+    './start.sh gameplay run connect qa --prepare --start --stop-after',
+    'run a Mineflayer player-protocol smoke test',
   );
   write('');
 

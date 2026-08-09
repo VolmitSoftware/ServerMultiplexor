@@ -1,0 +1,22 @@
+{
+  "name": "multiplexor-mineflayer-harness",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "doctor": "node src/cli.mjs doctor",
+    "list": "node src/cli.mjs list",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "compression": "1.8.1",
+    "express": "4.22.2",
+    "mineflayer": "4.37.1",
+    "mineflayer-pathfinder": "2.4.5",
+    "prismarine-viewer": "1.33.0",
+    "socket.io": "4.8.3"
+  }
+}

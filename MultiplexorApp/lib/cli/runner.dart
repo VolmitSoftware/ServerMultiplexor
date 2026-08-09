@@ -57,6 +57,7 @@ Future<int> _dispatch(List<String> args) async {
       case 'backup':
       case 'template':
       case 'content':
+      case 'gameplay':
         await handleNativePassthrough(<String>[command, ...rest]);
         return 0;
       case 'consumer':

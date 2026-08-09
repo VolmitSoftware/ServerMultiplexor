@@ -124,5 +124,82 @@ void main() {
         sha256.convert(utf8.encode('dropin-b')).toString(),
       );
     });
+
+    test('gameplay prepare refuses a shared instance', () async {
+      final Directory instance = Directory(
+        '${root.path}/consumers/plugin-consumers/instances/shared',
+      )..createSync(recursive: true);
+      File(
+        '${instance.path}/.server-source',
+      ).writeAsStringSync('type=paper\nlaunch=jar\n');
+      File(
+        '${instance.path}/server.properties',
+      ).writeAsStringSync('server-port=25565\n');
+
+      final result = await service.execute(<String>[
+        'gameplay',
+        'prepare',
+        'shared',
+      ], stream: false);
+
+      expect(result.exitCode, 2);
+      expect(result.stderr, contains('restricted to isolated instances'));
+    });
+
+    test(
+      'gameplay prepare configures offline auth on isolated instance',
+      () async {
+        final Directory instance = Directory(
+          '${root.path}/consumers/plugin-consumers/instances/qa',
+        )..createSync(recursive: true);
+        File(
+          '${instance.path}/.server-source',
+        ).writeAsStringSync('type=paper\nlaunch=jar\nisolated=true\n');
+        final File properties = File('${instance.path}/server.properties')
+          ..writeAsStringSync(
+            'server-port=25565\nonline-mode=true\nwhite-list=true\n',
+          );
+
+        final result = await service.execute(<String>[
+          'gameplay',
+          'prepare',
+          'qa',
+        ], stream: false);
+
+        expect(result.exitCode, 0);
+        expect(result.stdout, contains('Gameplay auth prepared: qa'));
+        expect(properties.readAsStringSync(), contains('server-ip=127.0.0.1'));
+        expect(properties.readAsStringSync(), contains('online-mode=false'));
+        expect(properties.readAsStringSync(), contains('white-list=false'));
+        expect(properties.readAsStringSync(), contains('spawn-protection=0'));
+      },
+    );
+
+    test('gameplay run rejects an invalid viewer port', () async {
+      final Directory instance = Directory(
+        '${root.path}/consumers/plugin-consumers/instances/qa',
+      )..createSync(recursive: true);
+      File(
+        '${instance.path}/.server-source',
+      ).writeAsStringSync('type=paper\nlaunch=jar\nisolated=true\n');
+      File(
+        '${instance.path}/server.properties',
+      ).writeAsStringSync('server-port=25565\nonline-mode=false\n');
+
+      final result = await service.execute(<String>[
+        'gameplay',
+        'run',
+        'connect',
+        'qa',
+        '--viewer-port',
+        '70000',
+      ], stream: false);
+
+      expect(result.exitCode, 2);
+      expect(
+        result.stderr,
+        contains('--viewer-port must be between 1 and 65535'),
+      );
+    });
   });
 }
