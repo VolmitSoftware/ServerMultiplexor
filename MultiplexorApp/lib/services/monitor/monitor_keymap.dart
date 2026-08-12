@@ -25,6 +25,7 @@ enum MonitorAction {
   newInstance,
   buildMenu,
   workspaceCard,
+  switchView,
   switchConsumer,
   cycleRange,
   refresh,
@@ -73,10 +74,11 @@ MonitorAction monitorActionForEvent(TermEvent event) {
       return MonitorAction.back;
     case TermEventKind.ctrlC:
       return MonitorAction.quit;
+    case TermEventKind.tab:
+      return MonitorAction.switchView;
     case TermEventKind.char:
       return _charAction(event.char);
     case TermEventKind.backspace:
-    case TermEventKind.tab:
     case TermEventKind.arrowLeft:
     case TermEventKind.arrowRight:
     case TermEventKind.home:

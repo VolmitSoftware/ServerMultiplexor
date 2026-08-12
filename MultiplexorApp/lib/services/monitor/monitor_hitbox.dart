@@ -37,6 +37,7 @@ const String wsBuildsHitId = 'ws:builds';
 const String wsTuningHitId = 'ws:tuning';
 const String wsConsumerHitId = 'ws:consumer';
 const String wsConsolesHitId = 'ws:consoles';
+const String wsConnectHitId = 'ws:connect';
 const String wsMoreHitId = 'ws:more';
 
 /// Every action-bar id there is, selection bar first. Both halves of the
@@ -56,6 +57,7 @@ const List<String> monitorBarHitIds = <String>[
   wsTuningHitId,
   wsConsumerHitId,
   wsConsolesHitId,
+  wsConnectHitId,
   wsMoreHitId,
 ];
 

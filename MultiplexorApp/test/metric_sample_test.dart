@@ -220,6 +220,20 @@ void main() {
       expect(sample.latencyMs, 42);
     });
 
+    test('parses appended Pterodactyl resource columns', () {
+      const String line =
+          'remote\trunning\t25565\tunlocked\t-\t-\t-\t-\tshared'
+          '\t3600\t12.5\t1073741824\t-\t-\t536870912'
+          '\t1048576\t2097152\t6442450944\t53687091200';
+      final MetricSample? sample = MetricSample.fromMetricsTsv(line, ts);
+      expect(sample, isNotNull);
+      expect(sample!.diskBytes, 536870912);
+      expect(sample.networkRxBytes, 1048576);
+      expect(sample.networkTxBytes, 2097152);
+      expect(sample.memoryLimitBytes, 6442450944);
+      expect(sample.diskLimitBytes, 53687091200);
+    });
+
     test('a stopped instance row with dash fields parses to nulls', () {
       const String line =
           'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-\t-';

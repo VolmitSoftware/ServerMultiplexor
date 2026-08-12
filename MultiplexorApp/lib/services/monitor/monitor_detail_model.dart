@@ -267,6 +267,7 @@ List<String> _headerPanel({
     'TPS ${theme.paint(monitorTpsText(tps, theme), theme.tpsTone(tps))}',
     'CPU ${formatCpuPercent(latest?.cpuPercent)}',
     'MEM ${formatBytes(latest?.rssBytes)}',
+    'DISK ${formatBytes(latest?.diskBytes)}',
     'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}',
   ];
   // Drop trailing facts rather than let the row be clipped mid-word on a

@@ -41,7 +41,7 @@ const Duration _yieldWindow = Duration(milliseconds: 10);
 /// How often metrics are swept, measured on the wall clock rather than in
 /// iterations: held keys and trackpad scrolling produce iterations, and
 /// neither should turn into a sweep storm.
-const Duration _sweepInterval = Duration(seconds: 2);
+const Duration _localSweepInterval = Duration(seconds: 2);
 
 /// How long each spinner glyph is shown. The spinner index comes from
 /// elapsed time for the same reason the sweep does — so it animates at a
@@ -91,6 +91,11 @@ class MonitorSwitchConsumer extends MonitorResult {
   const MonitorSwitchConsumer();
 }
 
+/// The user moved between the Local and Remote tabs.
+class MonitorSwitchView extends MonitorResult {
+  const MonitorSwitchView();
+}
+
 /// Runs the command-center dashboard until the user leaves it.
 ///
 /// Every collaborator is injected: [sampler] supplies metric history,
@@ -116,7 +121,11 @@ class MonitorScreen {
     required this.instanceAction,
     required this.workspaceAction,
     required this.readLogTail,
-  });
+    Duration sweepInterval = _localSweepInterval,
+    this.sweepIntervalProvider,
+    this.refreshImmediately = true,
+    this.sessionInvalidated,
+  }) : _sweepInterval = sweepInterval;
 
   final MetricsSampler sampler;
   final MonitorTheme theme;
@@ -128,6 +137,25 @@ class MonitorScreen {
   instanceAction;
   final Future<void> Function(WorkspaceModalAction action) workspaceAction;
   final Future<List<String>> Function(String logPath, int maxLines) readLogTail;
+
+  final Duration _sweepInterval;
+
+  /// Optional live cadence source. It is evaluated on every heartbeat so a
+  /// provider can adapt after its fleet size changes without rebuilding the
+  /// screen. When absent, [sweepInterval] remains the constructor's static
+  /// value (two seconds by default).
+  final Duration Function()? sweepIntervalProvider;
+
+  /// The refresh cadence currently in force.
+  Duration get sweepInterval => sweepIntervalProvider?.call() ?? _sweepInterval;
+
+  /// Whether entering the loop should immediately sweep. Callers that
+  /// preload metrics can disable this and begin the normal cadence now.
+  final bool refreshImmediately;
+
+  /// Reports that a suspended flow changed the backing provider session and
+  /// this screen must be rebuilt with a new sampler/store.
+  final bool Function()? sessionInvalidated;
 
   MonitorSnapshot _snapshot = const MonitorSnapshot(
     instances: <String>[],
@@ -269,7 +297,11 @@ class MonitorScreen {
   }
 
   Future<MonitorResult> _loop(TermIo io) async {
-    _kickRefresh();
+    if (refreshImmediately) {
+      _kickRefresh();
+    } else {
+      _lastSweepKick = DateTime.now();
+    }
     _render(io);
 
     while (true) {
@@ -282,7 +314,7 @@ class MonitorScreen {
         return const MonitorQuit();
       }
 
-      if (DateTime.now().difference(_lastSweepKick) >= _sweepInterval) {
+      if (DateTime.now().difference(_lastSweepKick) >= sweepInterval) {
         _kickRefresh();
       }
 
@@ -415,6 +447,10 @@ class MonitorScreen {
       latest: instance.isEmpty ? null : _latestFor(instance),
       locked: flags.locked,
       isolated: flags.isolated,
+      remote: _snapshot.view == MonitorView.remote,
+      operationBlockReason: instance.isEmpty
+          ? null
+          : _snapshot.operationBlockReasonFor(instance),
       theme: theme,
       hoveredId: _hoveredId,
       pressedId: _pressedId,
@@ -498,7 +534,7 @@ class MonitorScreen {
   /// already running.
   ///
   /// The cadence timestamp moves even on a dropped kick, so a capture that
-  /// runs longer than [_sweepInterval] is followed by a gap rather than
+  /// runs longer than [sweepInterval] is followed by a gap rather than
   /// being re-fired on the very next tick.
   void _kickRefresh() {
     _lastSweepKick = DateTime.now();
@@ -682,29 +718,31 @@ class MonitorScreen {
     }
     switch (id) {
       case actStartHitId:
-        await _runInstanceAction(InstanceModalAction.start);
+        return _runInstanceAction(InstanceModalAction.start);
       case actStopHitId:
-        await _runInstanceAction(InstanceModalAction.stop);
+        return _runInstanceAction(InstanceModalAction.stop);
       case actRestartHitId:
-        await _runInstanceAction(InstanceModalAction.restart);
+        return _runInstanceAction(InstanceModalAction.restart);
       case actConsoleHitId:
-        await _runInstanceAction(InstanceModalAction.console);
+        return _runInstanceAction(InstanceModalAction.console);
       case actDetailHitId:
         _enterDetail();
       case actMoreHitId:
         _openInstanceModal(_actionTarget());
       case wsNewHitId:
-        await _runWorkspaceAction(WorkspaceModalAction.newInstance);
+        return _runWorkspaceAction(WorkspaceModalAction.newInstance);
       case wsBuildsHitId:
-        await _runWorkspaceAction(WorkspaceModalAction.pullBuilds);
+        return _runWorkspaceAction(WorkspaceModalAction.pullBuilds);
       case wsTuningHitId:
-        await _runWorkspaceAction(WorkspaceModalAction.buildTuning);
+        return _runWorkspaceAction(WorkspaceModalAction.buildTuning);
       case wsConsumerHitId:
         // The one hand-off that still ends the session: a new profile means
         // a new sampler and a new trend store.
         return const MonitorSwitchConsumer();
       case wsConsolesHitId:
-        await _runQuickAction(MonitorAction.consolesGrid);
+        return _runQuickAction(MonitorAction.consolesGrid);
+      case wsConnectHitId:
+        return _runWorkspaceAction(WorkspaceModalAction.connect);
       case wsMoreHitId:
         _modal = const WorkspaceModal();
         _clearPointer();
@@ -753,31 +791,45 @@ class MonitorScreen {
         if (action == null) {
           return null;
         }
+        if (_instanceOperationBlocked(instance, action)) {
+          return null;
+        }
         _closeModal();
-        await _suspended(() => instanceAction(instance, action));
+        final bool invalidated = await _suspended(
+          () => instanceAction(instance, action),
+        );
+        return invalidated ? const MonitorSwitchConsumer() : null;
       case WorkspaceModal():
         final WorkspaceModalAction? action = workspaceModalActionForId(id);
         if (action == null) {
           return null;
         }
         _closeModal();
-        await _suspended(() => workspaceAction(action));
+        final bool invalidated = await _suspended(
+          () => workspaceAction(action),
+        );
+        return invalidated ? const MonitorSwitchConsumer() : null;
     }
-    return null;
   }
 
   /// Runs [action] against whichever instance the view is pointed at, on a
   /// suspended terminal. Without a target there is nothing to act on.
-  Future<void> _runInstanceAction(InstanceModalAction action) async {
+  Future<MonitorResult?> _runInstanceAction(InstanceModalAction action) async {
     final String? target = _actionTarget();
-    if (target == null) {
-      return;
+    if (target == null || _instanceOperationBlocked(target, action)) {
+      return null;
     }
-    await _suspended(() => instanceAction(target, action));
+    final bool invalidated = await _suspended(
+      () => instanceAction(target, action),
+    );
+    return invalidated ? const MonitorSwitchConsumer() : null;
   }
 
-  Future<void> _runWorkspaceAction(WorkspaceModalAction action) async {
-    await _suspended(() => workspaceAction(action));
+  Future<MonitorResult?> _runWorkspaceAction(
+    WorkspaceModalAction action,
+  ) async {
+    final bool invalidated = await _suspended(() => workspaceAction(action));
+    return invalidated ? const MonitorSwitchConsumer() : null;
   }
 
   void _openInstanceModal(String? instance) {
@@ -848,14 +900,11 @@ class MonitorScreen {
       case MonitorAction.kill:
       case MonitorAction.console:
       case MonitorAction.consolesGrid:
-        await _runQuickAction(action);
-        return null;
+        return _runQuickAction(action);
       case MonitorAction.newInstance:
-        await _runWorkspaceAction(WorkspaceModalAction.newInstance);
-        return null;
+        return _runWorkspaceAction(WorkspaceModalAction.newInstance);
       case MonitorAction.buildMenu:
-        await _runWorkspaceAction(WorkspaceModalAction.buildTuning);
-        return null;
+        return _runWorkspaceAction(WorkspaceModalAction.buildTuning);
       case MonitorAction.workspaceCard:
         // The keyboard twin of `[ MORE ]` on the workspace bar — and, like
         // that chip, a landing-view affordance. The detail view draws no
@@ -866,6 +915,8 @@ class MonitorScreen {
           _clearPointer();
         }
         return null;
+      case MonitorAction.switchView:
+        return const MonitorSwitchView();
       case MonitorAction.switchConsumer:
         return const MonitorSwitchConsumer();
       case MonitorAction.cycleRange:
@@ -891,24 +942,59 @@ class MonitorScreen {
     return _selectedInstance;
   }
 
-  Future<void> _runQuickAction(MonitorAction action) async {
+  Future<MonitorResult?> _runQuickAction(MonitorAction action) async {
     final String? target = _actionTarget();
     // The consoles grid is a workspace-level view, not a per-instance
     // command: it opens with or without a selection, and the name is only a
     // hint about which pane to focus. Every other quick action needs a
     // target and does nothing without one.
     if (target == null && action != MonitorAction.consolesGrid) {
-      return;
+      return null;
     }
-    await _suspended(() => quickAction(target ?? '', action));
+    if (target != null && _quickOperationBlocked(target, action)) {
+      return null;
+    }
+    final bool invalidated = await _suspended(
+      () => quickAction(target ?? '', action),
+    );
+    return invalidated ? const MonitorSwitchConsumer() : null;
+  }
+
+  bool _instanceOperationBlocked(String instance, InstanceModalAction action) {
+    if (_snapshot.view != MonitorView.remote ||
+        _snapshot.operationBlockReasonFor(instance) == null) {
+      return false;
+    }
+    return switch (action) {
+      InstanceModalAction.start ||
+      InstanceModalAction.stop ||
+      InstanceModalAction.restart ||
+      InstanceModalAction.console => true,
+      _ => false,
+    };
+  }
+
+  bool _quickOperationBlocked(String instance, MonitorAction action) {
+    if (_snapshot.view != MonitorView.remote ||
+        _snapshot.operationBlockReasonFor(instance) == null) {
+      return false;
+    }
+    return switch (action) {
+      MonitorAction.restart ||
+      MonitorAction.stop ||
+      MonitorAction.kill ||
+      MonitorAction.console => true,
+      _ => false,
+    };
   }
 
   /// Hands the terminal back for [flow] and takes it again afterwards.
   ///
   /// The restore half runs in a `finally`, so a flow that throws still
   /// leaves the screen owned and repainted rather than half-suspended.
-  Future<void> _suspended(Future<void> Function() flow) async {
+  Future<bool> _suspended(Future<void> Function() flow) async {
     final TermIo io = TermIo.instance;
+    bool invalidated = false;
     _leaveScreen(io);
     try {
       await suspend(flow);
@@ -923,7 +1009,11 @@ class MonitorScreen {
       _clearPointer();
       // Picks up whatever the flow changed — state, ports, lock and
       // isolation flags — on the next sweep's capture.
-      _kickRefresh();
+      invalidated = sessionInvalidated?.call() ?? false;
+      if (!invalidated) {
+        _kickRefresh();
+      }
     }
+    return invalidated;
   }
 }

@@ -10,6 +10,8 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 - `java` 17+ (or whatever your target server requires)
 - `git`, `tmux` (tmux is required for `runtime start` / `runtime console`)
 - Node.js 22+ and npm (required for Mineflayer gameplay tests)
+- macOS Keychain for persistent Pterodactyl credentials (origin-bound
+  environment credentials are available for CI/non-macOS sessions)
 
 ## Quick Start
 
@@ -19,11 +21,13 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 ./start.sh server create demo --type purpur --auto-build
 ./start.sh runtime start demo                       # starts and attaches console
 ./start.sh runtime watch                            # live monitoring dashboard
+./start.sh remote verify                            # verify the saved Pterodactyl panel
+./start.sh remote list                              # remote fleet + every advertised/bind endpoint
 ```
 
 ## Live monitor
 
-`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. It sweeps `runtime metrics` every two seconds and keeps a per-instance ring of players, TPS, CPU, and memory, seeded at startup from the active consumer's `state/trends/` (for example `consumers/plugin-consumers/state/trends/`) so the charts survive a restart. That history is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that; retention is applied once per session, as the monitor opens, and only to a trend file that has grown past 4 MiB.
+`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. `Tab` switches between the Local workspace and the saved Pterodactyl Remote fleet. Local sweeps `runtime metrics` every two seconds. Remote uses Pterodactyl's resource API at a rate-aware interval of at least 20 seconds and automatically slows down for large panels. Both views keep per-server history seeded from their own trend stores so charts survive a restart. History is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that.
 
 The landing view is a `MULTIPLEXOR` header, a KPI strip (`FLEET` servers-up and players, a fleet `TPS` sparkline, a `HOST` memory and CPU card), a full-width `SERVERS` table (state, players, TPS, a trend sparkline, memory, CPU and uptime per row — narrow terminals drop the rightmost readings whole), and a compact card for the selected server. The card is sized by the selection's own state: a running server expands into small side-by-side charts (TPS, CPU, memory as width allows) over a facts line, while a stopped one collapses to a single line and leaves the rows to the table. Under them sit two action bars — the selected server's, then the workspace's — over the key hint footer.
 
@@ -35,6 +39,7 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 
 | Key | What it does |
 |-----|--------------|
+| `tab` | Switch between Local and Pterodactyl Remote fleets. |
 | `↑` `↓`, wheel | Move the selection. The wheel outside the servers panel cycles the chart window instead. |
 | `enter`, click | Open the selected server's card (a second click on the selected row, or `[ MORE ]`, does the same). |
 | `d` | Detail screen for the selected server. |
@@ -53,7 +58,11 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
-`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc: a server's card carries its state-aware actions (console/restart/stop while running; start/update/reset/delete while stopped; activate/port/MOTD/open-folder/toggle-isolation/lock-or-unlock always), `n` runs the create flow, `b` goes straight to Build & tuning, `c` switches consumer. Delete and factory reset are drawn disabled while an instance is locked. Keys pressed while a build or sync runs are discarded. Without a TTY the wizard prints direct-command hints instead.
+`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc. Local keeps the existing state-aware server and workspace actions. Remote exposes only operations Pterodactyl can safely perform: connect/repair, start, stop, restart, a live console, fleet start/stop, and create from an owned template. Suspended, installing, maintenance, unavailable, and otherwise non-runnable servers retain their rows but have mutating actions disabled.
+
+The Remote connection card is the guided login surface. Multiplexor asks for the panel HTTPS origin once, opens a secure Keychain enrollment prompt for a Client API key, and verifies the connection before saving the profile. It never accepts an API key on the command line and never stores the panel password. A root-admin Client key provides the one-key experience on current Pterodactyl releases; a separate Application key is requested only when creation needs it. Bad or rotated credentials can be replaced from the same connection flow.
+
+Remote cards show every configured advertised allocation and every bind allocation. DNS A/AAAA results are shown beside configured aliases when resolution succeeds. These are intentionally separate: Pterodactyl does not know an upstream NAT port mapping, so Multiplexor never guesses that a private bind address, node FQDN, and public game endpoint are interchangeable.
 
 The workspace card (`[ MORE ]` on the workspace bar) holds the actions that are not per-instance: Build & tuning, Pull latest builds, Create many, Start all stopped, Stop all running, and Wipe everything. Destructive prompts (wipe, delete, factory reset) default to no and show that default in red. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
 
@@ -74,10 +83,31 @@ Pull latest builds refreshes the newest build of every platform the active consu
 - **Template** — `.multiplexor/templates/<name>.yaml` captures a reusable server blueprint: server type/version, JVM settings, isolation, server.properties overrides, and optional dropin sync behavior.
 - **Backup** — `consumers/<profile>/backups/<instance>/<backup-id>/` stores a restorable snapshot with checksums and a manifest. Backups are used manually and by `instance safe-update`.
 - **Gameplay test** — a Mineflayer scenario run against an actual instance. Built-ins cover connection, command responses, and status effects; custom `.mjs` scenarios can assert any protocol-visible player behavior. Reports stay under ignored per-consumer state.
+- **Remote profile** — non-secret Pterodactyl panel metadata in `.multiplexor/pterodactyl-profiles.yaml`. Client/Application bearer keys live in macOS Keychain under an exact profile+HTTPS-origin identity, never in the YAML file.
 
 ## CLI Reference
 
 Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--consumer <profile>` for a one-shot profile override, `--root <path>` for a different workspace, `--verbose` for arg-normalization debug output. Use `./start.sh help <command>` or `<command> --help` for focused command help.
+
+### remote — Pterodactyl fleet
+
+| Command | What it does |
+|---------|--------------|
+| `remote connect --url <https://panel> [--id <id>] [--name <name>] [--application] [--replace]` | Verify and save a panel connection. Reuses an existing origin-bound credential; `--replace` securely re-enrolls it. `--application` also enrolls the optional creation key. |
+| `remote profiles` | List saved non-secret panel profiles. |
+| `remote verify [--profile <id>]` | Verify credentials, whole-panel visibility, node access, creation capability, and configuration warnings. |
+| `remote list [--profile <id>]` | List every remote server with all advertised/DNS-resolved and bind IP:port allocations. |
+| `remote nodes [--profile <id>]` | Show each node's FQDN, configured/allocated memory and disk, daemon port, and SFTP port. |
+| `remote stats <server> [--profile <id>]` | Show current state, CPU, memory, disk, network, and uptime for one server. |
+| `remote stats --all [--profile <id>]` | Show aggregate and per-server resource statistics for the panel fleet. |
+| `remote start\|stop\|restart\|kill <server> [--profile <id>]` | Send a Pterodactyl power signal. |
+| `remote console <server> [--profile <id>]` | Attach to sanitized live console output and commands. Esc, Ctrl-C, or `:exit` detaches without stopping the server. |
+| `remote command <server> <command> [--profile <id>]` | Send one console command. |
+| `remote create <name> --template <server> [--memory <MiB>] [--disk <MiB>] [--cpu <percent>] [--start] [--profile <id>]` | Create a server from an owned template using the next one or two free allocations. Worlds, backups, schedules, and subusers are not copied. |
+
+When exactly one profile exists, `--profile` is optional. With multiple profiles, commands require it rather than guessing which production panel to mutate. `ptero` is an alias for `remote`.
+
+For CI/non-macOS sessions, set both an origin-bound key and its companion origin, for example `MULTIPLEXOR_PTERODACTYL_DEV_CLIENT_API_KEY` plus `MULTIPLEXOR_PTERODACTYL_DEV_ORIGIN=https://panel.example.com`. Environment credentials are session-only and should not be used for long-running child-process workflows.
 
 ### consumer — pick which profile is active
 
@@ -300,6 +330,13 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 # Run diagnostics when setup or runtime behavior looks suspicious
 ./start.sh doctor
 
+# Inspect and monitor a Pterodactyl panel without mutating it
+./start.sh remote verify
+./start.sh remote list
+./start.sh remote stats --all
+./start.sh remote nodes
+./start.sh remote console <server>
+
 # Install Mineflayer once, then run a self-cleaning player-protocol smoke test
 ./start.sh gameplay setup
 ./start.sh server create gameplay-qa --jar /absolute/path/paper-1.21.11.jar --type paper --isolated
@@ -341,6 +378,8 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   state/gameplay-tests/             # ignored Mineflayer JSON reports
 .multiplexor/templates/             # reusable server blueprints
 .multiplexor/workspace.yaml         # workspace marker
+.multiplexor/pterodactyl-profiles.yaml # non-secret remote panel metadata
+.manager-state/pterodactyl/         # remote monitor trend history
 MultiplexorApp/tool/mineflayer/      # pinned Mineflayer harness and scenarios
 active-instance                   # symlink to the active instance
 ```

@@ -5,6 +5,7 @@ import 'command_help.dart';
 import 'handlers/consumer_handlers.dart';
 import 'handlers/monitor_handler.dart';
 import 'handlers/passthrough_handlers.dart';
+import 'handlers/remote_handler.dart';
 import 'handlers/wizard_handler.dart';
 
 /// Runs one CLI invocation and returns its exit code.
@@ -72,6 +73,9 @@ Future<int> _dispatch(List<String> args) async {
         return _runInstance(rest);
       case 'runtime':
         return _runRuntime(rest);
+      case 'remote':
+      case 'ptero':
+        return handleRemote(rest);
       case 'plugins':
         return _runPlugins(rest);
       case 'mods':

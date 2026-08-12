@@ -76,6 +76,8 @@ MonitorFrame instanceOverlay({
   RuntimeState? state = RuntimeState.running,
   bool locked = false,
   bool isolated = false,
+  bool remote = false,
+  String? operationBlockReason,
   MonitorTheme? theme,
   String? hoveredId,
   String? pressedId,
@@ -87,6 +89,8 @@ MonitorFrame instanceOverlay({
   latest: state == null ? null : sample(state),
   locked: locked,
   isolated: isolated,
+  remote: remote,
+  operationBlockReason: operationBlockReason,
   theme: theme ?? MonitorTheme.plain(),
   hoveredId: hoveredId,
   pressedId: pressedId,
@@ -187,6 +191,7 @@ void main() {
         WorkspaceModalAction.stopAll,
         WorkspaceModalAction.wipe,
         WorkspaceModalAction.newInstance,
+        WorkspaceModalAction.connect,
       ]);
     });
 
@@ -414,6 +419,25 @@ void main() {
   });
 
   group('overlayModal instance actions', () {
+    test('shows remote block reason and withholds every operation hitbox', () {
+      final MonitorFrame frame = instanceOverlay(
+        remote: true,
+        operationBlockReason: 'node is under maintenance',
+      );
+      final String text = plainRows(frame).join('\n');
+
+      expect(text, contains('BLOCKED'));
+      expect(text, contains('node is under maintenance'));
+      expect(text, contains('[ STOP ]'));
+      expect(text, contains('[ RESTART ]'));
+      expect(text, contains('[ CONSOLE ]'));
+      expect(
+        buttonIds(frame),
+        isNot(containsAll(<String>['im:stop', 'im:restart', 'im:console'])),
+      );
+      expect(buttonIds(frame), isEmpty);
+    });
+
     test('offers stop, restart and console while the instance runs', () {
       final Set<String> ids = buttonIds(instanceOverlay());
       expect(ids, containsAll(<String>['im:stop', 'im:restart', 'im:console']));

@@ -1,0 +1,6 @@
+{
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiJ9.fixture.signature",
+    "socket": "wss://node.example.test:8080/api/servers/00000000-0000-0000-0000-000000000042/ws"
+  }
+}

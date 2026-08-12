@@ -40,6 +40,9 @@ const InstanceFlags _defaultFlags = InstanceFlags(
   isolated: false,
 );
 
+/// Which fleet the dashboard is currently presenting.
+enum MonitorView { local, remote }
+
 /// Everything the dashboard needs to draw one frame: which instances exist,
 /// their metric history (chronological, oldest first), their lock/isolation
 /// flags, the active consumer profile's name, and which instance is the
@@ -51,6 +54,11 @@ class MonitorSnapshot {
     required this.consumerName,
     this.flags = const <String, InstanceFlags>{},
     this.activeInstance,
+    this.view = MonitorView.local,
+    this.displayNames = const <String, String>{},
+    this.advertisedEndpoints = const <String, String>{},
+    this.bindEndpoints = const <String, String>{},
+    this.operationBlockReasons = const <String, String>{},
   });
 
   /// Instance names in display order.
@@ -71,6 +79,42 @@ class MonitorSnapshot {
   /// The instance marked active in the workspace, if any.
   final String? activeInstance;
 
+  /// The provider tab whose servers these readings belong to.
+  final MonitorView view;
+
+  /// Human names keyed by the stable identifiers in [instances].
+  final Map<String, String> displayNames;
+
+  /// Provider-advertised endpoints. They are never inferred from bind
+  /// addresses because aliases and NAT can change both host and port.
+  final Map<String, String> advertisedEndpoints;
+
+  /// Interface addresses the server process actually binds, when known.
+  final Map<String, String> bindEndpoints;
+
+  /// Why provider operations are unavailable for a server, keyed by its
+  /// stable identifier. A reason disables power and command actions while
+  /// leaving read-only navigation available.
+  final Map<String, String> operationBlockReasons;
+
+  String displayNameFor(String instance) => displayNames[instance] ?? instance;
+
+  String? advertisedEndpointFor(String instance) =>
+      advertisedEndpoints[instance];
+
+  String? bindEndpointFor(String instance) => bindEndpoints[instance];
+
+  /// Every advertised endpoint for [instance], in provider order.
+  List<String> advertisedEndpointsFor(String instance) =>
+      _endpointList(advertisedEndpoints[instance]);
+
+  /// Every bind endpoint for [instance], in provider order.
+  List<String> bindEndpointsFor(String instance) =>
+      _endpointList(bindEndpoints[instance]);
+
+  String? operationBlockReasonFor(String instance) =>
+      operationBlockReasons[instance];
+
   /// [instance]'s history, or an empty list when it has none.
   List<MetricSample> historyFor(String instance) =>
       history[instance] ?? const <MetricSample>[];
@@ -83,6 +127,15 @@ class MonitorSnapshot {
     final List<MetricSample> samples = historyFor(instance);
     return samples.isEmpty ? null : samples.last;
   }
+}
+
+List<String> _endpointList(String? encoded) {
+  if (encoded == null || encoded.isEmpty) {
+    return const <String>[];
+  }
+  return List<String>.unmodifiable(
+    encoded.split('\n').where((String endpoint) => endpoint.isNotEmpty),
+  );
 }
 
 /// The short label for a chart/window [range]: the four cycled ranges get

@@ -3,11 +3,15 @@ import 'consumer_service.dart';
 import 'environment_service.dart';
 import 'manager_context.dart';
 import 'passthrough_service.dart';
+import 'pterodactyl/pterodactyl_credential_store.dart';
+import 'pterodactyl/pterodactyl_profile_store.dart';
+import 'pterodactyl/pterodactyl_service.dart';
 
 late final ManagerContext appContext;
 late final ConsumerService consumerService;
 late final EnvironmentService environmentService;
 late final PassthroughService passthroughService;
+late final PterodactylService pterodactylService;
 
 void initializeAppContext({
   String? requestedConsumer,
@@ -30,4 +34,8 @@ void initializeAppContext({
   );
   environmentService.bootstrap();
   passthroughService = PassthroughService(appContext, consumerService);
+  pterodactylService = PterodactylService(
+    profileStore: PterodactylProfileStore(appContext.metadataDir),
+    credentialStore: PterodactylCredentialStore(appContext.metadataDir),
+  );
 }

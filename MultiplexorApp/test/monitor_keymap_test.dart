@@ -41,6 +41,13 @@ void main() {
       );
     });
 
+    test('maps tab to the Local and Remote view switch', () {
+      expect(
+        monitorActionForEvent(const TermEvent(TermEventKind.tab)),
+        MonitorAction.switchView,
+      );
+    });
+
     test('maps the uppercase quick actions to their instance commands', () {
       expect(monitorActionForEvent(typed('R')), MonitorAction.restart);
       expect(monitorActionForEvent(typed('S')), MonitorAction.stop);
@@ -102,6 +109,7 @@ void main() {
         TermEventKind.enter,
         TermEventKind.escape,
         TermEventKind.ctrlC,
+        TermEventKind.tab,
         TermEventKind.char,
       };
       final Iterable<TermEventKind> unbound = TermEventKind.values.where(

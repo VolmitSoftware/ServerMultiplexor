@@ -76,6 +76,7 @@ enum WorkspaceModalAction {
   stopAll,
   wipe,
   newInstance,
+  connect,
 }
 
 /// The id prefix every instance-card button hitbox carries: the id is
@@ -358,6 +359,60 @@ List<List<ButtonSpec>> _workspaceRows() => <List<ButtonSpec>>[
   ],
 ];
 
+List<List<ButtonSpec>> _remoteInstanceRows({
+  required MetricSample? latest,
+  required bool operationsBlocked,
+}) {
+  final RuntimeState? state = latest?.state;
+  final bool stopped = state == null || state == RuntimeState.stopped;
+  return <List<ButtonSpec>>[
+    <ButtonSpec>[
+      stopped
+          ? ButtonSpec(
+              id: instanceModalHitId(InstanceModalAction.start),
+              label: 'START',
+              enabled: !operationsBlocked,
+            )
+          : ButtonSpec(
+              id: instanceModalHitId(InstanceModalAction.stop),
+              label: 'STOP',
+              enabled: !operationsBlocked,
+            ),
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.restart),
+        label: 'RESTART',
+        enabled: !stopped && !operationsBlocked,
+      ),
+    ],
+    <ButtonSpec>[
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.console),
+        label: 'CONSOLE',
+        enabled: !stopped && !operationsBlocked,
+      ),
+    ],
+  ];
+}
+
+List<List<ButtonSpec>> _remoteWorkspaceRows() => <List<ButtonSpec>>[
+  <ButtonSpec>[
+    ButtonSpec(
+      id: workspaceModalHitId(WorkspaceModalAction.connect),
+      label: 'CONNECTION',
+    ),
+  ],
+  <ButtonSpec>[
+    ButtonSpec(
+      id: workspaceModalHitId(WorkspaceModalAction.startAll),
+      label: 'START ALL',
+    ),
+    ButtonSpec(
+      id: workspaceModalHitId(WorkspaceModalAction.stopAll),
+      label: 'STOP ALL',
+    ),
+  ],
+];
+
 /// The dismiss-hint content row: [_modalHint] centered across [innerWidth],
 /// faint.
 String _hintRow(int innerWidth, MonitorTheme theme) {
@@ -404,6 +459,8 @@ MonitorFrame overlayModal({
   required MetricSample? latest,
   required bool locked,
   required bool isolated,
+  bool remote = false,
+  String? operationBlockReason,
   required MonitorTheme theme,
   String? hoveredId,
   String? pressedId,
@@ -414,17 +471,21 @@ MonitorFrame overlayModal({
     InstanceModal(instance: final String name) => name,
     WorkspaceModal() => 'WORKSPACE',
   };
+  final bool instanceBlocked =
+      modal is InstanceModal && remote && operationBlockReason != null;
   final String? badge = switch (modal) {
-    InstanceModal() => monitorStateText(latest),
+    InstanceModal() => instanceBlocked ? 'BLOCKED' : monitorStateText(latest),
     WorkspaceModal() => null,
   };
   final List<List<ButtonSpec>> allRows = switch (modal) {
-    InstanceModal() => _instanceRows(
-      latest: latest,
-      locked: locked,
-      isolated: isolated,
-    ),
-    WorkspaceModal() => _workspaceRows(),
+    InstanceModal() =>
+      remote
+          ? _remoteInstanceRows(
+              latest: latest,
+              operationsBlocked: instanceBlocked,
+            )
+          : _instanceRows(latest: latest, locked: locked, isolated: isolated),
+    WorkspaceModal() => remote ? _remoteWorkspaceRows() : _workspaceRows(),
   };
 
   // Width is derived from the full row set, not the height-truncated one, so
@@ -435,12 +496,16 @@ MonitorFrame overlayModal({
   // Two borders and the hint row are the card's fixed overhead; whatever is
   // left over is the chip-row budget, and at least one chip row is always
   // drawn even when that overflows a very short frame.
-  final int budget = lines - 3;
+  final int reasonRows = instanceBlocked ? 1 : 0;
+  final int budget = lines - 3 - reasonRows;
   final int maxRows = budget < 1 ? 1 : budget;
   final List<List<ButtonSpec>> buttonRows = allRows.length > maxRows
       ? allRows.sublist(0, maxRows)
       : allRows;
-  final bool showHint = lines >= buttonRows.length + 3;
+  final bool showReason =
+      instanceBlocked && lines >= buttonRows.length + reasonRows + 2;
+  final bool showHint =
+      lines >= buttonRows.length + (showReason ? reasonRows : 0) + 3;
 
   final List<String> content = <String>[];
   final List<List<ButtonSpan>> rowSpans = <List<ButtonSpan>>[];
@@ -456,6 +521,9 @@ MonitorFrame overlayModal({
     );
     content.add(render.row);
     rowSpans.add(render.spans);
+  }
+  if (showReason) {
+    content.add(theme.paint('BLOCKED: $operationBlockReason', theme.danger));
   }
   if (showHint) {
     content.add(_hintRow(innerWidth, theme));

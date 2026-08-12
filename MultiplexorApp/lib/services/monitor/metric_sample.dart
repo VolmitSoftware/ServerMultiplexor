@@ -27,6 +27,11 @@ class MetricSample {
     this.latencyMs,
     this.cpuPercent,
     this.rssBytes,
+    this.diskBytes,
+    this.networkRxBytes,
+    this.networkTxBytes,
+    this.memoryLimitBytes,
+    this.diskLimitBytes,
     this.uptimeSeconds,
     this.version,
     this.logPath,
@@ -42,6 +47,11 @@ class MetricSample {
   final int? latencyMs;
   final double? cpuPercent;
   final int? rssBytes;
+  final int? diskBytes;
+  final int? networkRxBytes;
+  final int? networkTxBytes;
+  final int? memoryLimitBytes;
+  final int? diskLimitBytes;
   final int? uptimeSeconds;
   final String? version;
   final String? logPath;
@@ -81,6 +91,26 @@ class MetricSample {
     final int? rssBytes = this.rssBytes;
     if (rssBytes != null) {
       json['rssBytes'] = rssBytes;
+    }
+    final int? diskBytes = this.diskBytes;
+    if (diskBytes != null) {
+      json['diskBytes'] = diskBytes;
+    }
+    final int? networkRxBytes = this.networkRxBytes;
+    if (networkRxBytes != null) {
+      json['networkRxBytes'] = networkRxBytes;
+    }
+    final int? networkTxBytes = this.networkTxBytes;
+    if (networkTxBytes != null) {
+      json['networkTxBytes'] = networkTxBytes;
+    }
+    final int? memoryLimitBytes = this.memoryLimitBytes;
+    if (memoryLimitBytes != null) {
+      json['memoryLimitBytes'] = memoryLimitBytes;
+    }
+    final int? diskLimitBytes = this.diskLimitBytes;
+    if (diskLimitBytes != null) {
+      json['diskLimitBytes'] = diskLimitBytes;
     }
     final int? uptimeSeconds = this.uptimeSeconds;
     if (uptimeSeconds != null) {
@@ -134,6 +164,11 @@ class MetricSample {
       latencyMs: _jsonToInt(decoded['latencyMs']),
       cpuPercent: _jsonToDouble(decoded['cpuPercent']),
       rssBytes: _jsonToInt(decoded['rssBytes']),
+      diskBytes: _jsonToInt(decoded['diskBytes']),
+      networkRxBytes: _jsonToInt(decoded['networkRxBytes']),
+      networkTxBytes: _jsonToInt(decoded['networkTxBytes']),
+      memoryLimitBytes: _jsonToInt(decoded['memoryLimitBytes']),
+      diskLimitBytes: _jsonToInt(decoded['diskLimitBytes']),
       uptimeSeconds: _jsonToInt(decoded['uptimeSeconds']),
       version: decoded['version'] is String
           ? decoded['version'] as String
@@ -146,7 +181,9 @@ class MetricSample {
 
   /// Parses one row of the extended `runtime metrics` TSV output:
   /// `name state port locked players max version tps isolated
-  /// uptimeSeconds cpuPercent rssBytes logPath latencyMs`, tab-separated,
+  /// uptimeSeconds cpuPercent rssBytes logPath latencyMs diskBytes
+  /// networkRxBytes networkTxBytes memoryLimitBytes diskLimitBytes`,
+  /// tab-separated,
   /// `-` marking a null cell.
   ///
   /// `locked` and `isolated` are read but not stored on [MetricSample] (the
@@ -157,8 +194,9 @@ class MetricSample {
   /// Shorter rows are read as far as they go, so an older writer's output
   /// still parses: 9-12 columns leave every metrics-only field null, and 13
   /// columns (the format before ping latency was carried) leave
-  /// [latencyMs] null rather than fabricating a round trip. Columns beyond
-  /// the 14th are ignored.
+  /// [latencyMs] null rather than fabricating a round trip. The five remote
+  /// resource columns are append-only so existing local writers remain
+  /// compatible.
   static MetricSample? fromMetricsTsv(String line, DateTime now) {
     final List<String> cols = line.split('\t');
     if (cols.length < 9) {
@@ -199,6 +237,11 @@ class MetricSample {
       uptimeSeconds: uptimeSeconds,
       cpuPercent: cpuPercent,
       rssBytes: rssBytes,
+      diskBytes: cols.length >= 15 ? _tsvInt(cols[14]) : null,
+      networkRxBytes: cols.length >= 16 ? _tsvInt(cols[15]) : null,
+      networkTxBytes: cols.length >= 17 ? _tsvInt(cols[16]) : null,
+      memoryLimitBytes: cols.length >= 18 ? _tsvInt(cols[17]) : null,
+      diskLimitBytes: cols.length >= 19 ? _tsvInt(cols[18]) : null,
       logPath: logPath,
     );
   }
@@ -224,6 +267,11 @@ class MetricSample {
       latencyMs: latencyMs,
       cpuPercent: cpuPercent ?? this.cpuPercent,
       rssBytes: rssBytes ?? this.rssBytes,
+      diskBytes: diskBytes,
+      networkRxBytes: networkRxBytes,
+      networkTxBytes: networkTxBytes,
+      memoryLimitBytes: memoryLimitBytes,
+      diskLimitBytes: diskLimitBytes,
       uptimeSeconds: uptimeSeconds,
       version: version,
       logPath: logPath,

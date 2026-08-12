@@ -595,66 +595,60 @@ void main() {
       );
     });
 
-    test(
-      'expands a running selection into side-by-side charts and facts',
-      () {
-        final MonitorFrame frame = frameOf(
+    test('expands a running selection into side-by-side charts and facts', () {
+      final MonitorFrame frame = frameOf(
+        columns: 132,
+        lines: 40,
+        selectedIndex: 1,
+      );
+      expectExactFrame(frame.rows, 132, 40);
+      final List<String> rows = stripAll(frame.rows);
+
+      // 31 body rows: the card grows to its 15-row ceiling and the table
+      // keeps the other 16, so the card's top border sits on row 22.
+      expect(rows[22], startsWith('┌─ BETA '));
+      expect(rows[22], contains('running · 15m'));
+
+      final String card = rows.sublist(22, 37).join('\n');
+      final String labels = rows[23];
+      expect(labels, contains('TPS'));
+      expect(labels, contains('CPU %'));
+      expect(labels, contains('MEM MiB'));
+      expect(card, contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
+      expect(card, contains('100 ┤'), reason: 'forced 0..100 CPU gutter');
+      expect(card, contains('PLAYERS'));
+      expect(card, contains('PING'));
+      expect(card, contains('MEM 3.0G'));
+      expect(card, contains('1.21.4'));
+    });
+
+    test('collapses a stopped selection to one quiet line, no chart grid', () {
+      final List<String> rows = stripAll(
+        frameOf(
+          snapshot: mixedFleet(),
+          selectedIndex: 1,
           columns: 132,
           lines: 40,
-          selectedIndex: 1,
-        );
-        expectExactFrame(frame.rows, 132, 40);
-        final List<String> rows = stripAll(frame.rows);
+        ).rows,
+      );
 
-        // 31 body rows: the card grows to its 15-row ceiling and the table
-        // keeps the other 16, so the card's top border sits on row 22.
-        expect(rows[22], startsWith('┌─ BETA '));
-        expect(rows[22], contains('running · 15m'));
-
-        final String card = rows.sublist(22, 37).join('\n');
-        final String labels = rows[23];
-        expect(labels, contains('TPS'));
-        expect(labels, contains('CPU %'));
-        expect(labels, contains('MEM MiB'));
-        expect(card, contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
-        expect(card, contains('100 ┤'), reason: 'forced 0..100 CPU gutter');
-        expect(card, contains('PLAYERS'));
-        expect(card, contains('PING'));
-        expect(card, contains('MEM 3.0G'));
-        expect(card, contains('1.21.4'));
-      },
-    );
-
-    test(
-      'collapses a stopped selection to one quiet line, no chart grid',
-      () {
-        final List<String> rows = stripAll(
-          frameOf(
-            snapshot: mixedFleet(),
-            selectedIndex: 1,
-            columns: 132,
-            lines: 40,
-          ).rows,
-        );
-
-        // An idle card is three rows on the floor of the body; everything
-        // above it belongs to the fleet table.
-        expect(rows[34], startsWith('┌─ GAMMA '));
-        expect(rows[34], contains('stopped · 15m'));
-        expect(rows[35], contains('stopped · START to launch'));
-        expect(
-          RegExp(r'\d').hasMatch(rows[35]),
-          isFalse,
-          reason: 'a stopped card fabricates no readings: "${rows[35]}"',
-        );
-        expect(rows[36], startsWith('└'));
-        expect(
-          rows.sublist(34, 37).join('\n'),
-          isNot(contains('┤')),
-          reason: 'no empty chart grid for a server with nothing to plot',
-        );
-      },
-    );
+      // An idle card is three rows on the floor of the body; everything
+      // above it belongs to the fleet table.
+      expect(rows[34], startsWith('┌─ GAMMA '));
+      expect(rows[34], contains('stopped · 15m'));
+      expect(rows[35], contains('stopped · START to launch'));
+      expect(
+        RegExp(r'\d').hasMatch(rows[35]),
+        isFalse,
+        reason: 'a stopped card fabricates no readings: "${rows[35]}"',
+      );
+      expect(rows[36], startsWith('└'));
+      expect(
+        rows.sublist(34, 37).join('\n'),
+        isNot(contains('┤')),
+        reason: 'no empty chart grid for a server with nothing to plot',
+      );
+    });
 
     test('tells an unsampled selection apart from a stopped one', () {
       final List<String> rows = stripAll(
@@ -666,10 +660,7 @@ void main() {
           ),
         ).rows,
       );
-      expect(
-        rows.join('\n'),
-        contains('no data · waiting for a first sample'),
-      );
+      expect(rows.join('\n'), contains('no data · waiting for a first sample'));
     });
 
     test('the chart axis ends on the same clock the header shows', () {
@@ -710,6 +701,91 @@ void main() {
       expect(running[21], contains('[ RESTART ]'));
       expect(running[21], contains('[ CONSOLE ]'));
       expect(running[21], isNot(contains('[ START ]')));
+    });
+
+    test('shows every remote address and disables blocked operations', () {
+      final MonitorFrame frame = frameOf(
+        snapshot: MonitorSnapshot(
+          instances: const <String>['alpha'],
+          history: <String, List<MetricSample>>{'alpha': runHistory('alpha')},
+          consumerName: 'remote:production',
+          view: MonitorView.remote,
+          displayNames: const <String, String>{'alpha': 'Survival One'},
+          advertisedEndpoints: const <String, String>{
+            'alpha': 'play.example.test:25565\nalt.example.test:25566',
+          },
+          bindEndpoints: const <String, String>{
+            'alpha': '0.0.0.0:25565\n[::]:25566',
+          },
+          operationBlockReasons: const <String, String>{
+            'alpha': 'server is suspended',
+          },
+        ),
+        columns: 132,
+        lines: 40,
+      );
+      final String text = stripAll(frame.rows).join('\n');
+      final Set<String> hits = frame.hitboxes
+          .where((MonitorHitbox hit) => hit.kind == MonitorHitKind.button)
+          .map((MonitorHitbox hit) => hit.id)
+          .toSet();
+
+      expect(text, contains('SURVIVAL ONE'));
+      expect(text, contains('BLOCKED: server is suspended'));
+      expect(
+        text,
+        contains('ADVERTISED play.example.test:25565 · alt.example.test:25566'),
+      );
+      expect(text, contains('BIND 0.0.0.0:25565 · [::]:25566'));
+      expect(text, contains('[ STOP ]'));
+      expect(text, contains('[ RESTART ]'));
+      expect(text, contains('[ CONSOLE ]'));
+      expect(hits, isNot(contains('act:stop')));
+      expect(hits, isNot(contains('act:restart')));
+      expect(hits, isNot(contains('act:console')));
+      expect(hits, containsAll(<String>['act:detail', 'act:more']));
+    });
+
+    test('empty Remote steers to connection instead of new server', () {
+      final MonitorFrame frame = frameOf(
+        snapshot: const MonitorSnapshot(
+          instances: <String>[],
+          history: <String, List<MetricSample>>{},
+          consumerName: 'remote:not connected',
+          view: MonitorView.remote,
+        ),
+        columns: 132,
+        lines: 40,
+      );
+      final String text = stripAll(frame.rows).join('\n');
+      final Set<String> hits = frame.hitboxes
+          .where((MonitorHitbox hit) => hit.kind == MonitorHitKind.button)
+          .map((MonitorHitbox hit) => hit.id)
+          .toSet();
+
+      expect(text, contains('REMOTE NOT CONNECTED'));
+      expect(text, contains('[ CONNECTION ]'));
+      expect(text, isNot(contains('[ + NEW ]')));
+      expect(hits, contains('ws:connect'));
+      expect(hits, isNot(contains('ws:new')));
+    });
+
+    test('connected empty Remote still offers server creation', () {
+      final MonitorFrame frame = frameOf(
+        snapshot: const MonitorSnapshot(
+          instances: <String>[],
+          history: <String, List<MetricSample>>{},
+          consumerName: 'remote:production',
+          view: MonitorView.remote,
+        ),
+        columns: 132,
+        lines: 40,
+      );
+      final String text = stripAll(frame.rows).join('\n');
+
+      expect(text, contains('NO SERVERS'));
+      expect(text, contains('[ + NEW ]'));
+      expect(text, contains('[ CONNECTION ]'));
     });
 
     test('paints only the hovered chip with the accent tone', () {
@@ -767,6 +843,7 @@ void main() {
 
     test('drops whole footer hints instead of clipping them at 80 columns', () {
       const List<String> allHints = <String>[
+        '[tab] local/remote',
         '[enter] open',
         'd detail',
         'R restart',
@@ -799,6 +876,35 @@ void main() {
       expect(rows.last, contains('b build'));
       expect(rows.last, contains('w workspace'));
       expect(rows.last, contains('r range'));
+    });
+
+    test('shows provider-specific controls in the Remote footer', () {
+      final List<String> rows = stripAll(
+        frameOf(
+          snapshot: const MonitorSnapshot(
+            instances: <String>[],
+            history: <String, List<MetricSample>>{},
+            consumerName: 'remote:production',
+            view: MonitorView.remote,
+          ),
+          columns: 132,
+          lines: 40,
+        ).rows,
+      );
+      final String footer = rows.last.trimRight();
+
+      expect(footer, contains('[tab] local/remote'));
+      expect(footer, contains('R restart'));
+      expect(footer, contains('S stop'));
+      expect(footer, contains('X kill'));
+      expect(footer, contains('O live console'));
+      expect(footer, contains('c connection'));
+      expect(footer, contains('r range'));
+      expect(footer, isNot(contains('g consoles')));
+      expect(footer, isNot(contains('n new')));
+      expect(footer, isNot(contains('b build')));
+      expect(footer, isNot(contains('c consumer')));
+      expect(footer, isNot(contains('w workspace')));
     });
 
     test('keeps the workspace card hint at the reference width', () {
@@ -1091,12 +1197,7 @@ void main() {
       );
       final List<String> rows = stripAll(frame.rows);
       expect(rows.join('\n'), isNot(contains('more')));
-      expectServerHits(
-        rows,
-        frame.hitboxes,
-        snapshot.instances,
-        columns: 132,
-      );
+      expectServerHits(rows, frame.hitboxes, snapshot.instances, columns: 132);
     });
 
     test('emits no hitboxes at all below the size floor', () {
@@ -1129,6 +1230,16 @@ void main() {
           frameOf(snapshot: twoServers(), columns: 132, lines: 40),
           frameOf(snapshot: mixedFleet(), selectedIndex: 1),
           frameOf(snapshot: emptyWorkspace(), columns: 132, lines: 40),
+          frameOf(
+            snapshot: MonitorSnapshot(
+              instances: twoServers().instances,
+              history: twoServers().history,
+              consumerName: 'dev',
+              view: MonitorView.remote,
+            ),
+            columns: 132,
+            lines: 40,
+          ),
         ])
           for (final MonitorHitbox hit in frame.hitboxes)
             if (hit.kind == MonitorHitKind.button) hit.id,
@@ -1145,6 +1256,16 @@ void main() {
           frameOf(snapshot: twoServers(), columns: 132, lines: 40),
           frameOf(snapshot: mixedFleet(), selectedIndex: 1),
           frameOf(snapshot: emptyWorkspace(), columns: 132, lines: 40),
+          frameOf(
+            snapshot: MonitorSnapshot(
+              instances: twoServers().instances,
+              history: twoServers().history,
+              consumerName: 'dev',
+              view: MonitorView.remote,
+            ),
+            columns: 132,
+            lines: 40,
+          ),
         ])
           for (final MonitorHitbox hit in frame.hitboxes)
             if (hit.kind == MonitorHitKind.button) hit.id,

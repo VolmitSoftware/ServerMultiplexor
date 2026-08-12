@@ -43,12 +43,19 @@ const int _maxLiveCardRows = 15;
 /// Separator between footer hints.
 const String _hintSeparator = ' · ';
 
-/// The footer key hints in display order — the row exactly as it renders on
+/// Local footer key hints in display order — the row exactly as it renders on
 /// a terminal wide enough for all of it.
-const String _monitorFooterHints =
-    '[enter] open · d detail · R restart · S stop · X kill · O console · '
+const String _localFooterHints =
+    '[tab] local/remote · [enter] open · d detail · R restart · S stop · X kill · O console · '
     'g consoles · n new · b build · w workspace · c consumer · r range · '
     'q quit';
+
+/// Remote has no local build, consumer, instance-creation, or console-grid
+/// shortcuts. Its footer names only controls that are meaningful against the
+/// connected Panel, including the live console and connection card.
+const String _remoteFooterHints =
+    '[tab] local/remote · [enter] open · d detail · R restart · S stop · X kill · '
+    'O live console · c connection · r range · q quit';
 
 /// The order hints are given up in when the terminal is too narrow for all
 /// of them (comma-separated). A hint always leaves whole — a footer clipped
@@ -59,9 +66,12 @@ const String _monitorFooterHints =
 /// workspace card `w` raises carries Build & tuning itself, so giving up the
 /// shortcut costs a keystroke, while giving up `w` would leave the card
 /// reachable by mouse alone.
-const String _footerDropOrder =
-    'b build,w workspace,c consumer,n new,g consoles,O console,X kill,'
-    'S stop,R restart,r range';
+const String _localFooterDropOrder =
+    'b build,c consumer,n new,g consoles,O console,X kill,S stop,R restart,'
+    'r range,w workspace';
+
+const String _remoteFooterDropOrder =
+    'X kill,S stop,R restart,O live console,r range,c connection';
 
 /// The selection action bar's chips. Which set is drawn follows the
 /// selection's own state: you cannot stop what is not running, and starting
@@ -86,6 +96,36 @@ const List<ButtonSpec> _liveButtons = <ButtonSpec>[
   _moreButton,
 ];
 
+const List<ButtonSpec> _remoteLiveButtons = <ButtonSpec>[
+  ButtonSpec(id: actStopHitId, label: 'STOP'),
+  ButtonSpec(id: actRestartHitId, label: 'RESTART'),
+  ButtonSpec(id: actConsoleHitId, label: 'CONSOLE'),
+  _detailButton,
+  _moreButton,
+];
+
+const List<ButtonSpec> _blockedStoppedButtons = <ButtonSpec>[
+  ButtonSpec(id: actStartHitId, label: 'START', enabled: false),
+  _detailButton,
+  _moreButton,
+];
+
+const List<ButtonSpec> _blockedLiveButtons = <ButtonSpec>[
+  ButtonSpec(id: actStopHitId, label: 'STOP', enabled: false),
+  ButtonSpec(id: actRestartHitId, label: 'RESTART', enabled: false),
+  ButtonSpec(id: actConsoleHitId, label: 'CONSOLE', enabled: false),
+  _detailButton,
+  _moreButton,
+];
+
+const List<ButtonSpec> _blockedRemoteLiveButtons = <ButtonSpec>[
+  ButtonSpec(id: actStopHitId, label: 'STOP', enabled: false),
+  ButtonSpec(id: actRestartHitId, label: 'RESTART', enabled: false),
+  ButtonSpec(id: actConsoleHitId, label: 'CONSOLE', enabled: false),
+  _detailButton,
+  _moreButton,
+];
+
 /// The workspace action bar's chips — the things that act on the workspace
 /// rather than on whichever server happens to be selected.
 const List<ButtonSpec> _workspaceButtons = <ButtonSpec>[
@@ -94,6 +134,17 @@ const List<ButtonSpec> _workspaceButtons = <ButtonSpec>[
   ButtonSpec(id: wsTuningHitId, label: 'TUNING'),
   ButtonSpec(id: wsConsumerHitId, label: 'CONSUMER'),
   ButtonSpec(id: wsConsolesHitId, label: 'CONSOLES'),
+  ButtonSpec(id: wsMoreHitId, label: 'MORE'),
+];
+
+const List<ButtonSpec> _remoteWorkspaceButtons = <ButtonSpec>[
+  newInstanceButton,
+  ButtonSpec(id: wsConnectHitId, label: 'CONNECTION'),
+  ButtonSpec(id: wsMoreHitId, label: 'MORE'),
+];
+
+const List<ButtonSpec> _remoteEmptyWorkspaceButtons = <ButtonSpec>[
+  ButtonSpec(id: wsConnectHitId, label: 'CONNECTION'),
   ButtonSpec(id: wsMoreHitId, label: 'MORE'),
 ];
 
@@ -142,6 +193,9 @@ MonitorFrame buildMonitorFrame({
 
   final int total = snapshot.instances.length;
   final bool hasInstances = total > 0;
+  final bool remoteDisconnected =
+      snapshot.view == MonitorView.remote &&
+      snapshot.consumerName == 'remote:not connected';
   final int selected = selectedIndex < 0
       ? 0
       : (selectedIndex >= total ? total - 1 : selectedIndex);
@@ -175,8 +229,17 @@ MonitorFrame buildMonitorFrame({
     final MetricSample? selectedLatest = snapshot.latestFor(
       snapshot.instances[selected],
     );
+    final String? operationBlockReason = snapshot.operationBlockReasonFor(
+      snapshot.instances[selected],
+    );
     final bool selectedLive =
         selectedLatest != null && selectedLatest.state != RuntimeState.stopped;
+    final String selectedInstance = snapshot.instances[selected];
+    final int metadataRows = selectedMetadataRowCount(
+      snapshot: snapshot,
+      instance: selectedInstance,
+      inner: columns - 4,
+    );
 
     // The card's rows: sized to the selection's state, fed by the rows the
     // whole fleet does not need, and never starving the table below its own
@@ -193,6 +256,11 @@ MonitorFrame buildMonitorFrame({
       }
     } else {
       cardRows = _idleCardRows;
+    }
+    final int informationFloor =
+        metadataRows + (selectedLive ? _minLiveCardRows : _idleCardRows);
+    if (cardRows < informationFloor) {
+      cardRows = informationFloor;
     }
     final int cardCeiling = bodyRows - _minListRows;
     if (cardRows > cardCeiling) {
@@ -236,7 +304,11 @@ MonitorFrame buildMonitorFrame({
     }
 
     final ButtonRowRender bar = layoutButtonRow(
-      buttons: _selectionButtons(selectedLatest),
+      buttons: _selectionButtons(
+        selectedLatest,
+        operationBlockReason: operationBlockReason,
+        remote: snapshot.view == MonitorView.remote,
+      ),
       width: columns,
       theme: theme,
       hoveredId: hoveredId,
@@ -250,6 +322,7 @@ MonitorFrame buildMonitorFrame({
       columns: columns,
       topRow: bodyTop,
       theme: theme,
+      remoteDisconnected: remoteDisconnected,
       hoveredId: hoveredId,
       pressedId: pressedId,
     );
@@ -258,7 +331,11 @@ MonitorFrame buildMonitorFrame({
   }
 
   final ButtonRowRender workspace = layoutButtonRow(
-    buttons: _workspaceButtons,
+    buttons: snapshot.view == MonitorView.remote
+        ? (remoteDisconnected
+              ? _remoteEmptyWorkspaceButtons
+              : _remoteWorkspaceButtons)
+        : _workspaceButtons,
     width: columns,
     theme: theme,
     hoveredId: hoveredId,
@@ -267,7 +344,7 @@ MonitorFrame buildMonitorFrame({
   rows.add(workspace.row);
   hitboxes.addAll(_buttonHits(workspace.spans, rows.length - 1));
 
-  rows.add(theme.paint(_footerHints(columns), theme.faint));
+  rows.add(theme.paint(_footerHints(columns, snapshot.view), theme.faint));
 
   return padFrame(
     MonitorFrame(rows: rows, hitboxes: hitboxes),
@@ -279,10 +356,19 @@ MonitorFrame buildMonitorFrame({
 /// The chips the selection bar draws for a selection whose latest reading is
 /// [latest]. Anything that is not demonstrably running — stopped, or never
 /// sampled at all — gets the start set.
-List<ButtonSpec> _selectionButtons(MetricSample? latest) {
+List<ButtonSpec> _selectionButtons(
+  MetricSample? latest, {
+  required String? operationBlockReason,
+  required bool remote,
+}) {
   final RuntimeState? state = latest?.state;
   final bool live = state != null && state != RuntimeState.stopped;
-  return live ? _liveButtons : _stoppedButtons;
+  if (operationBlockReason != null) {
+    return live
+        ? (remote ? _blockedRemoteLiveButtons : _blockedLiveButtons)
+        : _blockedStoppedButtons;
+  }
+  return live ? (remote ? _remoteLiveButtons : _liveButtons) : _stoppedButtons;
 }
 
 /// The hitboxes for one laid-out button row, drawn on frame row [row].
@@ -299,11 +385,16 @@ List<MonitorHitbox> _buttonHits(List<ButtonSpan> spans, int row) =>
     ];
 
 /// The footer hint row for a [columns]-wide frame: as many of
-/// [_monitorFooterHints] as fit, dropped whole and highest rank first, so
+/// the provider's hints as fit, dropped whole and highest rank first, so
 /// the row never ends mid-hint and never hides `q quit`.
-String _footerHints(int columns) {
-  final List<String> shown = _monitorFooterHints.split(_hintSeparator);
-  for (final String hint in _footerDropOrder.split(',')) {
+String _footerHints(int columns, MonitorView view) {
+  final bool remote = view == MonitorView.remote;
+  final String hints = remote ? _remoteFooterHints : _localFooterHints;
+  final String dropOrder = remote
+      ? _remoteFooterDropOrder
+      : _localFooterDropOrder;
+  final List<String> shown = hints.split(_hintSeparator);
+  for (final String hint in dropOrder.split(',')) {
     if (shown.join(_hintSeparator).length <= columns) {
       break;
     }
@@ -333,7 +424,8 @@ List<String> _headerPanel({
       '${local.minute.toString().padLeft(2, '0')}';
 
   final String facts =
-      'ACTIVE ${snapshot.activeInstance ?? 'none'} · '
+      'VIEW ${snapshot.view.name.toUpperCase()} · '
+      'ACTIVE ${snapshot.activeInstance == null ? 'none' : snapshot.displayNameFor(snapshot.activeInstance!)} · '
       'RANGE ${rangeLabel(range)} · '
       '$instances SERVERS';
 
@@ -344,7 +436,8 @@ List<String> _headerPanel({
     // escape bytes.
     title: 'MULTIPLEXOR',
     styledTitle: theme.gradientTitle('MULTIPLEXOR'),
-    badge: '${monitorSpinner(theme, frame)} ${snapshot.consumerName} $clock',
+    badge:
+        '${monitorSpinner(theme, frame)} ${snapshot.consumerName} · TAB ${snapshot.view == MonitorView.local ? 'REMOTE' : 'LOCAL'} · $clock',
     content: <String>[theme.paint(facts, theme.faint)],
     width: columns,
     theme: theme,

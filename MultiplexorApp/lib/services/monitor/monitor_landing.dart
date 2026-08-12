@@ -96,6 +96,79 @@ class MonitorPanelRender {
   final List<MonitorHitbox> hitboxes;
 }
 
+final class _SelectedMetadataLine {
+  const _SelectedMetadataLine({required this.text, required this.blocked});
+
+  final String text;
+  final bool blocked;
+}
+
+/// Rows needed to render every provider-status and endpoint value without
+/// clipping it at [inner] visible columns.
+int selectedMetadataRowCount({
+  required MonitorSnapshot snapshot,
+  required String instance,
+  required int inner,
+}) => _selectedMetadataLines(
+  snapshot: snapshot,
+  instance: instance,
+  inner: inner,
+).length;
+
+List<_SelectedMetadataLine> _selectedMetadataLines({
+  required MonitorSnapshot snapshot,
+  required String instance,
+  required int inner,
+}) {
+  final List<_SelectedMetadataLine> lines = <_SelectedMetadataLine>[];
+  final String? reason = snapshot.operationBlockReasonFor(instance);
+  if (reason != null) {
+    lines.addAll(_wrappedMetadata('BLOCKED:', reason, inner, blocked: true));
+  }
+  final List<String> advertised = snapshot.advertisedEndpointsFor(instance);
+  if (advertised.isNotEmpty) {
+    lines.addAll(_wrappedMetadata('ADVERTISED', advertised.join(' · '), inner));
+  }
+  final List<String> binds = snapshot.bindEndpointsFor(instance);
+  if (binds.isNotEmpty) {
+    lines.addAll(_wrappedMetadata('BIND', binds.join(' · '), inner));
+  }
+  return lines;
+}
+
+List<_SelectedMetadataLine> _wrappedMetadata(
+  String label,
+  String value,
+  int width, {
+  bool blocked = false,
+}) {
+  final String prefix = '$label ';
+  final int valueWidth = width - prefix.length;
+  if (valueWidth <= 0) {
+    return <_SelectedMetadataLine>[
+      _SelectedMetadataLine(text: '$prefix$value', blocked: blocked),
+    ];
+  }
+  final List<_SelectedMetadataLine> lines = <_SelectedMetadataLine>[];
+  for (int offset = 0; offset < value.length; offset += valueWidth) {
+    final int end = offset + valueWidth < value.length
+        ? offset + valueWidth
+        : value.length;
+    lines.add(
+      _SelectedMetadataLine(
+        text:
+            '${offset == 0 ? prefix : ' ' * prefix.length}'
+            '${value.substring(offset, end)}',
+        blocked: blocked,
+      ),
+    );
+  }
+  if (lines.isEmpty) {
+    lines.add(_SelectedMetadataLine(text: label, blocked: blocked));
+  }
+  return lines;
+}
+
 /// The fleet-wide readings the KPI strip is drawn from — one pass over the
 /// snapshot, so no two cards can disagree about the same fleet.
 ///
@@ -112,6 +185,7 @@ class MonitorRollup {
     required this.tpsSeries,
     required this.rssSum,
     required this.peakRssSum,
+    required this.memoryLimitSum,
     required this.meanCpu,
   });
 
@@ -142,6 +216,9 @@ class MonitorRollup {
   final int? rssSum;
   final int? peakRssSum;
 
+  /// Sum of configured memory limits where the provider exposes them.
+  final int? memoryLimitSum;
+
   /// Mean of the latest CPU reading across the instances that have one.
   final double? meanCpu;
 
@@ -158,6 +235,8 @@ class MonitorRollup {
     int tpsCount = 0;
     int rssTotal = 0;
     bool anyRss = false;
+    int memoryLimitTotal = 0;
+    bool anyMemoryLimit = false;
     double cpuTotal = 0;
     int cpuCount = 0;
 
@@ -189,6 +268,11 @@ class MonitorRollup {
       if (cpu != null) {
         cpuTotal += cpu;
         cpuCount += 1;
+      }
+      final int? memoryLimit = latest?.memoryLimitBytes;
+      if (memoryLimit != null) {
+        memoryLimitTotal += memoryLimit;
+        anyMemoryLimit = true;
       }
 
       for (final MetricSample sample in snapshot.historyFor(instance)) {
@@ -237,6 +321,7 @@ class MonitorRollup {
       tpsSeries: series,
       rssSum: anyRss ? rssTotal : null,
       peakRssSum: peakRssSum,
+      memoryLimitSum: anyMemoryLimit ? memoryLimitTotal : null,
       meanCpu: cpuCount == 0 ? null : cpuTotal / cpuCount,
     );
   }
@@ -289,7 +374,7 @@ List<String> renderKpiStrip({
       '${renderSparkline(values: rollup.tpsSeries, width: sparkCells, theme: theme, min: 0, max: 20, ramp: MonitorRamp.tps)}';
 
   final int? rssSum = rollup.rssSum;
-  final int? peakRssSum = rollup.peakRssSum;
+  final int? peakRssSum = rollup.memoryLimitSum ?? rollup.peakRssSum;
   final double? memFraction =
       rssSum == null || peakRssSum == null || peakRssSum <= 0
       ? null
@@ -496,7 +581,7 @@ MonitorPanelRender renderServerList({
     content.add(
       _serverTableRow(
         plan: plan,
-        instance: instance,
+        instance: snapshot.displayNameFor(instance),
         latest: snapshot.latestFor(instance),
         history: snapshot.historyFor(instance),
         selected: index == selectedIndex,
@@ -594,7 +679,9 @@ String _serverTableRow({
         row.write(theme.paint(_fitCell(instance, cellWidth), tone));
       case _TableColumn.state:
         final String tone = live ? theme.statusTone(state) : theme.faint;
-        row.write(theme.paint(_fitCell(monitorStateText(latest), cellWidth), tone));
+        row.write(
+          theme.paint(_fitCell(monitorStateText(latest), cellWidth), tone),
+        );
       case _TableColumn.players:
         final String text = monitorPlayersText(latest, theme);
         final String tone = latest?.players == null ? theme.faint : theme.text;
@@ -621,8 +708,11 @@ String _serverTableRow({
         final int? rss = latest?.rssBytes;
         row.write(
           theme.paint(
-            _fitCell(rss == null ? dash : formatBytes(rss), cellWidth,
-                right: true),
+            _fitCell(
+              rss == null ? dash : formatBytes(rss),
+              cellWidth,
+              right: true,
+            ),
             rss == null ? theme.faint : theme.text,
           ),
         );
@@ -630,8 +720,11 @@ String _serverTableRow({
         final double? cpu = latest?.cpuPercent;
         row.write(
           theme.paint(
-            _fitCell(cpu == null ? dash : _wholePercent(cpu), cellWidth,
-                right: true),
+            _fitCell(
+              cpu == null ? dash : _wholePercent(cpu),
+              cellWidth,
+              right: true,
+            ),
             cpu == null ? theme.faint : theme.text,
           ),
         );
@@ -713,24 +806,44 @@ MonitorPanelRender renderSelectedPanel({
   final String instance = snapshot.instances[selectedIndex];
   final List<MetricSample> history = snapshot.historyFor(instance);
   final MetricSample? latest = snapshot.latestFor(instance);
-  final String title = instance.toUpperCase();
-  final String badge = '${monitorStateText(latest)} · ${rangeLabel(range)}';
+  final String? operationBlockReason = snapshot.operationBlockReasonFor(
+    instance,
+  );
+  final String title = snapshot.displayNameFor(instance).toUpperCase();
+  final String badge = operationBlockReason == null
+      ? '${monitorStateText(latest)} · ${rangeLabel(range)}'
+      : 'BLOCKED · ${rangeLabel(range)}';
 
   final int contentRows = rows < 2 ? 0 : rows - 2;
   final int inner = width - 4 < 0 ? 0 : width - 4;
   final bool live = latest != null && latest.state != RuntimeState.stopped;
 
+  final List<String> metadata = <String>[
+    for (final _SelectedMetadataLine line in _selectedMetadataLines(
+      snapshot: snapshot,
+      instance: instance,
+      inner: inner,
+    ))
+      theme.paint(line.text, line.blocked ? theme.danger : theme.muted),
+  ];
+  final int primaryRows = contentRows - metadata.length;
   final List<String> content = live
       ? _liveCard(
           history: history,
           latest: latest,
           inner: inner,
-          contentRows: contentRows,
+          contentRows: primaryRows < 0 ? 0 : primaryRows,
           theme: theme,
           range: range,
           now: now,
         )
-      : <String>[if (contentRows > 0) _idleRow(latest: latest, theme: theme)];
+      : <String>[if (primaryRows > 0) _idleRow(latest: latest, theme: theme)];
+  for (final String line in metadata) {
+    if (content.length >= contentRows) {
+      break;
+    }
+    content.add(line);
+  }
   while (content.length < contentRows) {
     content.add('');
   }
@@ -820,42 +933,43 @@ List<String> _liveCard({
       MonitorRamp ramp,
     })
   >
-  candidates = <
-    ({
-      String title,
-      List<ChartPoint> points,
-      double? low,
-      double? high,
-      MonitorRamp ramp,
-    })
-  >[
-    if (anyTps)
-      (
-        title: 'TPS',
-        points: _chartPoints(history, (MetricSample s) => s.tps),
-        low: 0,
-        high: 20,
-        ramp: MonitorRamp.tps,
-      ),
-    (
-      title: 'CPU %',
-      points: _chartPoints(history, (MetricSample s) => s.cpuPercent),
-      low: 0,
-      high: 100,
-      ramp: MonitorRamp.load,
-    ),
-    (
-      title: 'MEM MiB',
-      points: _chartPoints(
-        history,
-        (MetricSample s) =>
-            s.rssBytes == null ? null : s.rssBytes! / 1048576,
-      ),
-      low: null,
-      high: null,
-      ramp: MonitorRamp.load,
-    ),
-  ];
+  candidates =
+      <
+        ({
+          String title,
+          List<ChartPoint> points,
+          double? low,
+          double? high,
+          MonitorRamp ramp,
+        })
+      >[
+        if (anyTps)
+          (
+            title: 'TPS',
+            points: _chartPoints(history, (MetricSample s) => s.tps),
+            low: 0,
+            high: 20,
+            ramp: MonitorRamp.tps,
+          ),
+        (
+          title: 'CPU %',
+          points: _chartPoints(history, (MetricSample s) => s.cpuPercent),
+          low: 0,
+          high: 100,
+          ramp: MonitorRamp.load,
+        ),
+        (
+          title: 'MEM MiB',
+          points: _chartPoints(
+            history,
+            (MetricSample s) =>
+                s.rssBytes == null ? null : s.rssBytes! / 1048576,
+          ),
+          low: null,
+          high: null,
+          ramp: MonitorRamp.load,
+        ),
+      ];
 
   int fit = 1;
   for (int count = candidates.length; count >= 1; count--) {
@@ -942,13 +1056,18 @@ MonitorPanelRender renderEmptyBody({
   required int columns,
   required int topRow,
   required MonitorTheme theme,
+  bool remoteDisconnected = false,
   String? hoveredId,
   String? pressedId,
 }) {
-  const String prompt = 'NO SERVERS';
+  final String prompt = remoteDisconnected
+      ? 'REMOTE NOT CONNECTED'
+      : 'NO SERVERS';
   final int contentRows = rows < 2 ? 0 : rows - 2;
   final int inner = columns - 4 < 0 ? 0 : columns - 4;
-  final ButtonSpec chip = newInstanceButton;
+  final ButtonSpec chip = remoteDisconnected
+      ? const ButtonSpec(id: wsConnectHitId, label: 'CONNECTION')
+      : newInstanceButton;
   final int chipWidth = chip.label.length + 4;
   final ButtonRowRender button = layoutButtonRow(
     buttons: <ButtonSpec>[chip],
@@ -1012,12 +1131,18 @@ String _factsRow({
   final int? latency = latest?.latencyMs;
   // A blank version string is missing data, not a version.
   final String? version = latest?.version;
+  final int? disk = latest?.diskBytes;
+  final int? diskLimit = latest?.diskLimitBytes;
+  final int? networkRx = latest?.networkRxBytes;
+  final int? networkTx = latest?.networkTxBytes;
   final List<String> facts = <String>[
     'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}',
     '${monitorPlayersText(latest, theme)} PLAYERS',
     'PING ${latency == null ? 'n/a' : '${latency}ms'}',
     'MEM ${formatBytes(latest?.rssBytes)}',
     'CPU ${formatCpuPercent(latest?.cpuPercent)}',
+    'DISK ${formatBytes(disk)}${diskLimit == null ? '' : '/${formatBytes(diskLimit)}'}',
+    'NET ${formatBytes(networkRx)} RX ${formatBytes(networkTx)} TX',
     version == null || version.isEmpty ? theme.glyphs.dash : version,
   ];
   while (facts.length > 1 && facts.join(' · ').length > inner) {

@@ -10,6 +10,18 @@ class CommandHelpGroup {
 }
 
 const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
+  CommandHelpGroup('remote', <String>[
+    'connect --url <https://panel> [--id <id>] [--name <name>] [--application] [--replace]',
+    'profiles',
+    'verify [--profile <id>]',
+    'list [--profile <id>]',
+    'nodes [--profile <id>]',
+    'stats <server> [--profile <id>] | stats --all [--profile <id>]',
+    '<start|stop|restart|kill> <server> [--profile <id>]',
+    'console <server> [--profile <id>]',
+    'command <server> <command> [--profile <id>]',
+    'create <name> --template <server> [--memory <MiB>] [--disk <MiB>] [--cpu <percent>] [--start] [--profile <id>]',
+  ]),
   CommandHelpGroup('consumer', <String>[
     'list',
     'show',
@@ -196,6 +208,11 @@ void writeGlobalHelp(void Function(String line) write) {
     write,
     './start.sh runtime start demo',
     'start and attach to a server console',
+  );
+  _writeHelpCommand(
+    write,
+    './start.sh remote verify',
+    'verify and inspect the saved Pterodactyl panel',
   );
   _writeHelpCommand(
     write,
