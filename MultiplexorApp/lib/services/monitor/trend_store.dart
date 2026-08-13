@@ -49,7 +49,9 @@ class TrendRetention {
 /// `cpuPercent`/`rssBytes`/`uptimeSeconds` are the mean of the non-null
 /// values in the bucket (null when every value in the bucket is null,
 /// integer fields rounded to the nearest int), and `port`/`version`/
-/// `logPath` are the last non-null value. The result is sorted by `ts`
+/// `logPath` are the last non-null value. Remote disk, network, and resource
+/// limit readings follow the same non-null mean rule so seven-day charts do
+/// not lose those series during compaction. The result is sorted by `ts`
 /// ascending.
 List<MetricSample> rollupSamples(List<MetricSample> samples, Duration bucket) {
   if (samples.isEmpty) {
@@ -104,6 +106,19 @@ MetricSample _rollupBucket(
       bucketSamples.map((MetricSample s) => s.cpuPercent),
     ),
     rssBytes: _meanInt(bucketSamples.map((MetricSample s) => s.rssBytes)),
+    diskBytes: _meanInt(bucketSamples.map((MetricSample s) => s.diskBytes)),
+    networkRxBytes: _meanInt(
+      bucketSamples.map((MetricSample s) => s.networkRxBytes),
+    ),
+    networkTxBytes: _meanInt(
+      bucketSamples.map((MetricSample s) => s.networkTxBytes),
+    ),
+    memoryLimitBytes: _meanInt(
+      bucketSamples.map((MetricSample s) => s.memoryLimitBytes),
+    ),
+    diskLimitBytes: _meanInt(
+      bucketSamples.map((MetricSample s) => s.diskLimitBytes),
+    ),
     uptimeSeconds: _meanInt(
       bucketSamples.map((MetricSample s) => s.uptimeSeconds),
     ),

@@ -126,11 +126,12 @@ void main() {
   });
 
   group('nextRange', () {
-    test('cycles the four ranges back around to the first', () {
+    test('cycles the five ranges back around to the first', () {
       expect(nextRange(const Duration(minutes: 15)), const Duration(hours: 1));
       expect(nextRange(const Duration(hours: 1)), const Duration(hours: 6));
       expect(nextRange(const Duration(hours: 6)), const Duration(hours: 24));
-      expect(nextRange(const Duration(hours: 24)), const Duration(minutes: 15));
+      expect(nextRange(const Duration(hours: 24)), const Duration(days: 7));
+      expect(nextRange(const Duration(days: 7)), const Duration(minutes: 15));
     });
 
     test('falls back to the shortest range for an unlisted duration', () {
@@ -151,13 +152,31 @@ void main() {
     });
   });
 
+  group('monitorBackTarget', () {
+    test('unwinds exactly one visible layer per Escape press', () {
+      expect(
+        monitorBackTarget(modalOpen: true, detailOpen: true),
+        MonitorBackTarget.modal,
+      );
+      expect(
+        monitorBackTarget(modalOpen: false, detailOpen: true),
+        MonitorBackTarget.detail,
+      );
+      expect(
+        monitorBackTarget(modalOpen: false, detailOpen: false),
+        MonitorBackTarget.dashboard,
+      );
+    });
+  });
+
   group('monitorRanges', () {
-    test('lists the four cycled windows in ascending order', () {
+    test('lists the five cycled windows in ascending order', () {
       expect(monitorRanges, <Duration>[
         Duration(minutes: 15),
         Duration(hours: 1),
         Duration(hours: 6),
         Duration(hours: 24),
+        Duration(days: 7),
       ]);
     });
   });

@@ -160,4 +160,49 @@ void main() {
       }
     });
   });
+
+  group('monitorReleaseTarget', () {
+    test('activates only a press released over the same hitbox', () {
+      expect(
+        monitorReleaseTarget(
+          pressedId: viewSwitchHitId,
+          releasedId: viewSwitchHitId,
+          primaryButton: true,
+        ),
+        viewSwitchHitId,
+      );
+      expect(
+        monitorReleaseTarget(
+          pressedId: viewSwitchHitId,
+          releasedId: wsMoreHitId,
+          primaryButton: true,
+        ),
+        isNull,
+      );
+      expect(
+        monitorReleaseTarget(
+          pressedId: viewSwitchHitId,
+          releasedId: null,
+          primaryButton: true,
+        ),
+        isNull,
+      );
+      expect(
+        monitorReleaseTarget(
+          pressedId: null,
+          releasedId: viewSwitchHitId,
+          primaryButton: true,
+        ),
+        isNull,
+      );
+      expect(
+        monitorReleaseTarget(
+          pressedId: viewSwitchHitId,
+          releasedId: viewSwitchHitId,
+          primaryButton: false,
+        ),
+        isNull,
+      );
+    });
+  });
 }

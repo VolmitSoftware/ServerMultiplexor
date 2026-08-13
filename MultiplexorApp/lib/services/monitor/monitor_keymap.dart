@@ -34,12 +34,31 @@ enum MonitorAction {
   none,
 }
 
+/// The layer one Escape press leaves. Modal cards are above detail screens,
+/// and detail screens are above the dashboard, so Escape always unwinds one
+/// visible layer instead of unexpectedly quitting through it.
+enum MonitorBackTarget { modal, detail, dashboard }
+
+MonitorBackTarget monitorBackTarget({
+  required bool modalOpen,
+  required bool detailOpen,
+}) {
+  if (modalOpen) {
+    return MonitorBackTarget.modal;
+  }
+  if (detailOpen) {
+    return MonitorBackTarget.detail;
+  }
+  return MonitorBackTarget.dashboard;
+}
+
 /// The chart/history windows `r` cycles through, shortest first.
 const List<Duration> monitorRanges = <Duration>[
   Duration(minutes: 15),
   Duration(hours: 1),
   Duration(hours: 6),
   Duration(hours: 24),
+  Duration(days: 7),
 ];
 
 /// The window after [current] in [monitorRanges], wrapping at the end. A

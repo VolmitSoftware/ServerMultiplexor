@@ -141,12 +141,13 @@ final class PterodactylCredentialStore {
     _session.remove(account);
   }
 
-  /// Restores a previously read credential after a failed replacement.
+  /// Persists a validated credential supplied through masked input.
   ///
-  /// This is intentionally not a general enrollment API: callers can only
-  /// put back an already validated in-memory value, and the value is passed
-  /// to `/usr/bin/security` on stdin so it never appears in argv or logs.
-  Future<void> restore(
+  /// The value is passed to `/usr/bin/security` on stdin so it never appears
+  /// in argv, configuration, shell history, or Multiplexor output. Platforms
+  /// without Keychain retain it for this process only; environment-backed
+  /// credentials remain the supported non-macOS persistence mechanism.
+  Future<void> save(
     PterodactylProfile profile,
     PterodactylCredentialRole role,
     PterodactylCredential credential,
@@ -178,17 +179,24 @@ final class PterodactylCredentialStore {
     );
     final Future<void> stdoutDrained = process.stdout.drain<void>();
     final Future<void> stderrDrained = process.stderr.drain<void>();
-    process.stdin.write(credential.value);
+    process.stdin.writeln(credential.value);
     await process.stdin.close();
     final int exitCode = await process.exitCode;
     await Future.wait<void>(<Future<void>>[stdoutDrained, stderrDrained]);
     if (exitCode != 0) {
       throw StateError(
-        'Unable to restore the Pterodactyl credential in Keychain.',
+        'Unable to save the Pterodactyl credential in Keychain.',
       );
     }
     _session[account] = credential;
   }
+
+  /// Restores a previously read credential after a failed replacement.
+  Future<void> restore(
+    PterodactylProfile profile,
+    PterodactylCredentialRole role,
+    PterodactylCredential credential,
+  ) => save(profile, role, credential);
 
   Future<void> remove(
     PterodactylProfile profile,

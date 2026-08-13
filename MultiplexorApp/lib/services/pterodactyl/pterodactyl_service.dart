@@ -8,7 +8,14 @@ import 'pterodactyl_models.dart';
 import 'pterodactyl_profile.dart';
 import 'pterodactyl_profile_store.dart';
 
-enum PterodactylCapability { view, power, console, create }
+typedef PterodactylClientFactory =
+    PterodactylClient Function({
+      required PterodactylProfile profile,
+      required PterodactylCredential clientCredential,
+      PterodactylCredential? applicationCredential,
+    });
+
+enum PterodactylCapability { view, power, console, create, configure, delete }
 
 final class PterodactylVerification {
   const PterodactylVerification({
@@ -33,6 +40,18 @@ final class PterodactylFleetSample {
   final PterodactylResourceUsage? resources;
 }
 
+final class _BulkCreateTarget {
+  const _BulkCreateTarget({
+    required this.name,
+    required this.defaultAllocationId,
+    required this.additionalAllocationId,
+  });
+
+  final String name;
+  final int defaultAllocationId;
+  final int? additionalAllocationId;
+}
+
 /// High-level connection boundary used by the CLI and the Remote dashboard.
 ///
 /// Profiles are non-secret files. Bearer values are resolved immediately
@@ -41,17 +60,27 @@ final class PterodactylService {
   PterodactylService({
     required PterodactylProfileStore profileStore,
     required PterodactylCredentialStore credentialStore,
+    PterodactylClientFactory? clientFactory,
   }) : _profileStore = profileStore,
-       _credentialStore = credentialStore;
+       _credentialStore = credentialStore,
+       _clientFactory = clientFactory ?? _createClient;
 
   final PterodactylProfileStore _profileStore;
   final PterodactylCredentialStore _credentialStore;
+  final PterodactylClientFactory _clientFactory;
   final Map<String, PterodactylClientServerScope> _serverScopes =
       <String, PterodactylClientServerScope>{};
 
   List<PterodactylProfile> listProfiles() => _profileStore.loadAll();
 
   PterodactylProfile? profile(String id) => _profileStore.load(id);
+
+  PterodactylProfile? activeProfile() {
+    final String? id = _profileStore.loadActiveId();
+    return id == null ? null : _profileStore.load(id);
+  }
+
+  void selectProfile(String id) => _profileStore.setActive(id);
 
   PterodactylProfile saveProfile(PterodactylProfile profile) {
     _forgetScope(profile.id);
@@ -70,6 +99,15 @@ final class PterodactylService {
     PterodactylCredentialRole role,
   ) async {
     await _credentialStore.enroll(profile, role);
+    _forgetScope(profile.id);
+  }
+
+  Future<void> saveCredential(
+    PterodactylProfile profile,
+    PterodactylCredentialRole role,
+    PterodactylCredential credential,
+  ) async {
+    await _credentialStore.save(profile, role, credential);
     _forgetScope(profile.id);
   }
 
@@ -97,15 +135,89 @@ final class PterodactylService {
 
   Future<void> removeProfile(String id) async {
     final PterodactylProfile? existing = profile(id);
-    if (existing != null) {
-      await _credentialStore.remove(existing, PterodactylCredentialRole.client);
-      await _credentialStore.remove(
-        existing,
-        PterodactylCredentialRole.application,
-      );
+    if (existing == null) {
+      _forgetScope(id);
+      return;
+    }
+
+    // Snapshot everything before mutating either store. Profile metadata is
+    // removed last, so a credential failure leaves the account discoverable;
+    // a later profile-store failure restores every credential whose deletion
+    // was attempted and rewrites the original profile when necessary.
+    final String? activeId = _profileStore.loadActiveId();
+    final PterodactylCredential? clientCredential = await _credentialStore.read(
+      existing,
+      PterodactylCredentialRole.client,
+    );
+    final PterodactylCredential? applicationCredential = await _credentialStore
+        .read(existing, PterodactylCredentialRole.application);
+    bool profileMutationAttempted = false;
+    bool clientRemovalAttempted = false;
+    bool applicationRemovalAttempted = false;
+
+    try {
+      if (clientCredential != null) {
+        clientRemovalAttempted = true;
+        await _credentialStore.remove(
+          existing,
+          PterodactylCredentialRole.client,
+        );
+      }
+      if (applicationCredential != null) {
+        applicationRemovalAttempted = true;
+        await _credentialStore.remove(
+          existing,
+          PterodactylCredentialRole.application,
+        );
+      }
+      profileMutationAttempted = true;
+      if (!_profileStore.remove(id)) {
+        _forgetScope(id);
+        return;
+      }
+    } catch (error, stackTrace) {
+      final List<Object> rollbackErrors = <Object>[];
+      if (profileMutationAttempted) {
+        try {
+          _profileStore.save(existing);
+          if (activeId != null) {
+            _profileStore.setActive(activeId);
+          }
+        } catch (rollbackError) {
+          rollbackErrors.add(rollbackError);
+        }
+      }
+      if (clientRemovalAttempted && clientCredential != null) {
+        try {
+          await _credentialStore.restore(
+            existing,
+            PterodactylCredentialRole.client,
+            clientCredential,
+          );
+        } catch (rollbackError) {
+          rollbackErrors.add(rollbackError);
+        }
+      }
+      if (applicationRemovalAttempted && applicationCredential != null) {
+        try {
+          await _credentialStore.restore(
+            existing,
+            PterodactylCredentialRole.application,
+            applicationCredential,
+          );
+        } catch (rollbackError) {
+          rollbackErrors.add(rollbackError);
+        }
+      }
+      if (rollbackErrors.isNotEmpty) {
+        throw StateError(
+          'Pterodactyl profile removal failed and '
+          '${rollbackErrors.length} rollback operation(s) also failed.',
+        );
+      }
+      Error.throwWithStackTrace(error, stackTrace);
     }
     _forgetScope(id);
-    _profileStore.remove(id);
   }
 
   bool canUseAsTemplate(String profileId, PterodactylClientServer server) =>
@@ -115,6 +227,41 @@ final class PterodactylService {
 
   Future<PterodactylVerification> verify(String id) =>
       verifyProfile(_requireProfile(id));
+
+  /// Verifies one stored credential through the API surface for its role.
+  ///
+  /// This is deliberately separate from [verifyProfile]: a root-admin Client
+  /// key can satisfy Application routes itself, which would otherwise let a
+  /// newly enrolled but invalid dedicated Application key appear healthy.
+  Future<void> verifyCredential(
+    PterodactylProfile profile,
+    PterodactylCredentialRole role,
+  ) async {
+    switch (role) {
+      case PterodactylCredentialRole.client:
+        final _ClientHandle handle = await _clientFor(profile);
+        try {
+          await handle.client.getAccount();
+        } finally {
+          handle.client.close();
+        }
+      case PterodactylCredentialRole.application:
+        final _ClientHandle handle = await _clientFor(
+          profile,
+          includeDedicatedApplicationCredential: true,
+        );
+        try {
+          if (!handle.hasDedicatedApplicationCredential) {
+            throw StateError(
+              'No Application API key enrolled for ${profile.id}.',
+            );
+          }
+          await handle.client.listApplicationServers(perPage: 1);
+        } finally {
+          handle.client.close();
+        }
+    }
+  }
 
   /// Verifies an unsaved candidate profile so enrollment can be completed
   /// transactionally before non-secret profile metadata is committed.
@@ -146,6 +293,9 @@ final class PterodactylService {
       }
       final _ClientHandle? verifiedApplicationHandle = applicationHandle;
       if (verifiedApplicationHandle != null) {
+        capabilities
+          ..add(PterodactylCapability.configure)
+          ..add(PterodactylCapability.delete);
         try {
           final List<PterodactylNode> nodes = await verifiedApplicationHandle
               .client
@@ -208,6 +358,476 @@ final class PterodactylService {
       handle.client.close();
     }
   }
+
+  /// Resolves an entire bulk selection before any mutating request is sent.
+  ///
+  /// Explicit selectors and [all] are mutually exclusive. Duplicate or
+  /// ambiguous selectors fail the whole preflight, and an empty result never
+  /// turns into a successful no-op.
+  Future<List<PterodactylClientServer>> resolveBulkServers({
+    required String profileId,
+    Iterable<String> selectors = const <String>[],
+    bool all = false,
+    PterodactylBulkServerState? state,
+  }) async {
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    try {
+      return await _resolveBulkServers(
+        handle.client,
+        profile,
+        selectors: selectors,
+        all: all,
+        state: state,
+      );
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  static String bulkConfirmationToken({
+    required PterodactylBulkAction action,
+    required String profileId,
+    required Iterable<String> serverIdentifiers,
+  }) {
+    if (action != PterodactylBulkAction.reinstall &&
+        action != PterodactylBulkAction.delete) {
+      throw ArgumentError(
+        'Bulk confirmation is only defined for reinstall and delete.',
+      );
+    }
+    final String normalizedProfile = profileId.trim().toLowerCase();
+    if (normalizedProfile.isEmpty) {
+      throw ArgumentError.value(profileId, 'profileId', 'must not be empty');
+    }
+    final List<String> identifiers = serverIdentifiers
+        .map((String identifier) => identifier.trim().toLowerCase())
+        .toList(growable: false);
+    if (identifiers.isEmpty ||
+        identifiers.any((String identifier) => identifier.isEmpty)) {
+      throw ArgumentError('At least one server identifier is required.');
+    }
+    if (identifiers.toSet().length != identifiers.length) {
+      throw ArgumentError('Server identifiers must be unique.');
+    }
+    identifiers.sort();
+    return '${action.name}:$normalizedProfile:${identifiers.join(',')}';
+  }
+
+  Future<String> accountUsername(String profileId) async {
+    final _ClientHandle handle = await _clientFor(_requireProfile(profileId));
+    try {
+      return (await handle.client.getAccount()).username;
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  /// Ensures this Client account has the requested SFTP public key. The
+  /// create-and-recheck flow is safe across concurrent Multiplexor starts:
+  /// whichever process loses a duplicate race observes the winner's key.
+  Future<void> ensureAccountSshPublicKey(
+    String profileId, {
+    required String name,
+    required String publicKey,
+  }) async {
+    final String normalizedName = name.trim();
+    if (normalizedName.isEmpty ||
+        RegExp(r'[\x00-\x1f\x7f]').hasMatch(normalizedName)) {
+      throw ArgumentError('name must contain printable characters.');
+    }
+    final String normalizedPublicKey =
+        PterodactylAccountSshKey.normalizePublicKey(publicKey);
+    final _ClientHandle handle = await _clientFor(_requireProfile(profileId));
+    try {
+      if (_containsPublicKey(
+        await handle.client.listAccountSshKeys(),
+        normalizedPublicKey,
+      )) {
+        return;
+      }
+      try {
+        await handle.client.createAccountSshKey(
+          name: normalizedName,
+          publicKey: normalizedPublicKey,
+        );
+      } on PterodactylException {
+        try {
+          if (_containsPublicKey(
+            await handle.client.listAccountSshKeys(),
+            normalizedPublicKey,
+          )) {
+            return;
+          }
+        } on PterodactylException {
+          // Preserve the original create failure; neither exception contains
+          // response bodies or key material.
+        }
+        rethrow;
+      }
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  static bool _containsPublicKey(
+    List<PterodactylAccountSshKey> keys,
+    String normalizedPublicKey,
+  ) => keys.any(
+    (PterodactylAccountSshKey key) => key.publicKey == normalizedPublicKey,
+  );
+
+  /// Resolves an identifier, UUID, or unique name and returns the Panel's
+  /// per-server permission metadata for safe UI and command gating.
+  Future<PterodactylClientServerAccess> serverAccess(
+    String id,
+    String selector,
+  ) async {
+    final PterodactylProfile profile = _requireProfile(id);
+    final _ClientHandle handle = await _clientFor(profile);
+    try {
+      return await _serverAccess(handle.client, profile, selector);
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylPage<PterodactylActivity>> activity(
+    String id,
+    String selector, {
+    int page = 1,
+    int perPage = 25,
+  }) async {
+    final PterodactylProfile profile = _requireProfile(id);
+    final _ClientHandle handle = await _clientFor(profile);
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        selector,
+      );
+      _requirePermission(access, PterodactylServerPermission.activityRead);
+      return await handle.client.listServerActivity(
+        access.server.identifier,
+        page: page,
+        perPage: perPage,
+      );
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylServerStartup> startup(String id, String selector) async {
+    final PterodactylProfile profile = _requireProfile(id);
+    final _ClientHandle handle = await _clientFor(profile);
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        selector,
+      );
+      _requirePermission(access, PterodactylServerPermission.startupRead);
+      return await handle.client.getServerStartup(access.server.identifier);
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylStartupVariable> updateStartupVariable({
+    required String profileId,
+    required String server,
+    required String key,
+    required String value,
+  }) async {
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        server,
+      );
+      if (access.allows(PterodactylServerPermission.startupUpdate)) {
+        return await handle.client.updateServerStartupVariable(
+          access.server.identifier,
+          key: key,
+          value: value,
+        );
+      }
+
+      applicationHandle = await _applicationClientFor(profile);
+      final PterodactylApplicationServer current = await applicationHandle
+          .client
+          .getApplicationServer(access.server.internalId);
+      final Map<String, String> environment = _editableEnvironment(current);
+      if (!environment.containsKey(key)) {
+        throw StateError(
+          'The Application API did not expose startup variable '
+          '${_safeProviderText(key)} for this server.',
+        );
+      }
+      environment[key] = value;
+      await applicationHandle.client.updateApplicationServerStartup(
+        current.id,
+        _startupUpdate(current, environment: environment),
+      );
+      return PterodactylStartupVariable(
+        name: key,
+        environmentVariable: key,
+        serverValue: value,
+        isEditable: true,
+        rules: '',
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  Future<void> updateDockerImage({
+    required String profileId,
+    required String server,
+    required String dockerImage,
+  }) async {
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        server,
+      );
+      if (access.allows(PterodactylServerPermission.startupDockerImage)) {
+        await handle.client.setServerDockerImage(
+          access.server.identifier,
+          dockerImage,
+        );
+        return;
+      }
+
+      applicationHandle = await _applicationClientFor(profile);
+      final PterodactylApplicationServer current = await applicationHandle
+          .client
+          .getApplicationServer(access.server.internalId);
+      await applicationHandle.client.updateApplicationServerStartup(
+        current.id,
+        _startupUpdate(current, dockerImage: dockerImage),
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  /// Renames or describes a server using the least privileged route available.
+  /// Client permissions are preferred; an enrolled Application credential is
+  /// only consulted when the Client account cannot rename this server.
+  Future<void> rename({
+    required String profileId,
+    required String server,
+    required String name,
+    String? description,
+  }) async {
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        server,
+      );
+      if (access.allows(PterodactylServerPermission.settingsRename)) {
+        await handle.client.renameServer(
+          access.server.identifier,
+          name: name,
+          description: description,
+        );
+        return;
+      }
+
+      applicationHandle = await _applicationClientFor(profile);
+      final PterodactylApplicationServer current = await applicationHandle
+          .client
+          .getApplicationServer(access.server.internalId);
+      await applicationHandle.client.updateApplicationServerDetails(
+        current.id,
+        PterodactylUpdateServerDetailsRequest.fromServer(
+          current,
+          name: name,
+          description: description,
+        ),
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  /// Reinstalls through the Client API when permitted, otherwise through the
+  /// Application API. Both routes are bound to this profile's exact origin.
+  Future<void> reinstall(String id, String server) async {
+    final PterodactylProfile profile = _requireProfile(id);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        server,
+      );
+      if (access.allows(PterodactylServerPermission.settingsReinstall)) {
+        await handle.client.reinstallServer(access.server.identifier);
+        return;
+      }
+      applicationHandle = await _applicationClientFor(profile);
+      await applicationHandle.client.reinstallApplicationServer(
+        access.server.internalId,
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  Future<void> delete(String id, String server, {bool force = false}) async {
+    final PterodactylProfile profile = _requireProfile(id);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        server,
+      );
+      applicationHandle = await _applicationClientFor(profile);
+      await applicationHandle.client.deleteApplicationServer(
+        access.server.internalId,
+        force: force,
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylApplicationServer> updateBuildSettings({
+    required String profileId,
+    required String server,
+    int? allocationId,
+    int? memoryMiB,
+    int? swapMiB,
+    int? diskMiB,
+    int? ioWeight,
+    int? cpuPercent,
+    String? threads,
+    bool clearThreads = false,
+    bool? oomDisabled,
+    int? databaseLimit,
+    int? allocationLimit,
+    int? backupLimit,
+    List<int> addAllocationIds = const <int>[],
+    List<int> removeAllocationIds = const <int>[],
+  }) async {
+    if (threads != null && clearThreads) {
+      throw ArgumentError('threads and clearThreads are mutually exclusive.');
+    }
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        server,
+      );
+      applicationHandle = await _applicationClientFor(profile);
+      final PterodactylApplicationServer current = await applicationHandle
+          .client
+          .getApplicationServer(access.server.internalId);
+      final PterodactylServerLimits currentLimits = current.limits;
+      return await applicationHandle.client.updateApplicationServerBuild(
+        current.id,
+        PterodactylUpdateServerBuildRequest(
+          defaultAllocationId: allocationId ?? current.allocationId,
+          limits: PterodactylServerLimits(
+            memoryMiB: memoryMiB ?? currentLimits.memoryMiB,
+            swapMiB: swapMiB ?? currentLimits.swapMiB,
+            diskMiB: diskMiB ?? currentLimits.diskMiB,
+            ioWeight: ioWeight ?? currentLimits.ioWeight,
+            cpuPercent: cpuPercent ?? currentLimits.cpuPercent,
+            threads: clearThreads ? null : threads ?? currentLimits.threads,
+            oomDisabled: oomDisabled ?? currentLimits.oomDisabled,
+          ),
+          featureLimits: PterodactylFeatureLimits(
+            databases: databaseLimit ?? current.featureLimits.databases,
+            allocations: allocationLimit ?? current.featureLimits.allocations,
+            backups: backupLimit ?? current.featureLimits.backups,
+          ),
+          oomDisabled: oomDisabled ?? currentLimits.oomDisabled,
+          addAllocationIds: addAllocationIds,
+          removeAllocationIds: removeAllocationIds,
+        ),
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylApplicationServer> updateStartupCommand({
+    required String profileId,
+    required String server,
+    required String startup,
+  }) async {
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServerAccess access = await _serverAccess(
+        handle.client,
+        profile,
+        server,
+      );
+      applicationHandle = await _applicationClientFor(profile);
+      final PterodactylApplicationServer current = await applicationHandle
+          .client
+          .getApplicationServer(access.server.internalId);
+      final Map<String, String> environment = <String, String>{
+        ..._editableEnvironment(current),
+      };
+      return await applicationHandle.client.updateApplicationServerStartup(
+        current.id,
+        _startupUpdate(current, startup: startup, environment: environment),
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  static Map<String, String> _editableEnvironment(
+    PterodactylApplicationServer server,
+  ) => <String, String>{
+    for (final MapEntry<String, String> entry in server.environment.entries)
+      if (!entry.key.startsWith('P_SERVER_') && entry.key != 'STARTUP')
+        entry.key: entry.value,
+  };
+
+  static PterodactylUpdateServerStartupRequest _startupUpdate(
+    PterodactylApplicationServer server, {
+    String? startup,
+    Map<String, String>? environment,
+    String? dockerImage,
+  }) => PterodactylUpdateServerStartupRequest(
+    startup: startup ?? server.startup,
+    environment: environment ?? _editableEnvironment(server),
+    eggId: server.eggId,
+    dockerImage: dockerImage ?? server.image,
+    skipScripts: server.skipScripts,
+  );
 
   /// Captures the full remote fleet with one authenticated client and
   /// bounded parallel resource requests. A single unavailable server keeps
@@ -292,6 +912,124 @@ final class PterodactylService {
     try {
       await handle.client.sendPowerSignal(identifier, signal);
     } finally {
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylBulkResult> bulkPower({
+    required String profileId,
+    required Iterable<String> serverIdentifiers,
+    required PterodactylPowerSignal signal,
+    int concurrency = 4,
+  }) async {
+    _requireBulkConcurrency(concurrency);
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    try {
+      final List<PterodactylClientServer> targets = await _resolveBulkServers(
+        handle.client,
+        profile,
+        selectors: serverIdentifiers,
+      );
+      return await _runBulkExisting(
+        action: PterodactylBulkAction.values.byName(signal.name),
+        targets: targets,
+        concurrency: concurrency,
+        operation: (PterodactylClientServer server) =>
+            handle.client.sendPowerSignal(server.identifier, signal),
+      );
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylBulkResult> bulkReinstall({
+    required String profileId,
+    required Iterable<String> serverIdentifiers,
+    int concurrency = 4,
+  }) async {
+    _requireBulkConcurrency(concurrency);
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final List<PterodactylClientServer> targets = await _resolveBulkServers(
+        handle.client,
+        profile,
+        selectors: serverIdentifiers,
+      );
+      final List<PterodactylClientServerAccess> access = await _boundedMap(
+        targets,
+        concurrency,
+        (PterodactylClientServer server) =>
+            handle.client.getClientServerAccess(server.identifier),
+      );
+      for (int index = 0; index < targets.length; index++) {
+        if (access[index].server.identifier != targets[index].identifier) {
+          throw const PterodactylProtocolException(
+            'Server permission preflight returned a mismatched server.',
+          );
+        }
+      }
+      if (access.any(
+        (PterodactylClientServerAccess item) =>
+            !item.allows(PterodactylServerPermission.settingsReinstall),
+      )) {
+        applicationHandle = await _applicationClientFor(profile);
+      }
+      final Map<String, PterodactylClientServerAccess> accessByIdentifier =
+          <String, PterodactylClientServerAccess>{
+            for (int index = 0; index < targets.length; index++)
+              targets[index].identifier: access[index],
+          };
+      return await _runBulkExisting(
+        action: PterodactylBulkAction.reinstall,
+        targets: targets,
+        concurrency: concurrency,
+        operation: (PterodactylClientServer server) {
+          final PterodactylClientServerAccess item =
+              accessByIdentifier[server.identifier]!;
+          if (item.allows(PterodactylServerPermission.settingsReinstall)) {
+            return handle.client.reinstallServer(server.identifier);
+          }
+          return applicationHandle!.client.reinstallApplicationServer(
+            server.internalId,
+          );
+        },
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  Future<PterodactylBulkResult> bulkDelete({
+    required String profileId,
+    required Iterable<String> serverIdentifiers,
+    bool force = false,
+    int concurrency = 4,
+  }) async {
+    _requireBulkConcurrency(concurrency);
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final List<PterodactylClientServer> targets = await _resolveBulkServers(
+        handle.client,
+        profile,
+        selectors: serverIdentifiers,
+      );
+      // Authenticate the Application route before deleting the first target.
+      applicationHandle = await _applicationClientFor(profile);
+      return await _runBulkExisting(
+        action: PterodactylBulkAction.delete,
+        targets: targets,
+        concurrency: concurrency,
+        operation: (PterodactylClientServer server) => applicationHandle!.client
+            .deleteApplicationServer(server.internalId, force: force),
+      );
+    } finally {
+      applicationHandle?.client.close();
       handle.client.close();
     }
   }
@@ -386,39 +1124,16 @@ final class PterodactylService {
         );
       }
 
-      final Map<String, String> environment = <String, String>{
-        for (final MapEntry<String, String> entry
-            in applicationTemplate.environment.entries)
-          if (!entry.key.startsWith('P_SERVER_') && entry.key != 'STARTUP')
-            entry.key: entry.value,
-      };
-      final PterodactylServerLimits limits = applicationTemplate.limits;
       return await applicationHandle.client.createApplicationServer(
-        PterodactylCreateServerRequest(
+        _templateCreateRequest(
+          template: applicationTemplate,
           name: name,
-          description:
-              'Created by Multiplexor from ${applicationTemplate.name}.',
-          ownerId: applicationTemplate.ownerId,
-          eggId: applicationTemplate.eggId,
-          dockerImage: applicationTemplate.image,
-          startup: applicationTemplate.startup,
-          environment: environment,
-          limits: PterodactylServerLimits(
-            memoryMiB: memoryMiB ?? limits.memoryMiB,
-            swapMiB: limits.swapMiB,
-            diskMiB: diskMiB ?? limits.diskMiB,
-            ioWeight: limits.ioWeight,
-            cpuPercent: cpuPercent ?? limits.cpuPercent,
-            threads: limits.threads,
-            oomDisabled: limits.oomDisabled,
-          ),
-          featureLimits: applicationTemplate.featureLimits,
           defaultAllocationId: free[0].id,
-          additionalAllocationIds: free.length > 1
-              ? <int>[free[1].id]
-              : const <int>[],
+          additionalAllocationId: free.length > 1 ? free[1].id : null,
+          memoryMiB: memoryMiB,
+          diskMiB: diskMiB,
+          cpuPercent: cpuPercent,
           startOnCompletion: startOnCompletion,
-          oomDisabled: limits.oomDisabled,
         ),
       );
     } finally {
@@ -426,6 +1141,321 @@ final class PterodactylService {
       handle.client.close();
     }
   }
+
+  /// Creates a fleet from one owned template after reserving distinct free
+  /// allocations for every request in the batch. Local requests can run in
+  /// parallel without selecting the same allocation; an external allocation
+  /// race is reported on the affected item by the Panel.
+  Future<PterodactylBulkResult> bulkCreateFromTemplate({
+    required String profileId,
+    required String template,
+    required Iterable<String> names,
+    int? memoryMiB,
+    int? diskMiB,
+    int? cpuPercent,
+    bool startOnCompletion = false,
+    int concurrency = 1,
+  }) async {
+    _requireBulkConcurrency(concurrency);
+    final List<String> requestedNames = names
+        .map((String name) => name.trim())
+        .toList(growable: false);
+    if (requestedNames.isEmpty ||
+        requestedNames.any((String name) => name.isEmpty)) {
+      throw ArgumentError('At least one non-empty server name is required.');
+    }
+    if (requestedNames.length > 100) {
+      throw ArgumentError(
+        'Create-many supports at most 100 servers per batch.',
+      );
+    }
+    final Set<String> normalizedNames = requestedNames
+        .map((String name) => name.toLowerCase())
+        .toSet();
+    if (normalizedNames.length != requestedNames.length) {
+      throw ArgumentError('Server names in a create batch must be unique.');
+    }
+
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final _ClientHandle handle = await _clientFor(profile);
+    _ClientHandle? applicationHandle;
+    try {
+      final PterodactylClientServer clientTemplate = _resolveServer(
+        await _listServers(handle.client, profile),
+        template,
+      );
+      if (!canUseAsTemplate(profileId, clientTemplate)) {
+        throw StateError(
+          'That server is shared with this account and cannot safely own a '
+          'clone. Choose a server you own.',
+        );
+      }
+      applicationHandle = await _applicationClientFor(profile);
+      final PterodactylApplicationServer applicationTemplate =
+          await applicationHandle.client.getApplicationServer(
+            clientTemplate.internalId,
+          );
+      final List<PterodactylAllocation> free =
+          (await applicationHandle.client.listAllNodeAllocations(
+                applicationTemplate.nodeId,
+              ))
+              .where(
+                (PterodactylAllocation allocation) =>
+                    allocation.isAssigned == false,
+              )
+              .toList()
+            ..sort(
+              (PterodactylAllocation a, PterodactylAllocation b) =>
+                  a.port.compareTo(b.port),
+            );
+      if (free.length < requestedNames.length) {
+        throw StateError(
+          'Create-many requires ${requestedNames.length} free allocations, '
+          'but only ${free.length} are available. No servers were created.',
+        );
+      }
+
+      final List<_BulkCreateTarget> targets = List<_BulkCreateTarget>.generate(
+        requestedNames.length,
+        (int index) {
+          final int additionalIndex = requestedNames.length + index;
+          return _BulkCreateTarget(
+            name: requestedNames[index],
+            defaultAllocationId: free[index].id,
+            additionalAllocationId: additionalIndex < free.length
+                ? free[additionalIndex].id
+                : null,
+          );
+        },
+        growable: false,
+      );
+      final List<PterodactylBulkItemResult> items = await _boundedMap(
+        targets,
+        concurrency,
+        (_BulkCreateTarget target) async {
+          try {
+            final PterodactylApplicationServer created =
+                await applicationHandle!.client.createApplicationServer(
+                  _templateCreateRequest(
+                    template: applicationTemplate,
+                    name: target.name,
+                    defaultAllocationId: target.defaultAllocationId,
+                    additionalAllocationId: target.additionalAllocationId,
+                    memoryMiB: memoryMiB,
+                    diskMiB: diskMiB,
+                    cpuPercent: cpuPercent,
+                    startOnCompletion: startOnCompletion,
+                  ),
+                );
+            return PterodactylBulkItemResult(
+              target: target.name,
+              name: created.name,
+              identifier: created.identifier,
+              succeeded: true,
+            );
+          } on Object catch (error) {
+            return PterodactylBulkItemResult(
+              target: target.name,
+              name: target.name,
+              identifier: null,
+              succeeded: false,
+              error: _bulkErrorText(error),
+            );
+          }
+        },
+      );
+      return PterodactylBulkResult(
+        action: PterodactylBulkAction.create,
+        items: items,
+      );
+    } finally {
+      applicationHandle?.client.close();
+      handle.client.close();
+    }
+  }
+
+  static PterodactylCreateServerRequest _templateCreateRequest({
+    required PterodactylApplicationServer template,
+    required String name,
+    required int defaultAllocationId,
+    required int? additionalAllocationId,
+    required int? memoryMiB,
+    required int? diskMiB,
+    required int? cpuPercent,
+    required bool startOnCompletion,
+  }) {
+    final Map<String, String> environment = <String, String>{
+      for (final MapEntry<String, String> entry in template.environment.entries)
+        if (!entry.key.startsWith('P_SERVER_') && entry.key != 'STARTUP')
+          entry.key: entry.value,
+    };
+    final PterodactylServerLimits limits = template.limits;
+    return PterodactylCreateServerRequest(
+      name: name,
+      description: 'Created by Multiplexor from ${template.name}.',
+      ownerId: template.ownerId,
+      eggId: template.eggId,
+      dockerImage: template.image,
+      startup: template.startup,
+      environment: environment,
+      limits: PterodactylServerLimits(
+        memoryMiB: memoryMiB ?? limits.memoryMiB,
+        swapMiB: limits.swapMiB,
+        diskMiB: diskMiB ?? limits.diskMiB,
+        ioWeight: limits.ioWeight,
+        cpuPercent: cpuPercent ?? limits.cpuPercent,
+        threads: limits.threads,
+        oomDisabled: limits.oomDisabled,
+      ),
+      featureLimits: template.featureLimits,
+      defaultAllocationId: defaultAllocationId,
+      additionalAllocationIds: additionalAllocationId == null
+          ? const <int>[]
+          : <int>[additionalAllocationId],
+      startOnCompletion: startOnCompletion,
+      oomDisabled: limits.oomDisabled,
+    );
+  }
+
+  Future<List<PterodactylClientServer>> _resolveBulkServers(
+    PterodactylClient client,
+    PterodactylProfile profile, {
+    Iterable<String> selectors = const <String>[],
+    bool all = false,
+    PterodactylBulkServerState? state,
+  }) async {
+    final List<String> requested = selectors
+        .map((String selector) => selector.trim())
+        .toList(growable: false);
+    if (all && requested.isNotEmpty) {
+      throw ArgumentError('Use explicit servers or --all, not both.');
+    }
+    if (!all && requested.isEmpty) {
+      throw ArgumentError('Select at least one server or use --all.');
+    }
+    if (requested.any((String selector) => selector.isEmpty)) {
+      throw ArgumentError('Server selectors must not be empty.');
+    }
+    final List<PterodactylClientServer> servers = await _listServers(
+      client,
+      profile,
+    );
+    final List<PterodactylClientServer> selected = all
+        ? List<PterodactylClientServer>.from(servers)
+        : requested
+              .map((String selector) => _resolveServer(servers, selector))
+              .toList(growable: false);
+    final Set<String> seen = <String>{};
+    for (final PterodactylClientServer server in selected) {
+      if (!seen.add(server.identifier)) {
+        throw ArgumentError(
+          'Bulk selection resolves the same server more than once: '
+          '${server.identifier}',
+        );
+      }
+    }
+    final List<PterodactylClientServer> filtered;
+    if (state == null) {
+      filtered = selected;
+    } else {
+      final List<PterodactylResourceUsage> resources = await _boundedMap(
+        selected,
+        4,
+        (PterodactylClientServer server) =>
+            client.getServerResources(server.identifier),
+      );
+      filtered = <PterodactylClientServer>[
+        for (int index = 0; index < selected.length; index++)
+          if (switch (state) {
+            PterodactylBulkServerState.running =>
+              _normalizedServerState(resources[index].currentState) !=
+                  'offline',
+            PterodactylBulkServerState.offline =>
+              _normalizedServerState(resources[index].currentState) ==
+                  'offline',
+          })
+            selected[index],
+      ];
+    }
+    if (filtered.isEmpty) {
+      throw StateError('The bulk selection resolved to zero servers.');
+    }
+    return List<PterodactylClientServer>.unmodifiable(filtered);
+  }
+
+  static String _normalizedServerState(String state) =>
+      state.trim().toLowerCase();
+
+  static Future<PterodactylBulkResult> _runBulkExisting({
+    required PterodactylBulkAction action,
+    required List<PterodactylClientServer> targets,
+    required int concurrency,
+    required Future<void> Function(PterodactylClientServer server) operation,
+  }) async {
+    final List<PterodactylBulkItemResult> items = await _boundedMap(
+      targets,
+      concurrency,
+      (PterodactylClientServer server) async {
+        try {
+          await operation(server);
+          return PterodactylBulkItemResult(
+            target: server.identifier,
+            name: server.name,
+            identifier: server.identifier,
+            succeeded: true,
+          );
+        } on Object catch (error) {
+          return PterodactylBulkItemResult(
+            target: server.identifier,
+            name: server.name,
+            identifier: server.identifier,
+            succeeded: false,
+            error: _bulkErrorText(error),
+          );
+        }
+      },
+    );
+    return PterodactylBulkResult(action: action, items: items);
+  }
+
+  static Future<List<R>> _boundedMap<T, R>(
+    List<T> items,
+    int concurrency,
+    Future<R> Function(T item) operation,
+  ) async {
+    final List<R?> results = List<R?>.filled(items.length, null);
+    int nextIndex = 0;
+    Future<void> worker() async {
+      while (true) {
+        final int index = nextIndex;
+        if (index >= items.length) return;
+        nextIndex += 1;
+        results[index] = await operation(items[index]);
+      }
+    }
+
+    final int workerCount = concurrency < items.length
+        ? concurrency
+        : items.length;
+    await Future.wait<void>(
+      List<Future<void>>.generate(workerCount, (_) => worker()),
+    );
+    return results.cast<R>();
+  }
+
+  static void _requireBulkConcurrency(int concurrency) {
+    if (concurrency < 1 || concurrency > 8) {
+      throw ArgumentError.value(
+        concurrency,
+        'concurrency',
+        'must be between 1 and 8',
+      );
+    }
+  }
+
+  static String _bulkErrorText(Object error) => _safeProviderText(
+    error is PterodactylException ? error.message : error.toString(),
+  );
 
   PterodactylProfile _requireProfile(String id) {
     final PterodactylProfile? result = profile(id);
@@ -463,6 +1493,29 @@ final class PterodactylService {
     }
     _serverScopes[scopeKey] = PterodactylClientServerScope.accessible;
     return accessible;
+  }
+
+  Future<PterodactylClientServerAccess> _serverAccess(
+    PterodactylClient client,
+    PterodactylProfile profile,
+    String selector,
+  ) async {
+    final PterodactylClientServer resolved = _resolveServer(
+      await _listServers(client, profile),
+      selector,
+    );
+    return client.getClientServerAccess(resolved.identifier);
+  }
+
+  static void _requirePermission(
+    PterodactylClientServerAccess access,
+    PterodactylServerPermission permission,
+  ) {
+    if (access.allows(permission)) return;
+    throw StateError(
+      'Remote account lacks ${permission.wireValue} for '
+      '${_safeProviderText(access.server.name)}.',
+    );
   }
 
   static String _scopeKey(PterodactylProfile profile) =>
@@ -578,15 +1631,25 @@ final class PterodactylService {
           )
         : null;
     return _ClientHandle(
-      client: PterodactylClient(
-        baseUri: profile.panelUri,
-        clientKey: clientCredential.value,
-        applicationKey: applicationCredential?.value ?? clientCredential.value,
-        trustedCertificatePath: profile.trustedCertificatePath,
+      client: _clientFactory(
+        profile: profile,
+        clientCredential: clientCredential,
+        applicationCredential: applicationCredential,
       ),
       hasDedicatedApplicationCredential: applicationCredential != null,
     );
   }
+
+  static PterodactylClient _createClient({
+    required PterodactylProfile profile,
+    required PterodactylCredential clientCredential,
+    PterodactylCredential? applicationCredential,
+  }) => PterodactylClient(
+    baseUri: profile.panelUri,
+    clientKey: clientCredential.value,
+    applicationKey: applicationCredential?.value ?? clientCredential.value,
+    trustedCertificatePath: profile.trustedCertificatePath,
+  );
 }
 
 final class _ClientHandle {

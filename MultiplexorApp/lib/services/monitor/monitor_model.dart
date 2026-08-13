@@ -9,6 +9,7 @@
 /// Everything in this library is pure: no clock reads and no IO.
 library;
 
+import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/button.dart';
 import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
@@ -50,12 +51,13 @@ const String _localFooterHints =
     'g consoles · n new · b build · w workspace · c consumer · r range · '
     'q quit';
 
-/// Remote has no local build, consumer, instance-creation, or console-grid
-/// shortcuts. Its footer names only controls that are meaningful against the
-/// connected Panel, including the live console and connection card.
+/// Remote replaces Local build and consumer shortcuts with its fleet bulk
+/// menu and connection card. The workspace shortcut remains visible because
+/// that card also owns files and create-many.
 const String _remoteFooterHints =
     '[tab] local/remote · [enter] open · d detail · R restart · S stop · X kill · '
-    'O live console · c connection · r range · q quit';
+    'O live console · n new · b bulk · w workspace · c connection · r range · '
+    'q quit';
 
 /// The order hints are given up in when the terminal is too narrow for all
 /// of them (comma-separated). A hint always leaves whole — a footer clipped
@@ -71,7 +73,7 @@ const String _localFooterDropOrder =
     'r range,w workspace';
 
 const String _remoteFooterDropOrder =
-    'X kill,S stop,R restart,O live console,r range,c connection';
+    'n new,c connection,X kill,S stop,R restart,O live console,r range';
 
 /// The selection action bar's chips. Which set is drawn follows the
 /// selection's own state: you cannot stop what is not running, and starting
@@ -211,19 +213,24 @@ MonitorFrame buildMonitorFrame({
   final int budget = lines - bodyTop - bars - _footerRows;
   final int bodyRows = budget < 0 ? 0 : budget;
 
+  final List<String> header = _headerPanel(
+    snapshot: snapshot,
+    instances: total,
+    frame: frame,
+    columns: columns,
+    theme: theme,
+    range: range,
+    now: now,
+    hoveredId: hoveredId,
+    pressedId: pressedId,
+  );
   final List<String> rows = <String>[
-    ..._headerPanel(
-      snapshot: snapshot,
-      instances: total,
-      frame: frame,
-      columns: columns,
-      theme: theme,
-      range: range,
-      now: now,
-    ),
+    ...header,
     ...renderKpiStrip(rollup: rollup, columns: columns, theme: theme),
   ];
-  final List<MonitorHitbox> hitboxes = <MonitorHitbox>[];
+  final List<MonitorHitbox> hitboxes = <MonitorHitbox>[
+    if (_headerViewSwitchHitbox(header) case final MonitorHitbox hitbox) hitbox,
+  ];
 
   if (hasInstances) {
     final MetricSample? selectedLatest = snapshot.latestFor(
@@ -417,6 +424,8 @@ List<String> _headerPanel({
   required MonitorTheme theme,
   required Duration range,
   required DateTime now,
+  String? hoveredId,
+  String? pressedId,
 }) {
   final DateTime local = now.toLocal();
   final String clock =
@@ -429,6 +438,29 @@ List<String> _headerPanel({
       'RANGE ${rangeLabel(range)} · '
       '$instances SERVERS';
 
+  final String switchLabel =
+      'TAB ${snapshot.view == MonitorView.local ? 'REMOTE' : 'LOCAL'}';
+  final String switchTone = pressedId == viewSwitchHitId
+      ? '${theme.bold}${theme.textStrong}'
+      : hoveredId == viewSwitchHitId
+      ? '${theme.bold}${theme.accent}'
+      : theme.faint;
+  final String spinner = monitorSpinner(theme, frame);
+  final int badgeBudget = columns - 8 - 'MULTIPLEXOR'.length;
+  final int fixedBadgeWidth = Ansi.visibleLength(
+    '$spinner  · $switchLabel · $clock',
+  );
+  final int providerBudget = badgeBudget - fixedBadgeWidth;
+  final String provider = Ansi.clipVisible(
+    snapshot.consumerName,
+    providerBudget < 0 ? 0 : providerBudget,
+  );
+  final String badgePrefix =
+      '$spinner '
+      '$provider · ';
+  final String badgeSuffix = ' · $clock';
+  final String badge = '$badgePrefix$switchLabel$badgeSuffix';
+
   return renderPanel(
     // The wordmark is the one title the panel does not style itself: the
     // gradient is a caller-owned run, inlaid verbatim. At ColorDepth.none
@@ -436,10 +468,34 @@ List<String> _headerPanel({
     // escape bytes.
     title: 'MULTIPLEXOR',
     styledTitle: theme.gradientTitle('MULTIPLEXOR'),
-    badge:
-        '${monitorSpinner(theme, frame)} ${snapshot.consumerName} · TAB ${snapshot.view == MonitorView.local ? 'REMOTE' : 'LOCAL'} · $clock',
+    badge: badge,
+    styledBadge:
+        '${theme.paint(badgePrefix, theme.faint)}'
+        '${theme.paint(switchLabel, switchTone)}'
+        '${theme.paint(badgeSuffix, theme.faint)}',
     content: <String>[theme.paint(facts, theme.faint)],
     width: columns,
     theme: theme,
+  );
+}
+
+/// Locates the view-switch label after the panel has laid out its right-hand
+/// badge. The provider name is clipped above to reserve this space, but the
+/// lookup still refuses to create an invisible hitbox if layout ever changes.
+MonitorHitbox? _headerViewSwitchHitbox(List<String> header) {
+  if (header.isEmpty) {
+    return null;
+  }
+  final String row = Ansi.strip(header.first);
+  final Match? match = RegExp(r'TAB (?:REMOTE|LOCAL)').firstMatch(row);
+  if (match == null) {
+    return null;
+  }
+  return MonitorHitbox(
+    id: viewSwitchHitId,
+    kind: MonitorHitKind.button,
+    row: 0,
+    colStart: match.start,
+    colEnd: match.end,
   );
 }

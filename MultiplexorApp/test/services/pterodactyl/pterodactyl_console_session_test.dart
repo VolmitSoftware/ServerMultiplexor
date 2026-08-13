@@ -92,6 +92,33 @@ void main() {
       isTrue,
     );
     expect(connector.socket.closed, isTrue);
+    expect(connector.socket.listenerCanceledBeforeClose, isFalse);
+    expect(connector.socket.listenerCompleted, isTrue);
+    await session.close();
+    expect(connector.socket.closeCalls, 1);
+  });
+
+  test('close and socket completion race remains idempotent', () async {
+    final _FakeConnector connector = _FakeConnector();
+    final PterodactylConsoleSession session = PterodactylConsoleSession(
+      profile: _profile,
+      serverIdentifier: 'abc123',
+      connector: connector,
+      loadCredentials: (String _) async => _credentials('token'),
+    );
+    int doneCount = 0;
+    session.done.then((_) => doneCount++);
+
+    final Future<void> connected = session.connect();
+    await _pump();
+    connector.socket.add(<String, Object?>{'event': 'auth success'});
+    await connected;
+    await Future.wait<void>(<Future<void>>[session.close(), session.close()]);
+    await session.done;
+    await _pump();
+
+    expect(doneCount, 1);
+    expect(connector.socket.closeCalls, 1);
   });
 
   test(
@@ -182,10 +209,18 @@ final class _FakeConnector implements PterodactylConsoleSocketConnector {
 }
 
 final class _FakeSocket implements PterodactylConsoleSocket {
-  final StreamController<Object?> controller =
-      StreamController<Object?>.broadcast(sync: true);
+  late final StreamController<Object?> controller = StreamController<Object?>(
+    sync: true,
+    onCancel: () {
+      if (!closeEntered) listenerCanceledBeforeClose = true;
+    },
+  );
   final List<String> sent = <String>[];
   bool closed = false;
+  bool listenerCanceledBeforeClose = false;
+  bool listenerCompleted = false;
+  bool closeEntered = false;
+  int closeCalls = 0;
 
   @override
   int? get closeCode => null;
@@ -203,7 +238,12 @@ final class _FakeSocket implements PterodactylConsoleSocket {
 
   @override
   Future<void> close([int? code, String? reason]) async {
+    closeCalls++;
     closed = true;
-    if (!controller.isClosed) await controller.close();
+    closeEntered = true;
+    if (!controller.isClosed) {
+      await controller.close();
+      listenerCompleted = true;
+    }
   }
 }

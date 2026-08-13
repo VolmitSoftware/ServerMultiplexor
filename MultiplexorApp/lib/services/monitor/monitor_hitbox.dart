@@ -17,6 +17,10 @@ const String serverHitPrefix = 'server:';
 /// panel's badge — clicking it cycles the chart window, exactly as `r` does.
 const String rangeHitId = 'range';
 
+/// The clickable `TAB REMOTE` / `TAB LOCAL` label in the header. It switches
+/// providers through the same route as the Tab key.
+const String viewSwitchHitId = 'view:switch';
+
 /// The selection action bar's button ids: what the chips over the selected
 /// server do. `monitor_model.dart` builds the chips from these and
 /// `monitor_screen.dart` dispatches on them, so — like [serverHitPrefix] —
@@ -40,12 +44,14 @@ const String wsConsolesHitId = 'ws:consoles';
 const String wsConnectHitId = 'ws:connect';
 const String wsMoreHitId = 'ws:more';
 
-/// Every action-bar id there is, selection bar first. Both halves of the
-/// contract are pinned to this list: the builders emit exactly these ids
-/// (across the states that select between them) and the screen dispatches on
-/// exactly these ids, so a chip can never be drawn with an id nothing acts
-/// on, nor acted on under an id nothing draws.
+/// Every non-row dashboard control id, header switch first and then both
+/// action bars. Both halves of the contract are pinned to this list: the
+/// builders emit exactly these ids (across the states that select between
+/// them) and the screen dispatches on exactly these ids, so a control can
+/// never be drawn with an id nothing acts on, nor acted on under an id nothing
+/// draws.
 const List<String> monitorBarHitIds = <String>[
+  viewSwitchHitId,
   actStartHitId,
   actStopHitId,
   actRestartHitId,
@@ -109,3 +115,17 @@ String? hitTest(
   }
   return null;
 }
+
+/// Resolves a left-button release into an activation target.
+///
+/// A region activates only when the pointer was pressed and released over
+/// the same hitbox. Keeping this rule pure makes the mouse contract explicit
+/// for every target, including the header view switch: dragging off cancels
+/// the click, and releasing over a different control never activates either.
+String? monitorReleaseTarget({
+  required String? pressedId,
+  required String? releasedId,
+  required bool primaryButton,
+}) => primaryButton && pressedId != null && releasedId == pressedId
+    ? pressedId
+    : null;

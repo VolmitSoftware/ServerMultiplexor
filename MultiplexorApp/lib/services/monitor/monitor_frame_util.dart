@@ -138,13 +138,14 @@ List<String> _endpointList(String? encoded) {
   );
 }
 
-/// The short label for a chart/window [range]: the four cycled ranges get
+/// The short label for a chart/window [range]: the cycled ranges get
 /// their canonical names, anything else falls back to a compact duration.
 String rangeLabel(Duration range) => switch (range.inMinutes) {
   15 => '15m',
   60 => '1h',
   360 => '6h',
   1440 => '24h',
+  10080 => '7d',
   _ => formatCompactDuration(range),
 };
 

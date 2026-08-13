@@ -18,6 +18,11 @@ void main() {
     int? latencyMs,
     double? cpuPercent,
     int? rssBytes,
+    int? diskBytes,
+    int? networkRxBytes,
+    int? networkTxBytes,
+    int? memoryLimitBytes,
+    int? diskLimitBytes,
     int? uptimeSeconds,
     String? version,
     String? logPath,
@@ -32,6 +37,11 @@ void main() {
     latencyMs: latencyMs,
     cpuPercent: cpuPercent,
     rssBytes: rssBytes,
+    diskBytes: diskBytes,
+    networkRxBytes: networkRxBytes,
+    networkTxBytes: networkTxBytes,
+    memoryLimitBytes: memoryLimitBytes,
+    diskLimitBytes: diskLimitBytes,
     uptimeSeconds: uptimeSeconds,
     version: version,
     logPath: logPath,
@@ -69,6 +79,11 @@ void main() {
             latencyMs: 40,
             cpuPercent: 1.0,
             rssBytes: 1000,
+            diskBytes: 100,
+            networkRxBytes: 1000,
+            networkTxBytes: 400,
+            memoryLimitBytes: 4000,
+            diskLimitBytes: 8000,
             uptimeSeconds: 60,
           ),
           sample(
@@ -80,6 +95,11 @@ void main() {
             latencyMs: 42,
             cpuPercent: 2.0,
             rssBytes: 2000,
+            diskBytes: 200,
+            networkRxBytes: 2000,
+            networkTxBytes: 800,
+            memoryLimitBytes: 6000,
+            diskLimitBytes: 10000,
             uptimeSeconds: 120,
           ),
           sample(
@@ -91,6 +111,11 @@ void main() {
             latencyMs: 44,
             cpuPercent: 3.0,
             rssBytes: 3000,
+            diskBytes: 300,
+            networkRxBytes: 3000,
+            networkTxBytes: 1200,
+            memoryLimitBytes: 8000,
+            diskLimitBytes: 12000,
             uptimeSeconds: 180,
           ),
         ];
@@ -104,6 +129,11 @@ void main() {
         expect(rolled.latencyMs, 42); // (40+42+44)/3 = 42.0 exactly
         expect(rolled.cpuPercent, 2.0);
         expect(rolled.rssBytes, 2000);
+        expect(rolled.diskBytes, 200);
+        expect(rolled.networkRxBytes, 2000);
+        expect(rolled.networkTxBytes, 800);
+        expect(rolled.memoryLimitBytes, 6000);
+        expect(rolled.diskLimitBytes, 10000);
         expect(rolled.uptimeSeconds, 120);
       },
     );

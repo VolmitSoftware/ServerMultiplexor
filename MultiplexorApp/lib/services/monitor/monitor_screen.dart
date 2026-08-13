@@ -68,6 +68,13 @@ const String _leaveAltScreen = '\x1B[?1049l\x1B[?25h';
 /// returns added before it can be written in raw mode.
 const String _fullFramePrefix = '\x1B[H\x1B[2J';
 
+/// The `b` shortcut follows the active workspace: Local opens its build
+/// controls, while Remote opens the fleet bulk-actions menu.
+WorkspaceModalAction monitorBuildShortcutAction(MonitorView view) =>
+    view == MonitorView.remote
+    ? WorkspaceModalAction.bulkActions
+    : WorkspaceModalAction.buildTuning;
+
 /// Why the monitor screen stopped: either the user left it, or it is
 /// handing off to a flow the dashboard itself does not implement.
 ///
@@ -135,7 +142,11 @@ class MonitorScreen {
   quickAction;
   final Future<void> Function(String instance, InstanceModalAction action)
   instanceAction;
-  final Future<void> Function(WorkspaceModalAction action) workspaceAction;
+  final Future<void> Function(
+    WorkspaceModalAction action,
+    String? selectedInstance,
+  )
+  workspaceAction;
   final Future<List<String>> Function(String logPath, int maxLines) readLogTail;
 
   final Duration _sweepInterval;
@@ -636,6 +647,7 @@ class MonitorScreen {
   /// motion — without it the chip being pressed would never light.
   void _handleMouseDown(TermEvent event) {
     if (event.button != 0) {
+      _pressedId = null;
       return;
     }
     final String? id = _hitAt(event);
@@ -650,10 +662,15 @@ class MonitorScreen {
     _pressedId = null;
     final String? id = _hitAt(event);
     _hoveredId = id;
-    if (pressed == null || id != pressed) {
+    final String? target = monitorReleaseTarget(
+      pressedId: pressed,
+      releasedId: id,
+      primaryButton: event.button == 0,
+    );
+    if (target == null) {
       return null;
     }
-    return _activate(pressed);
+    return _activate(target);
   }
 
   /// The wheel means "scroll the list" over the server list and "change the
@@ -748,6 +765,8 @@ class MonitorScreen {
         _clearPointer();
       case rangeHitId:
         _range = nextRange(_range);
+      case viewSwitchHitId:
+        return const MonitorSwitchView();
     }
     return null;
   }
@@ -806,7 +825,7 @@ class MonitorScreen {
         }
         _closeModal();
         final bool invalidated = await _suspended(
-          () => workspaceAction(action),
+          () => workspaceAction(action, _actionTarget()),
         );
         return invalidated ? const MonitorSwitchConsumer() : null;
     }
@@ -828,7 +847,9 @@ class MonitorScreen {
   Future<MonitorResult?> _runWorkspaceAction(
     WorkspaceModalAction action,
   ) async {
-    final bool invalidated = await _suspended(() => workspaceAction(action));
+    final bool invalidated = await _suspended(
+      () => workspaceAction(action, _actionTarget()),
+    );
     return invalidated ? const MonitorSwitchConsumer() : null;
   }
 
@@ -860,15 +881,29 @@ class MonitorScreen {
   }
 
   Future<MonitorResult?> _handleAction(MonitorAction action) async {
+    if (action == MonitorAction.back) {
+      switch (monitorBackTarget(
+        modalOpen: _modal != null,
+        detailOpen: _detailMode,
+      )) {
+        case MonitorBackTarget.modal:
+          _closeModal();
+          return null;
+        case MonitorBackTarget.detail:
+          _detailMode = false;
+          _detailInstance = '';
+          _logLines = const <String>[];
+          _logReadAt = null;
+          return null;
+        case MonitorBackTarget.dashboard:
+          return const MonitorQuit();
+      }
+    }
     if (_modal != null) {
       // A modal is mouse-first: its buttons have no keys of their own yet
       // (keyboard navigation of the card is future work). Escape takes the
       // card down, quit still quits, and everything else is inert rather
       // than reaching the dashboard underneath it.
-      if (action == MonitorAction.back) {
-        _closeModal();
-        return null;
-      }
       return action == MonitorAction.quit ? const MonitorQuit() : null;
     }
     switch (action) {
@@ -887,13 +922,7 @@ class MonitorScreen {
         _enterDetail();
         return null;
       case MonitorAction.back:
-        if (!_detailMode) {
-          return const MonitorQuit();
-        }
-        _detailMode = false;
-        _detailInstance = '';
-        _logLines = const <String>[];
-        _logReadAt = null;
+        // Handled above so modal/detail precedence is explicit.
         return null;
       case MonitorAction.restart:
       case MonitorAction.stop:
@@ -904,7 +933,7 @@ class MonitorScreen {
       case MonitorAction.newInstance:
         return _runWorkspaceAction(WorkspaceModalAction.newInstance);
       case MonitorAction.buildMenu:
-        return _runWorkspaceAction(WorkspaceModalAction.buildTuning);
+        return _runWorkspaceAction(monitorBuildShortcutAction(_snapshot.view));
       case MonitorAction.workspaceCard:
         // The keyboard twin of `[ MORE ]` on the workspace bar — and, like
         // that chip, a landing-view affordance. The detail view draws no

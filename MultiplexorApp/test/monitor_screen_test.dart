@@ -21,7 +21,7 @@ MonitorScreen screen({
   suspend: (Future<void> Function() flow) => flow(),
   quickAction: (String _, MonitorAction _) async {},
   instanceAction: (String _, InstanceModalAction _) async {},
-  workspaceAction: (WorkspaceModalAction _) async {},
+  workspaceAction: (WorkspaceModalAction _, String? _) async {},
   readLogTail: (String _, int _) async => const <String>[],
   sweepInterval: sweepInterval,
   sweepIntervalProvider: sweepIntervalProvider,
@@ -52,5 +52,16 @@ void main() {
       serverCount = 80;
       expect(monitor.sweepInterval, const Duration(seconds: 100));
     });
+  });
+
+  test('build shortcut opens the provider-specific workspace action', () {
+    expect(
+      monitorBuildShortcutAction(MonitorView.local),
+      WorkspaceModalAction.buildTuning,
+    );
+    expect(
+      monitorBuildShortcutAction(MonitorView.remote),
+      WorkspaceModalAction.bulkActions,
+    );
   });
 }

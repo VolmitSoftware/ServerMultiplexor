@@ -100,6 +100,7 @@ MonitorFrame instanceOverlay({
 
 /// Renders a workspace modal over a default base frame.
 MonitorFrame workspaceOverlay({
+  bool remote = false,
   MonitorTheme? theme,
   String? hoveredId,
   String? pressedId,
@@ -111,6 +112,7 @@ MonitorFrame workspaceOverlay({
   latest: null,
   locked: false,
   isolated: false,
+  remote: remote,
   theme: theme ?? MonitorTheme.plain(),
   hoveredId: hoveredId,
   pressedId: pressedId,
@@ -137,6 +139,9 @@ void main() {
         InstanceModalAction.stop,
         InstanceModalAction.restart,
         InstanceModalAction.console,
+        InstanceModalAction.settings,
+        InstanceModalAction.history,
+        InstanceModalAction.reinstall,
         InstanceModalAction.setPort,
         InstanceModalAction.makeActive,
         InstanceModalAction.motd,
@@ -192,6 +197,8 @@ void main() {
         WorkspaceModalAction.wipe,
         WorkspaceModalAction.newInstance,
         WorkspaceModalAction.connect,
+        WorkspaceModalAction.files,
+        WorkspaceModalAction.bulkActions,
       ]);
     });
 
@@ -419,7 +426,7 @@ void main() {
   });
 
   group('overlayModal instance actions', () {
-    test('shows remote block reason and withholds every operation hitbox', () {
+    test('blocks runtime controls but keeps remote management available', () {
       final MonitorFrame frame = instanceOverlay(
         remote: true,
         operationBlockReason: 'node is under maintenance',
@@ -435,7 +442,64 @@ void main() {
         buttonIds(frame),
         isNot(containsAll(<String>['im:stop', 'im:restart', 'im:console'])),
       );
-      expect(buttonIds(frame), isEmpty);
+      expect(
+        buttonIds(frame),
+        containsAll(<String>[
+          'im:settings',
+          'im:history',
+          'im:folder',
+          'im:reinstall',
+          'im:delete',
+        ]),
+      );
+    });
+
+    test(
+      'offers remote lifecycle, history, settings, and local drive access',
+      () {
+        final MonitorFrame frame = instanceOverlay(remote: true);
+        expect(
+          buttonIds(frame),
+          containsAll(<String>[
+            'im:stop',
+            'im:restart',
+            'im:console',
+            'im:settings',
+            'im:history',
+            'im:folder',
+            'im:reinstall',
+            'im:delete',
+          ]),
+        );
+        final String text = plainRows(frame).join('\n');
+        for (final String label in <String>[
+          'SETTINGS',
+          'HISTORY',
+          'OPEN FOLDER',
+          'REINSTALL',
+          'DELETE',
+        ]) {
+          expect(text, contains('[ $label ]'));
+        }
+      },
+    );
+
+    test('keeps remote settings, history and destruction while stopped', () {
+      final Set<String> ids = buttonIds(
+        instanceOverlay(remote: true, state: RuntimeState.stopped),
+      );
+      expect(ids, contains('im:start'));
+      expect(ids, isNot(contains('im:console')));
+      expect(
+        ids,
+        containsAll(<String>[
+          'im:settings',
+          'im:history',
+          'im:folder',
+          'im:reinstall',
+          'im:delete',
+        ]),
+      );
     });
 
     test('offers stop, restart and console while the instance runs', () {
@@ -570,6 +634,21 @@ void main() {
       final MonitorFrame frame = workspaceOverlay();
       expect(buttonIds(frame), isNot(contains('wm:newInstance')));
       expect(plainRows(frame).join('\n'), isNot(contains('NEW')));
+    });
+
+    test('offers account, files, create-many, and bulk actions remotely', () {
+      final MonitorFrame frame = workspaceOverlay(remote: true);
+      expect(buttonIds(frame), <String>{
+        'wm:connect',
+        'wm:files',
+        'wm:createMany',
+        'wm:bulkActions',
+      });
+      final String text = plainRows(frame).join('\n');
+      expect(text, contains('[ CONNECTION ]'));
+      expect(text, contains('[ FILES ]'));
+      expect(text, contains('[ CREATE MANY ]'));
+      expect(text, contains('[ BULK ACTIONS ]'));
     });
   });
 

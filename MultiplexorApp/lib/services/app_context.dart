@@ -4,14 +4,18 @@ import 'environment_service.dart';
 import 'manager_context.dart';
 import 'passthrough_service.dart';
 import 'pterodactyl/pterodactyl_credential_store.dart';
+import 'pterodactyl/pterodactyl_history_service.dart';
 import 'pterodactyl/pterodactyl_profile_store.dart';
 import 'pterodactyl/pterodactyl_service.dart';
+import 'pterodactyl/pterodactyl_smb_service.dart';
 
 late final ManagerContext appContext;
 late final ConsumerService consumerService;
 late final EnvironmentService environmentService;
 late final PassthroughService passthroughService;
 late final PterodactylService pterodactylService;
+late final PterodactylHistoryService pterodactylHistoryService;
+late final PterodactylSmbService pterodactylSmbService;
 
 void initializeAppContext({
   String? requestedConsumer,
@@ -37,5 +41,15 @@ void initializeAppContext({
   pterodactylService = PterodactylService(
     profileStore: PterodactylProfileStore(appContext.metadataDir),
     credentialStore: PterodactylCredentialStore(appContext.metadataDir),
+  );
+  pterodactylHistoryService = PterodactylHistoryService(
+    appContext.globalStateDir,
+  );
+  pterodactylSmbService = PterodactylSmbService(
+    metadataDirectoryPath: appContext.metadataDir,
+    loadProfile: pterodactylService.profile,
+    loadServers: pterodactylService.listServers,
+    loadPanelUsername: pterodactylService.accountUsername,
+    ensureSshPublicKey: pterodactylService.ensureAccountSshPublicKey,
   );
 }

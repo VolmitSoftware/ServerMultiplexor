@@ -37,6 +37,18 @@ void main() {
     );
   });
 
+  test('infers standard client and application key prefixes', () {
+    expect(
+      inferPterodactylCredentialRole('ptlc_client_value'),
+      PterodactylCredentialRole.client,
+    );
+    expect(
+      inferPterodactylCredentialRole('PTLA_application_value'),
+      PterodactylCredentialRole.application,
+    );
+    expect(inferPterodactylCredentialRole('legacy-compatible-key'), isNull);
+  });
+
   test('caches a validated environment credential for the session', () async {
     final String credentialVariable =
         PterodactylCredentialStore.environmentVariableFor(

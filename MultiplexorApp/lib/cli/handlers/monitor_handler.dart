@@ -47,6 +47,7 @@ Future<int> handleRuntimeWatch(List<String> args) async {
     consumerService: consumerService,
     passthrough: passthroughService,
     pterodactyl: pterodactylService,
+    pterodactylSmb: pterodactylSmbService,
     requestedConsumer: appContext.requestedConsumer,
   );
   await wizard.runMonitor();

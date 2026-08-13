@@ -160,6 +160,68 @@ void main() {
     );
   });
 
+  test(
+    'gets the Client account and manages canonical SSH public keys',
+    () async {
+      final String canonicalKey = PterodactylAccountSshKey.normalizePublicKey(
+        _ed25519PublicKey,
+      );
+      final String sshKeyResponse = jsonEncode(<String, Object?>{
+        'object': 'ssh_key',
+        'attributes': _sshKeyAttributes(canonicalKey),
+      });
+      final _FakeTransport transport = _FakeTransport(<_Reply>[
+        _Reply(
+          200,
+          jsonEncode(<String, Object?>{
+            'object': 'user',
+            'attributes': <String, Object?>{'username': 'panel-user'},
+          }),
+        ),
+        _Reply(
+          200,
+          jsonEncode(<String, Object?>{
+            'object': 'list',
+            'data': <Object?>[
+              jsonDecode(sshKeyResponse) as Map<String, Object?>,
+            ],
+          }),
+        ),
+        _Reply(200, sshKeyResponse),
+      ]);
+      final PterodactylClient client = _client(transport);
+
+      final PterodactylAccount account = await client.getAccount();
+      final List<PterodactylAccountSshKey> keys = await client
+          .listAccountSshKeys();
+      final PterodactylAccountSshKey created = await client.createAccountSshKey(
+        name: '  Multiplexor SMB  ',
+        publicKey: _ed25519PublicKey,
+      );
+
+      expect(account.username, 'panel-user');
+      expect(keys.single.publicKey, canonicalKey);
+      expect(created.fingerprint, 'SHA256:fixture');
+      expect(transport.requests.map((request) => request.uri.path), <String>[
+        '/control/api/client/account',
+        '/control/api/client/account/ssh-keys',
+        '/control/api/client/account/ssh-keys',
+      ]);
+      expect(jsonDecode(transport.requests[2].body!), <String, Object?>{
+        'name': 'Multiplexor SMB',
+        'public_key': canonicalKey,
+      });
+      expect(
+        transport.requests.every(
+          (PterodactylTransportRequest request) =>
+              request.headers[HttpHeaders.authorizationHeader] ==
+              'Bearer client-secret',
+        ),
+        isTrue,
+      );
+    },
+  );
+
   test('gets template fields and creates an Application server', () async {
     final String response = jsonEncode(<String, Object?>{
       'object': 'server',
@@ -208,6 +270,247 @@ void main() {
     );
   });
 
+  test('reads server permissions and gates Client settings metadata', () async {
+    final Map<String, Object?> attributes = _clientServerAttributes();
+    final _FakeTransport transport = _FakeTransport(<_Reply>[
+      _Reply(
+        200,
+        jsonEncode(<String, Object?>{
+          'object': 'server',
+          'attributes': attributes,
+          'meta': <String, Object?>{
+            'is_server_owner': false,
+            'user_permissions': <String>['settings.rename', 'startup.update'],
+          },
+        }),
+      ),
+    ]);
+
+    final PterodactylClientServerAccess access = await _client(
+      transport,
+    ).getClientServerAccess('abc123');
+
+    expect(access.isOwner, isFalse);
+    expect(access.allows(PterodactylServerPermission.settingsRename), isTrue);
+    expect(
+      access.allows(PterodactylServerPermission.settingsReinstall),
+      isFalse,
+    );
+  });
+
+  test('reads paginated server activity newest first', () async {
+    final _FakeTransport transport = _FakeTransport(<_Reply>[
+      _Reply(
+        200,
+        jsonEncode(<String, Object?>{
+          'object': 'list',
+          'data': <Object?>[
+            <String, Object?>{
+              'object': 'activity_log',
+              'attributes': <String, Object?>{
+                'id': 'event-id',
+                'batch': null,
+                'event': 'server:settings.rename',
+                'is_api': true,
+                'ip': null,
+                'description': null,
+                'properties': null,
+                'has_additional_metadata': false,
+                'timestamp': '2026-08-12T16:30:00+00:00',
+              },
+            },
+          ],
+          'meta': <String, Object?>{
+            'pagination': <String, Object?>{
+              'total': 1,
+              'count': 1,
+              'per_page': 10,
+              'current_page': 2,
+              'total_pages': 2,
+            },
+          },
+        }),
+      ),
+    ]);
+
+    final PterodactylPage<PterodactylActivity> page = await _client(
+      transport,
+    ).listServerActivity('abc123', page: 2, perPage: 10);
+
+    expect(page.items.single.event, 'server:settings.rename');
+    expect(page.items.single.description, isEmpty);
+    expect(page.items.single.properties, isEmpty);
+    expect(transport.requests.single.uri.queryParameters, <String, String>{
+      'page': '2',
+      'per_page': '10',
+      'sort': '-timestamp',
+    });
+  });
+
+  test('parses startup variables and Docker image metadata', () async {
+    final _FakeTransport transport = _FakeTransport(<_Reply>[
+      _Reply(
+        200,
+        jsonEncode(<String, Object?>{
+          'object': 'list',
+          'data': <Object?>[
+            <String, Object?>{
+              'object': 'egg_variable',
+              'attributes': _startupVariableAttributes(),
+            },
+          ],
+          'meta': <String, Object?>{
+            'startup_command': 'java -jar paper.jar',
+            'raw_startup_command': 'java -jar {{SERVER_JARFILE}}',
+            'docker_images': <String, Object?>{
+              'Java 21': 'ghcr.io/pterodactyl/yolks:java_21',
+              'Java 17': 'ghcr.io/pterodactyl/yolks:java_17',
+            },
+          },
+        }),
+      ),
+    ]);
+
+    final PterodactylServerStartup startup = await _client(
+      transport,
+    ).getServerStartup('abc123');
+
+    expect(startup.startupCommand, 'java -jar paper.jar');
+    expect(startup.rawStartupCommand, 'java -jar {{SERVER_JARFILE}}');
+    expect(
+      startup.dockerImages['Java 21'],
+      'ghcr.io/pterodactyl/yolks:java_21',
+    );
+    expect(startup.variables.single.environmentVariable, 'SERVER_JARFILE');
+  });
+
+  test('sends Client lifecycle and editable startup operations', () async {
+    final _FakeTransport transport = _FakeTransport(<_Reply>[
+      const _Reply(204, ''),
+      const _Reply(202, ''),
+      const _Reply(204, ''),
+      _Reply(
+        200,
+        jsonEncode(<String, Object?>{
+          'object': 'egg_variable',
+          'attributes': _startupVariableAttributes(),
+          'meta': <String, Object?>{
+            'startup_command': 'java -jar paper.jar',
+            'raw_startup_command': 'java -jar {{SERVER_JARFILE}}',
+          },
+        }),
+      ),
+    ]);
+    final PterodactylClient client = _client(transport);
+
+    await client.renameServer(
+      'abc123',
+      name: 'Renamed',
+      description: 'New description',
+    );
+    await client.reinstallServer('abc123');
+    await client.setServerDockerImage('abc123', 'java:21');
+    final PterodactylStartupVariable variable = await client
+        .updateServerStartupVariable(
+          'abc123',
+          key: 'SERVER_JARFILE',
+          value: 'paper.jar',
+        );
+
+    expect(variable.serverValue, 'paper.jar');
+    expect(transport.requests.map((request) => request.method), <String>[
+      'POST',
+      'POST',
+      'PUT',
+      'PUT',
+    ]);
+    expect(jsonDecode(transport.requests[0].body!), <String, Object?>{
+      'name': 'Renamed',
+      'description': 'New description',
+    });
+    expect(jsonDecode(transport.requests[3].body!), <String, Object?>{
+      'key': 'SERVER_JARFILE',
+      'value': 'paper.jar',
+    });
+  });
+
+  test('sends complete Application lifecycle update payloads', () async {
+    final String response = jsonEncode(<String, Object?>{
+      'object': 'server',
+      'attributes': _applicationServerAttributes(),
+    });
+    final _FakeTransport transport = _FakeTransport(<_Reply>[
+      _Reply(200, response),
+      _Reply(200, response),
+      _Reply(200, response),
+      const _Reply(204, ''),
+      const _Reply(204, ''),
+    ]);
+    final PterodactylClient client = _client(transport);
+    final PterodactylApplicationServer current =
+        PterodactylApplicationServer.fromJson(_applicationServerAttributes());
+
+    await client.updateApplicationServerDetails(
+      current.id,
+      PterodactylUpdateServerDetailsRequest.fromServer(
+        current,
+        name: 'Renamed',
+      ),
+    );
+    await client.updateApplicationServerBuild(
+      current.id,
+      PterodactylUpdateServerBuildRequest(
+        defaultAllocationId: current.allocationId,
+        limits: current.limits,
+        featureLimits: current.featureLimits,
+        oomDisabled: current.limits.oomDisabled,
+      ),
+    );
+    await client.updateApplicationServerStartup(
+      current.id,
+      PterodactylUpdateServerStartupRequest(
+        startup: current.startup,
+        environment: current.environment,
+        eggId: current.eggId,
+        dockerImage: current.image,
+        skipScripts: current.skipScripts,
+      ),
+    );
+    await client.reinstallApplicationServer(current.id);
+    await client.deleteApplicationServer(current.id, force: true);
+
+    final Map<String, Object?> build =
+        jsonDecode(transport.requests[1].body!) as Map<String, Object?>;
+    expect(jsonDecode(transport.requests[0].body!), <String, Object?>{
+      'external_id': null,
+      'name': 'Renamed',
+      'user': 5,
+      'description': '',
+    });
+    expect(build['limits'], <String, Object?>{
+      ...current.limits.toJson(),
+      'threads': null,
+    });
+    expect(build['feature_limits'], current.featureLimits.toJson());
+    expect(jsonDecode(transport.requests[2].body!), <String, Object?>{
+      'startup': 'java -jar server.jar',
+      'environment': <String, Object?>{
+        'SERVER_JARFILE': 'server.jar',
+        'P_SERVER_ALLOCATION_LIMIT': '2',
+      },
+      'egg': 2,
+      'image': 'ghcr.io/pterodactyl/yolks:java_21',
+      'skip_scripts': false,
+    });
+    expect(transport.requests.map((request) => request.uri.path), <String>[
+      '/control/api/application/servers/9/details',
+      '/control/api/application/servers/9/build',
+      '/control/api/application/servers/9/startup',
+      '/control/api/application/servers/9/reinstall',
+      '/control/api/application/servers/9/force',
+    ]);
+  });
+
   test('marks free allocations and formats IPv6 endpoints', () async {
     final _FakeTransport transport = _FakeTransport(<_Reply>[
       _Reply(200, _allocationResponse()),
@@ -246,6 +549,32 @@ void main() {
               (PterodactylApiException error) => error.toString(),
               'text',
               isNot(contains('client-secret')),
+            ),
+      ),
+    );
+  });
+
+  test('SSH key failures never expose request or response key material', () {
+    const String responseKey = 'ssh-ed25519 response-key-do-not-leak';
+    final _FakeTransport transport = _FakeTransport(<_Reply>[
+      const _Reply(422, 'public_key=ssh-ed25519 response-key-do-not-leak'),
+    ]);
+
+    expect(
+      () => _client(
+        transport,
+      ).createAccountSshKey(name: 'Multiplexor', publicKey: _ed25519PublicKey),
+      throwsA(
+        isA<PterodactylApiException>()
+            .having(
+              (PterodactylApiException error) => error.toString(),
+              'text',
+              isNot(contains(responseKey)),
+            )
+            .having(
+              (PterodactylApiException error) => error.toString(),
+              'text',
+              isNot(contains(_ed25519PublicKey)),
             ),
       ),
     );
@@ -372,8 +701,61 @@ Map<String, Object?> _applicationServerAttributes() => <String, Object?>{
       'SERVER_JARFILE': 'server.jar',
       'P_SERVER_ALLOCATION_LIMIT': 2,
     },
+    'skip_scripts': false,
   },
 };
+
+Map<String, Object?> _clientServerAttributes() => <String, Object?>{
+  'identifier': 'abc123',
+  'internal_id': 42,
+  'uuid': '00000000-0000-0000-0000-000000000042',
+  'name': 'Survival',
+  'node': 'node-a',
+  'description': 'Primary server',
+  'server_owner': false,
+  'is_node_under_maintenance': false,
+  'status': null,
+  'sftp_details': <String, Object?>{'ip': 'panel.example.test', 'port': 2022},
+  'limits': <String, Object?>{
+    'memory': 4096,
+    'swap': 0,
+    'disk': 12000,
+    'io': 500,
+    'cpu': 200,
+    'threads': null,
+    'oom_disabled': false,
+  },
+  'feature_limits': <String, Object?>{
+    'databases': 2,
+    'allocations': 2,
+    'backups': 3,
+  },
+  'relationships': <String, Object?>{
+    'allocations': <String, Object?>{'data': <Object?>[]},
+    'variables': <String, Object?>{'data': <Object?>[]},
+  },
+};
+
+Map<String, Object?> _startupVariableAttributes() => <String, Object?>{
+  'name': 'Server Jar File',
+  'description': 'Jar launched by the server',
+  'env_variable': 'SERVER_JARFILE',
+  'default_value': 'server.jar',
+  'server_value': 'paper.jar',
+  'is_editable': true,
+  'rules': 'required|string|max:64',
+};
+
+Map<String, Object?> _sshKeyAttributes(String publicKey) => <String, Object?>{
+  'name': 'Multiplexor SMB',
+  'fingerprint': 'SHA256:fixture',
+  'public_key': publicKey,
+  'created_at': '2026-08-12T12:00:00+00:00',
+};
+
+const String _ed25519PublicKey =
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOaXIq09NH4a93EVdrvHYiZ67Wj+'
+    'GBEBQ9ou4W0qSYm2 multiplexor@test';
 
 final class _Reply {
   const _Reply(this.statusCode, this.body);

@@ -378,18 +378,20 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
     _closed = true;
     _failAuthentication();
     _generation++;
-    final StreamSubscription<Object?>? messages = _messages;
     final PterodactylConsoleSocket? socket = _socket;
     _messages = null;
     _socket = null;
     try {
-      await messages?.cancel();
+      // WebSocket.close owns its underlying receive subscription. Cancelling
+      // the public stream listener first also cancels dart:io's native socket
+      // read, then close() races a second shutdown against that closed secure
+      // socket (observed as `_RawSecureSocket.read: Reading from a closed
+      // socket`). Let the WebSocket perform the close handshake and finish its
+      // receive side itself; [_closed]/generation already make late callbacks
+      // inert.
+      await socket?.close(WebSocketStatus.normalClosure, 'Detached');
     } finally {
-      try {
-        await socket?.close(WebSocketStatus.normalClosure, 'Detached');
-      } finally {
-        _finish();
-      }
+      _finish();
     }
   }
 

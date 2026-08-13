@@ -41,11 +41,87 @@ void main() {
     store.save(profile);
 
     expect(store.load('dev'), profile);
+    expect(store.loadActiveId(), 'dev');
     final String document = File(
       p.join(metadataPath, 'pterodactyl-profiles.yaml'),
     ).readAsStringSync();
     expect(document, isNot(contains('credential')));
     expect(document, isNot(contains('api_key')));
+  });
+
+  test('persists the selected account and advances it after removal', () {
+    final Directory temporary = Directory.systemTemp.createTempSync(
+      'multiplexor-profile-active-',
+    );
+    addTearDown(() => temporary.deleteSync(recursive: true));
+    final PterodactylProfileStore store = PterodactylProfileStore(
+      temporary.path,
+    );
+    final PterodactylProfile alpha = PterodactylProfile(
+      id: 'alpha',
+      name: 'Alpha',
+      panelUri: Uri.parse('https://alpha.example.test'),
+    );
+    final PterodactylProfile beta = PterodactylProfile(
+      id: 'beta',
+      name: 'Beta',
+      panelUri: Uri.parse('https://beta.example.test'),
+    );
+
+    store
+      ..save(alpha)
+      ..save(beta)
+      ..setActive('beta');
+
+    expect(store.loadActiveId(), 'beta');
+    expect(store.remove('beta'), isTrue);
+    expect(store.loadActiveId(), 'alpha');
+  });
+
+  test('loads schema v1 profiles with the first account selected', () {
+    final Directory temporary = Directory.systemTemp.createTempSync(
+      'multiplexor-profile-legacy-',
+    );
+    addTearDown(() => temporary.deleteSync(recursive: true));
+    final File file = File(p.join(temporary.path, 'profiles.yaml'))
+      ..writeAsStringSync('''
+schema_version: 1
+profiles:
+  - id: beta
+    name: Beta
+    panel_url: https://beta.example.test
+  - id: alpha
+    name: Alpha
+    panel_url: https://alpha.example.test
+''');
+    final PterodactylProfileStore store = PterodactylProfileStore.atFile(file);
+
+    expect(store.loadAll().map((PterodactylProfile item) => item.id), <String>[
+      'alpha',
+      'beta',
+    ]);
+    expect(store.loadActiveId(), 'alpha');
+  });
+
+  test('rejects a selected account that does not exist', () {
+    final Directory temporary = Directory.systemTemp.createTempSync(
+      'multiplexor-profile-invalid-active-',
+    );
+    addTearDown(() => temporary.deleteSync(recursive: true));
+    final File file = File(p.join(temporary.path, 'profiles.yaml'))
+      ..writeAsStringSync('''
+schema_version: 2
+active_profile: missing
+profiles:
+  - id: dev
+    name: Development
+    panel_url: https://dev.example.test
+''');
+
+    expect(
+      () => PterodactylProfileStore.atFile(file).loadAll(),
+      throwsFormatException,
+    );
   });
 
   test('rejects unknown fields rather than accepting token-shaped data', () {

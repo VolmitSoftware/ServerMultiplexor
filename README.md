@@ -12,6 +12,8 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 - Node.js 22+ and npm (required for Mineflayer gameplay tests)
 - macOS Keychain for persistent Pterodactyl credentials (origin-bound
   environment credentials are available for CI/non-macOS sessions)
+- `rclone` and OpenSSH for Multiplexor Drive; macOS mounts each remote server
+  into the local `~/Multiplexor Drive` folder through rclone's loopback NFS
 
 ## Quick Start
 
@@ -46,10 +48,10 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 | `R` `S` `X` `O` | Restart, stop (graceful), kill (force), open console — on the selected server. Uppercase on purpose, so a slipped key can never fire one. |
 | `g` | Open every running console in a tmux grid. |
 | `n` | Create a new instance. |
-| `b` | Build & tuning, directly. The other workspace actions live on the workspace card, behind `[ MORE ]`. |
+| `b` | Open Remote bulk actions, or Local Build & tuning. The remaining workspace actions live behind `[ MORE ]`. |
 | `w` | Open the workspace card — the keyboard twin of `[ MORE ]` on the workspace bar. Landing view only. |
 | `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
-| `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h`. |
+| `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h` → `7d`. |
 | `q`, `ctrl-c` | Quit. |
 
 The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM MiB`, and `PLAYERS` charts over the same window, plus a live `LOG` tail of its runtime log. `esc` returns to the landing view; `esc` on the landing view quits. Below 80×24 the frame is replaced by a resize prompt rather than a squeezed layout.
@@ -58,9 +60,13 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
-`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc. Local keeps the existing state-aware server and workspace actions. Remote exposes only operations Pterodactyl can safely perform: connect/repair, start, stop, restart, a live console, fleet start/stop, and create from an owned template. Suspended, installing, maintenance, unavailable, and otherwise non-runnable servers retain their rows but have mutating actions disabled.
+`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc. Local keeps the existing state-aware server and workspace actions. Remote exposes permission-aware power, console, history, account, lifecycle, settings, creation, and Multiplexor Drive workflows. Its workspace card includes Create many and Bulk actions; `b` opens the bulk selector directly, with all/selected/running/stopped presets, per-server toggles, bounded execution, progress, and an outcome for every target. Suspended, installing, maintenance, unavailable, and otherwise non-runnable servers retain their rows but have mutating actions disabled. Kill, reinstall, and delete default to no and require typed confirmation.
 
-The Remote connection card is the guided login surface. Multiplexor asks for the panel HTTPS origin once, opens a secure Keychain enrollment prompt for a Client API key, and verifies the connection before saving the profile. It never accepts an API key on the command line and never stores the panel password. A root-admin Client key provides the one-key experience on current Pterodactyl releases; a separate Application key is requested only when creation needs it. Bad or rotated credentials can be replaced from the same connection flow.
+The Remote console has a persistent server/resource header, severity colors, safe Minecraft `§` formatting, prefix and routine-noise trimming, and batched history rendering. `Esc`, `Ctrl-C`, or `:exit` immediately restores the dashboard without stopping the server.
+
+The Remote server menu's Open folder action repairs or starts Multiplexor Drive when needed, then opens that server's exact local folder in Finder.
+
+The Remote connection card is the guided account surface. It can add, select, rename, repair, rotate, and remove multiple panel accounts. Multiplexor asks for the panel HTTPS origin once, accepts the key through masked terminal input, saves it in macOS Keychain, and verifies it before selecting the account. It never accepts an API key on the command line or writes one into profile state. Standard `ptlc_` and `ptla_` prefixes select the Client or Application role automatically. A root-admin Client key provides the one-key experience on current Pterodactyl releases; a separate Application key is only needed when the Client key cannot reach administrative creation, resource, startup, or deletion routes.
 
 Remote cards show every configured advertised allocation and every bind allocation. DNS A/AAAA results are shown beside configured aliases when resolution succeeds. These are intentionally separate: Pterodactyl does not know an upstream NAT port mapping, so Multiplexor never guesses that a private bind address, node FQDN, and public game endpoint are interchangeable.
 
@@ -84,6 +90,7 @@ Pull latest builds refreshes the newest build of every platform the active consu
 - **Backup** — `consumers/<profile>/backups/<instance>/<backup-id>/` stores a restorable snapshot with checksums and a manifest. Backups are used manually and by `instance safe-update`.
 - **Gameplay test** — a Mineflayer scenario run against an actual instance. Built-ins cover connection, command responses, and status effects; custom `.mjs` scenarios can assert any protocol-visible player behavior. Reports stay under ignored per-consumer state.
 - **Remote profile** — non-secret Pterodactyl panel metadata in `.multiplexor/pterodactyl-profiles.yaml`. Client/Application bearer keys live in macOS Keychain under an exact profile+HTTPS-origin identity, never in the YAML file.
+- **Multiplexor Drive** — the local `~/Multiplexor Drive` folder containing one live folder for every accessible Pterodactyl server, grouped by remote account. Selecting Open folder for a remote server opens its folder here in Finder.
 
 ## CLI Reference
 
@@ -93,19 +100,49 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 
 | Command | What it does |
 |---------|--------------|
-| `remote connect --url <https://panel> [--id <id>] [--name <name>] [--application] [--replace]` | Verify and save a panel connection. Reuses an existing origin-bound credential; `--replace` securely re-enrolls it. `--application` also enrolls the optional creation key. |
-| `remote profiles` | List saved non-secret panel profiles. |
+| `remote connect --url <https://panel> [--id <id>] [--name <name>] [--application] [--replace]` | Add or repair an account through masked API-key input, verify it, and make it active. `remote account add` accepts the same flags. |
+| `remote account list` | List accounts, the active account, panel origin, and Client/Application credential status. `accounts` and `profiles` are aliases. |
+| `remote account use <id>` | Persist the account used when `--profile` is omitted. |
+| `remote account rename <id> <name>` | Rename the local account label without changing its panel origin or credential identity. |
+| `remote account key [id] [--role <client\|application>]` | Replace a key through masked input, infer standard key prefixes, verify it, and roll back on failure. |
+| `remote account remove <id> --confirm <id>` | Remove an account and its stored credentials with an exact-ID confirmation. |
 | `remote verify [--profile <id>]` | Verify credentials, whole-panel visibility, node access, creation capability, and configuration warnings. |
 | `remote list [--profile <id>]` | List every remote server with all advertised/DNS-resolved and bind IP:port allocations. |
 | `remote nodes [--profile <id>]` | Show each node's FQDN, configured/allocated memory and disk, daemon port, and SFTP port. |
 | `remote stats <server> [--profile <id>]` | Show current state, CPU, memory, disk, network, and uptime for one server. |
 | `remote stats --all [--profile <id>]` | Show aggregate and per-server resource statistics for the panel fleet. |
+| `remote history <server> [--since <15m\|6h\|7d>] [--limit <n>] [--json] [--profile <id>]` | Read persisted monitor samples without polling the panel. History keeps raw samples for 24 hours and five-minute rollups for seven days. |
+| `remote drive install [--profile <id>\|--all-profiles] [--username <name>] [--mount-root <path>] [--known-hosts <path>] [--no-key] [--no-open]` | Set up the local Multiplexor Drive, defaulting to every saved account and `~/Multiplexor Drive`; verify SSH host fingerprints, mount every accessible server, and open the drive in Finder. By default it generates a per-profile Ed25519 key and registers only its public half through the Client API. |
+| `remote drive add [--profile <id>] [--username <name>] [--no-key]` | Add or refresh one remote account in Multiplexor Drive. Stop the drive first when changing its accounts. |
+| `remote drive remove [profile] --confirm <profile>` | Remove one account and its saved SFTP password from Multiplexor Drive with exact confirmation. |
+| `remote drive password [profile]` | Enroll the Panel password through secure interactive input as an SSH-key fallback. |
+| `remote drive trust` | Scan Wings SFTP host keys, display every SHA256 fingerprint, and persist them only after an explicit default-no confirmation. |
+| `remote drive doctor` | Check rclone, the local mount provider, SFTP authentication, SSH host trust, and safe Drive-folder ownership. |
+| `remote drive start\|status\|stop` | Mount all configured servers locally, inspect their current paths and health, or stop the mounts safely. No SMB server or administrator authorization is involved. |
+| `remote drive open [server] [--profile <id>]` | Open `~/Multiplexor Drive` in Finder, or open the exact local folder for a server. The drive starts or repairs itself first when necessary. |
+| `remote files <...>` / `remote smb <...>` | Compatibility aliases for `remote drive`; new workflows should use the Drive name. |
+| `remote permissions <server> [--profile <id>]` | Show ownership and the exact Client permissions used to gate server actions. |
+| `remote activity <server> [--page <n>] [--per-page <1-100>] [--profile <id>]` | Read the panel's historical server activity/audit feed. |
+| `remote settings <server> [--profile <id>]` | Show limits, feature limits, startup command, and accessible startup variables. |
 | `remote start\|stop\|restart\|kill <server> [--profile <id>]` | Send a Pterodactyl power signal. |
-| `remote console <server> [--profile <id>]` | Attach to sanitized live console output and commands. Esc, Ctrl-C, or `:exit` detaches without stopping the server. |
+| `remote bulk <start\|stop\|restart\|kill\|reinstall\|delete> [servers...] [--all] [--state running\|offline] [--concurrency <1-8>] [--confirm <token>] [--force] [--profile <id>]` | Safely operate on an explicit remote fleet. Every selector is resolved before mutation; state filters use live resource state (`running` includes transitional non-offline states), work is bounded, and every server receives an outcome. Reinstall/delete print the exact token required by `--confirm`. |
+| `remote console <server> [--profile <id>]` | Attach to a severity-colored, prefix/noise-trimmed live console with server resource chrome and safe Minecraft `§` formatting. Esc, Ctrl-C, or `:exit` restores the caller without stopping the server. |
 | `remote command <server> <command> [--profile <id>]` | Send one console command. |
 | `remote create <name> --template <server> [--memory <MiB>] [--disk <MiB>] [--cpu <percent>] [--start] [--profile <id>]` | Create a server from an owned template using the next one or two free allocations. Worlds, backups, schedules, and subusers are not copied. |
+| `remote create-many --template <server> (--names <a,b,c>\|--prefix <name> --count <1-100>) [--memory <MiB>] [--disk <MiB>] [--cpu <percent>] [--start] [--concurrency <1-8>] [--profile <id>]` | Create several servers from one owned template. Multiplexor reserves distinct allocations before sending any create request, bounds parallelism, and reports each result. |
+| `remote rename <server> <name> [--description <text>] [--profile <id>]` | Rename or describe a server using Client permission first and Application fallback when enrolled. |
+| `remote reinstall <server> --confirm <server> [--profile <id>]` | Request a reinstall through the least-privileged permitted route. The exact server value is required as confirmation. |
+| `remote delete <server> --confirm <server> [--force] [--profile <id>]` | Permanently delete a server through the Application route with exact confirmation. |
+| `remote variable <server> --key <variable> --value <value> [--profile <id>]` | Change an editable startup variable. |
+| `remote image <server> --image <docker-image> [--profile <id>]` | Select an allowed Docker image when `startup.docker-image` is granted. |
+| `remote limits <server> [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--threads <set>\|--clear-threads] [--databases <count>] [--allocations <count>] [--backups <count>] [--allocation <id>] [--add-allocation <id,...>] [--remove-allocation <id,...>] [--oom-disabled\|--oom-enabled] [--profile <id>]` | Modify resource, feature, and allocation limits through the Application API while preserving unspecified values. |
+| `remote startup <server> --command <command> [--profile <id>]` | Modify the administrative startup command while preserving the current egg, image, variables, and install-script policy. |
 
-When exactly one profile exists, `--profile` is optional. With multiple profiles, commands require it rather than guessing which production panel to mutate. `ptero` is an alias for `remote`.
+The active account is used when `--profile` is omitted; `--profile` remains available as a one-command override. `ptero` is an alias for `remote`.
+
+Multiplexor Drive never treats an API key as an SFTP password. It creates a dedicated local Ed25519 identity per remote profile, registers only the public key with the account, and requires explicit Wings host-key trust. API keys, private-key contents, and cleartext Panel passwords are never written to Drive settings or runtime state. The mounted files remain live remote server files: normal Finder edits, moves, and deletions affect the server immediately.
+
+The drive remains mounted until `remote drive stop` or the computer reboots. After a reboot, `remote drive start` restores every configured mount; `remote drive open` also starts or repairs it on demand before opening Finder.
 
 For CI/non-macOS sessions, set both an origin-bound key and its companion origin, for example `MULTIPLEXOR_PTERODACTYL_DEV_CLIENT_API_KEY` plus `MULTIPLEXOR_PTERODACTYL_DEV_ORIGIN=https://panel.example.com`. Environment credentials are session-only and should not be used for long-running child-process workflows.
 
@@ -336,6 +373,16 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 ./start.sh remote stats --all
 ./start.sh remote nodes
 ./start.sh remote console <server>
+
+# Operate on an explicit remote fleet with bounded, visible results
+./start.sh remote bulk start --all --state offline
+./start.sh remote bulk restart lobby survival --concurrency 2
+./start.sh remote create-many --template lobby --prefix event- --count 3
+
+# Install one local drive containing every accessible Pterodactyl server
+./start.sh remote drive install     # verify fingerprints, mount, open Finder
+./start.sh remote drive status
+./start.sh remote drive open <server>
 
 # Install Mineflayer once, then run a self-cleaning player-protocol smoke test
 ./start.sh gameplay setup

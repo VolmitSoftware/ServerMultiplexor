@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:convert';
 
 typedef JsonObject = Map<String, Object?>;
 
@@ -35,6 +36,65 @@ enum PterodactylPowerSignal {
   kill;
 
   String get wireValue => name;
+}
+
+enum PterodactylBulkAction {
+  start,
+  stop,
+  restart,
+  kill,
+  reinstall,
+  delete,
+  create,
+}
+
+enum PterodactylBulkServerState { running, offline }
+
+final class PterodactylBulkItemResult {
+  const PterodactylBulkItemResult({
+    required this.target,
+    required this.name,
+    required this.identifier,
+    required this.succeeded,
+    this.error,
+  });
+
+  /// Stable input for this item: an identifier for existing servers or the
+  /// requested name for a create operation.
+  final String target;
+  final String name;
+  final String? identifier;
+  final bool succeeded;
+  final String? error;
+}
+
+final class PterodactylBulkResult {
+  PterodactylBulkResult({
+    required this.action,
+    required List<PterodactylBulkItemResult> items,
+  }) : items = List<PterodactylBulkItemResult>.unmodifiable(items);
+
+  final PterodactylBulkAction action;
+  final List<PterodactylBulkItemResult> items;
+
+  int get totalCount => items.length;
+  int get succeededCount =>
+      items.where((PterodactylBulkItemResult item) => item.succeeded).length;
+  int get failedCount => totalCount - succeededCount;
+  bool get isSuccess => items.isNotEmpty && failedCount == 0;
+}
+
+enum PterodactylServerPermission {
+  activityRead('activity.read'),
+  settingsRename('settings.rename'),
+  settingsReinstall('settings.reinstall'),
+  startupRead('startup.read'),
+  startupUpdate('startup.update'),
+  startupDockerImage('startup.docker-image');
+
+  const PterodactylServerPermission(this.wireValue);
+
+  final String wireValue;
 }
 
 /// Short-lived credentials returned by the Panel for a Wings WebSocket.
@@ -188,7 +248,13 @@ final class PterodactylClientServer {
     required this.limits,
     required this.featureLimits,
     required List<PterodactylAllocation> allocations,
-  }) : allocations = List<PterodactylAllocation>.unmodifiable(allocations);
+    this.invocation = '',
+    this.dockerImage = '',
+    this.skipScripts = false,
+    List<PterodactylStartupVariable> variables =
+        const <PterodactylStartupVariable>[],
+  }) : allocations = List<PterodactylAllocation>.unmodifiable(allocations),
+       variables = List<PterodactylStartupVariable>.unmodifiable(variables);
 
   factory PterodactylClientServer.fromJson(JsonObject json) {
     final JsonObject sftp = _requiredObject(json, 'sftp_details');
@@ -197,6 +263,10 @@ final class PterodactylClientServer {
       relationships,
       'allocations',
     ).map(PterodactylAllocation.fromClientJson).toList(growable: false);
+    final List<PterodactylStartupVariable> variables = _relationshipItems(
+      relationships,
+      'variables',
+    ).map(PterodactylStartupVariable.fromJson).toList(growable: false);
 
     return PterodactylClientServer(
       identifier: _requiredString(json, 'identifier'),
@@ -215,6 +285,10 @@ final class PterodactylClientServer {
         _requiredObject(json, 'feature_limits'),
       ),
       allocations: allocations,
+      invocation: _nullableString(json, 'invocation') ?? '',
+      dockerImage: _nullableString(json, 'docker_image') ?? '',
+      skipScripts: _optionalBool(json, 'skip_scripts'),
+      variables: variables,
     );
   }
 
@@ -232,6 +306,10 @@ final class PterodactylClientServer {
   final PterodactylServerLimits limits;
   final PterodactylFeatureLimits featureLimits;
   final List<PterodactylAllocation> allocations;
+  final String invocation;
+  final String dockerImage;
+  final bool skipScripts;
+  final List<PterodactylStartupVariable> variables;
 
   PterodactylAllocation? get primaryAllocation {
     for (final PterodactylAllocation allocation in allocations) {
@@ -241,6 +319,250 @@ final class PterodactylClientServer {
     }
     return allocations.isEmpty ? null : allocations.first;
   }
+}
+
+final class PterodactylClientServerAccess {
+  PterodactylClientServerAccess({
+    required this.server,
+    required this.isOwner,
+    required Iterable<String> permissions,
+  }) : permissions = Set<String>.unmodifiable(permissions);
+
+  final PterodactylClientServer server;
+  final bool isOwner;
+  final Set<String> permissions;
+
+  bool allows(PterodactylServerPermission permission) =>
+      isOwner ||
+      permissions.contains('*') ||
+      permissions.contains(permission.wireValue);
+}
+
+final class PterodactylStartupVariable {
+  const PterodactylStartupVariable({
+    required this.name,
+    required this.environmentVariable,
+    required this.isEditable,
+    required this.rules,
+    this.description,
+    this.defaultValue,
+    this.serverValue,
+  });
+
+  factory PterodactylStartupVariable.fromJson(JsonObject json) {
+    return PterodactylStartupVariable(
+      name: _requiredString(json, 'name'),
+      description: _nullableString(json, 'description'),
+      environmentVariable: _requiredString(json, 'env_variable'),
+      defaultValue: _nullableString(json, 'default_value'),
+      serverValue: _nullableString(json, 'server_value'),
+      isEditable: _optionalBool(json, 'is_editable'),
+      rules: _requiredString(json, 'rules'),
+    );
+  }
+
+  final String name;
+  final String? description;
+  final String environmentVariable;
+  final String? defaultValue;
+  final String? serverValue;
+  final bool isEditable;
+  final String rules;
+}
+
+final class PterodactylServerStartup {
+  PterodactylServerStartup({
+    required this.startupCommand,
+    required this.rawStartupCommand,
+    required Map<String, String> dockerImages,
+    required List<PterodactylStartupVariable> variables,
+  }) : dockerImages = UnmodifiableMapView<String, String>(
+         Map<String, String>.from(dockerImages),
+       ),
+       variables = List<PterodactylStartupVariable>.unmodifiable(variables);
+
+  factory PterodactylServerStartup.fromJson(
+    JsonObject meta,
+    List<JsonObject> variables,
+  ) {
+    return PterodactylServerStartup(
+      startupCommand: _requiredString(meta, 'startup_command'),
+      rawStartupCommand: _requiredString(meta, 'raw_startup_command'),
+      dockerImages: _requiredStringMap(meta, 'docker_images'),
+      variables: variables
+          .map(PterodactylStartupVariable.fromJson)
+          .toList(growable: false),
+    );
+  }
+
+  final String startupCommand;
+  final String rawStartupCommand;
+  final Map<String, String> dockerImages;
+  final List<PterodactylStartupVariable> variables;
+}
+
+final class PterodactylActivity {
+  PterodactylActivity({
+    required this.id,
+    required this.event,
+    required this.isApi,
+    required this.description,
+    required Map<String, Object?> properties,
+    required this.hasAdditionalMetadata,
+    required this.timestamp,
+    this.batch,
+    this.ip,
+  }) : properties = UnmodifiableMapView<String, Object?>(
+         Map<String, Object?>.from(properties),
+       );
+
+  factory PterodactylActivity.fromJson(JsonObject json) {
+    final String timestamp = _requiredString(json, 'timestamp');
+    final DateTime? parsedTimestamp = DateTime.tryParse(timestamp);
+    if (parsedTimestamp == null) {
+      throw const FormatException('Expected "timestamp" to be ISO-8601.');
+    }
+    return PterodactylActivity(
+      id: _requiredString(json, 'id'),
+      batch: _nullableString(json, 'batch'),
+      event: _requiredString(json, 'event'),
+      isApi: _optionalBool(json, 'is_api'),
+      ip: _nullableString(json, 'ip'),
+      description: _nullableString(json, 'description') ?? '',
+      properties: _optionalObject(json, 'properties'),
+      hasAdditionalMetadata: _optionalBool(json, 'has_additional_metadata'),
+      timestamp: parsedTimestamp,
+    );
+  }
+
+  final String id;
+  final String? batch;
+  final String event;
+  final bool isApi;
+  final String? ip;
+  final String description;
+  final Map<String, Object?> properties;
+  final bool hasAdditionalMetadata;
+  final DateTime timestamp;
+}
+
+/// Minimal account identity returned by the Client API. Multiplexor only
+/// retains the username needed to address this account over SFTP.
+final class PterodactylAccount {
+  const PterodactylAccount({required this.username});
+
+  factory PterodactylAccount.fromJson(JsonObject json) =>
+      PterodactylAccount(username: _requiredString(json, 'username'));
+
+  final String username;
+}
+
+final class PterodactylAccountSshKey {
+  PterodactylAccountSshKey({
+    required this.name,
+    required this.fingerprint,
+    required String publicKey,
+    required this.createdAt,
+  }) : publicKey = normalizePublicKey(publicKey);
+
+  factory PterodactylAccountSshKey.fromJson(JsonObject json) {
+    final DateTime? createdAt = DateTime.tryParse(
+      _requiredString(json, 'created_at'),
+    );
+    if (createdAt == null) {
+      throw const FormatException('Expected "created_at" to be ISO-8601.');
+    }
+    return PterodactylAccountSshKey(
+      name: _requiredString(json, 'name'),
+      fingerprint: _requiredString(json, 'fingerprint'),
+      publicKey: _requiredString(json, 'public_key'),
+      createdAt: createdAt,
+    );
+  }
+
+  final String name;
+  final String fingerprint;
+  final String publicKey;
+  final DateTime createdAt;
+
+  /// Normalizes transport-only whitespace without trying to reinterpret key
+  /// material. Pterodactyl performs the cryptographic validation and returns
+  /// the canonical public key used for future idempotence checks.
+  static String normalizePublicKey(String value) {
+    final String normalized = value
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .trim();
+    if (normalized.isEmpty ||
+        normalized.length > 16384 ||
+        normalized.contains('\u0000')) {
+      throw ArgumentError(
+        'publicKey must be non-empty valid public key material.',
+      );
+    }
+    final RegExpMatch? ed25519 = RegExp(
+      r'^ssh-ed25519[ \t]+([A-Za-z0-9+/]+={0,2})(?:[ \t]+.*)?$',
+    ).firstMatch(normalized);
+    if (normalized.startsWith('ssh-ed25519') && ed25519 == null) {
+      throw ArgumentError('publicKey is not valid ed25519 key material.');
+    }
+    if (ed25519 != null) {
+      try {
+        return _ed25519Pkcs8(base64.decode(ed25519.group(1)!));
+      } on FormatException {
+        throw ArgumentError('publicKey is not valid ed25519 key material.');
+      } on RangeError {
+        throw ArgumentError('publicKey is not valid ed25519 key material.');
+      }
+    }
+    return normalized;
+  }
+
+  static String _ed25519Pkcs8(List<int> blob) {
+    int readLength(int offset) {
+      if (offset + 4 > blob.length) throw RangeError('invalid key');
+      return (blob[offset] << 24) |
+          (blob[offset + 1] << 16) |
+          (blob[offset + 2] << 8) |
+          blob[offset + 3];
+    }
+
+    final int typeLength = readLength(0);
+    final int typeStart = 4;
+    final int typeEnd = typeStart + typeLength;
+    if (typeLength != 11 ||
+        typeEnd + 4 > blob.length ||
+        ascii.decode(blob.sublist(typeStart, typeEnd)) != 'ssh-ed25519') {
+      throw const FormatException();
+    }
+    final int keyLength = readLength(typeEnd);
+    final int keyStart = typeEnd + 4;
+    if (keyLength != 32 || keyStart + keyLength != blob.length) {
+      throw const FormatException();
+    }
+    final List<int> der = <int>[
+      0x30,
+      0x2a,
+      0x30,
+      0x05,
+      0x06,
+      0x03,
+      0x2b,
+      0x65,
+      0x70,
+      0x03,
+      0x21,
+      0x00,
+      ...blob.sublist(keyStart),
+    ];
+    return '-----BEGIN PUBLIC KEY-----\n${base64.encode(der)}\n'
+        '-----END PUBLIC KEY-----';
+  }
+
+  @override
+  String toString() =>
+      'PterodactylAccountSshKey(name: $name, fingerprint: $fingerprint, '
+      'publicKey: [REDACTED], createdAt: $createdAt)';
 }
 
 final class PterodactylServerLimits {
@@ -327,6 +649,7 @@ final class PterodactylApplicationServer {
     required this.featureLimits,
     required this.image,
     required this.startup,
+    required this.skipScripts,
     required Map<String, String> environment,
     this.externalId,
   }) : environment = UnmodifiableMapView<String, String>(
@@ -354,6 +677,7 @@ final class PterodactylApplicationServer {
       ),
       image: _requiredString(container, 'image'),
       startup: _requiredString(container, 'startup_command'),
+      skipScripts: _optionalBool(container, 'skip_scripts'),
       environment: _requiredEnvironmentMap(container, 'environment'),
     );
   }
@@ -374,6 +698,7 @@ final class PterodactylApplicationServer {
   final PterodactylFeatureLimits featureLimits;
   final String image;
   final String startup;
+  final bool skipScripts;
   final Map<String, String> environment;
 }
 
@@ -635,6 +960,175 @@ final class PterodactylCreateServerRequest {
   };
 }
 
+final class PterodactylUpdateServerDetailsRequest {
+  PterodactylUpdateServerDetailsRequest({
+    required this.name,
+    required this.ownerId,
+    required this.description,
+    required this.externalId,
+  }) {
+    if (name.trim().isEmpty) {
+      throw ArgumentError.value(name, 'name', 'must not be empty');
+    }
+    if (ownerId < 1) {
+      throw RangeError.range(ownerId, 1, null, 'ownerId');
+    }
+  }
+
+  factory PterodactylUpdateServerDetailsRequest.fromServer(
+    PterodactylApplicationServer server, {
+    String? name,
+    String? description,
+  }) => PterodactylUpdateServerDetailsRequest(
+    name: name ?? server.name,
+    ownerId: server.ownerId,
+    description: description ?? server.description,
+    externalId: server.externalId,
+  );
+
+  final String name;
+  final int ownerId;
+  final String? description;
+  final String? externalId;
+
+  JsonObject toJson() => <String, Object?>{
+    'external_id': externalId,
+    'name': name,
+    'user': ownerId,
+    'description': description,
+  };
+}
+
+final class PterodactylUpdateServerBuildRequest {
+  PterodactylUpdateServerBuildRequest({
+    required this.defaultAllocationId,
+    required this.limits,
+    required this.featureLimits,
+    required this.oomDisabled,
+    List<int> addAllocationIds = const <int>[],
+    List<int> removeAllocationIds = const <int>[],
+  }) : addAllocationIds = List<int>.unmodifiable(addAllocationIds),
+       removeAllocationIds = List<int>.unmodifiable(removeAllocationIds) {
+    if (defaultAllocationId < 1) {
+      throw RangeError.range(
+        defaultAllocationId,
+        1,
+        null,
+        'defaultAllocationId',
+      );
+    }
+    _validateLimits(limits);
+    _validateFeatureLimit(featureLimits.databases, 'databases');
+    _validateFeatureLimit(featureLimits.allocations, 'allocations');
+    _validateFeatureLimit(featureLimits.backups, 'backups');
+    _validateAllocationIds(addAllocationIds, 'addAllocationIds');
+    _validateAllocationIds(removeAllocationIds, 'removeAllocationIds');
+    if (addAllocationIds
+        .toSet()
+        .intersection(removeAllocationIds.toSet())
+        .isNotEmpty) {
+      throw ArgumentError(
+        'An allocation cannot be added and removed in the same update.',
+      );
+    }
+  }
+
+  final int defaultAllocationId;
+  final PterodactylServerLimits limits;
+  final PterodactylFeatureLimits featureLimits;
+  final bool oomDisabled;
+  final List<int> addAllocationIds;
+  final List<int> removeAllocationIds;
+
+  JsonObject toJson() => <String, Object?>{
+    'allocation': defaultAllocationId,
+    'oom_disabled': oomDisabled,
+    'limits': <String, Object?>{
+      'memory': limits.memoryMiB,
+      'swap': limits.swapMiB,
+      'disk': limits.diskMiB,
+      'io': limits.ioWeight,
+      'cpu': limits.cpuPercent,
+      'threads': limits.threads,
+    },
+    'feature_limits': featureLimits.toJson(),
+    if (addAllocationIds.isNotEmpty) 'add_allocations': addAllocationIds,
+    if (removeAllocationIds.isNotEmpty)
+      'remove_allocations': removeAllocationIds,
+  };
+
+  static void _validateLimits(PterodactylServerLimits limits) {
+    if (limits.memoryMiB < 0) {
+      throw RangeError.range(limits.memoryMiB, 0, null, 'memoryMiB');
+    }
+    if (limits.swapMiB < -1) {
+      throw RangeError.range(limits.swapMiB, -1, null, 'swapMiB');
+    }
+    if (limits.diskMiB < 0) {
+      throw RangeError.range(limits.diskMiB, 0, null, 'diskMiB');
+    }
+    if (limits.ioWeight < 10 || limits.ioWeight > 1000) {
+      throw RangeError.range(limits.ioWeight, 10, 1000, 'ioWeight');
+    }
+    if (limits.cpuPercent < 0) {
+      throw RangeError.range(limits.cpuPercent, 0, null, 'cpuPercent');
+    }
+  }
+
+  static void _validateAllocationIds(List<int> values, String name) {
+    for (final int value in values) {
+      if (value < 1) throw RangeError.range(value, 1, null, name);
+    }
+    if (values.toSet().length != values.length) {
+      throw ArgumentError.value(values, name, 'must not contain duplicates');
+    }
+  }
+
+  static void _validateFeatureLimit(int? value, String name) {
+    if (value != null && value < 0) {
+      throw RangeError.range(value, 0, null, name);
+    }
+  }
+}
+
+final class PterodactylUpdateServerStartupRequest {
+  PterodactylUpdateServerStartupRequest({
+    required this.startup,
+    required Map<String, String> environment,
+    required this.eggId,
+    required this.dockerImage,
+    required this.skipScripts,
+  }) : environment = UnmodifiableMapView<String, String>(
+         Map<String, String>.from(environment),
+       ) {
+    if (startup.trim().isEmpty) {
+      throw ArgumentError.value(startup, 'startup', 'must not be empty');
+    }
+    if (eggId < 1) throw RangeError.range(eggId, 1, null, 'eggId');
+    if (dockerImage.trim().isEmpty) {
+      throw ArgumentError.value(
+        dockerImage,
+        'dockerImage',
+        'must not be empty',
+      );
+    }
+  }
+
+  final String startup;
+  final Map<String, String> environment;
+  final int eggId;
+  final String dockerImage;
+  final bool skipScripts;
+
+  JsonObject toJson() => <String, Object?>{
+    'startup': startup,
+    'environment': environment,
+    'egg': eggId,
+    'image': dockerImage,
+    'skip_scripts': skipScripts,
+  };
+}
+
 Map<String, String> _requiredEnvironmentMap(JsonObject json, String key) {
   final Object? value = json[key];
   if (value is! Map<Object?, Object?>) {
@@ -657,6 +1151,22 @@ Map<String, String> _requiredEnvironmentMap(JsonObject json, String key) {
     } else {
       throw FormatException('Expected "$key" values to be scalar.');
     }
+  }
+  return result;
+}
+
+Map<String, String> _requiredStringMap(JsonObject json, String key) {
+  final Object? rawValue = json[key];
+  if (rawValue is List<Object?> && rawValue.isEmpty) {
+    return <String, String>{};
+  }
+  final JsonObject value = _requiredObject(json, key);
+  final Map<String, String> result = <String, String>{};
+  for (final MapEntry<String, Object?> entry in value.entries) {
+    if (entry.value is! String) {
+      throw FormatException('Expected "$key" values to be strings.');
+    }
+    result[entry.key] = entry.value! as String;
   }
   return result;
 }

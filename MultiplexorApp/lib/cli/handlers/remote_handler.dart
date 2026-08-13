@@ -1,13 +1,17 @@
+import 'dart:convert';
 import 'dart:io';
 
 import '../../services/app_context.dart';
+import '../../services/monitor/metric_sample.dart';
 import '../../services/pterodactyl/pterodactyl_console_protocol.dart';
 import '../../services/pterodactyl/pterodactyl_console_session.dart';
 import '../../services/pterodactyl/pterodactyl_console_terminal.dart';
 import '../../services/pterodactyl/pterodactyl_credential.dart';
+import '../../services/pterodactyl/pterodactyl_history_service.dart';
 import '../../services/pterodactyl/pterodactyl_models.dart';
 import '../../services/pterodactyl/pterodactyl_profile.dart';
 import '../../services/pterodactyl/pterodactyl_service.dart';
+import '../../services/pterodactyl/pterodactyl_smb_models.dart';
 import '../../utils/user_prompt.dart';
 
 Future<int> handleRemote(List<String> args) async {
@@ -18,12 +22,11 @@ Future<int> handleRemote(List<String> args) async {
     switch (subcommand) {
       case 'connect':
         return _connect(parsed);
+      case 'account':
+      case 'accounts':
+        return _account(parsed);
       case 'profiles':
-        for (final PterodactylProfile profile
-            in pterodactylService.listProfiles()) {
-          stdout.writeln('${profile.id}\t${profile.name}\t${profile.origin}');
-        }
-        return 0;
+        return _listAccounts();
       case 'verify':
       case 'doctor':
         final PterodactylVerification result = await pterodactylService.verify(
@@ -73,6 +76,104 @@ Future<int> handleRemote(List<String> args) async {
         stdout.writeln('network tx:  ${usage.networkTxBytes} bytes');
         stdout.writeln('uptime:      ${usage.uptime.inSeconds}s');
         return 0;
+      case 'permissions':
+        final PterodactylClientServerAccess access = await pterodactylService
+            .serverAccess(_profileId(parsed), _server(parsed));
+        stdout.writeln('server:      ${_safe(access.server.name)}');
+        stdout.writeln('owner:       ${access.isOwner}');
+        final List<String> permissions = access.permissions.toList()..sort();
+        stdout.writeln(
+          'permissions: ${access.isOwner ? '*' : permissions.join(', ')}',
+        );
+        return 0;
+      case 'activity':
+        final int page = _integerInRange(parsed, 'page', minimum: 1) ?? 1;
+        final int perPage =
+            _integerInRange(parsed, 'per-page', minimum: 1, maximum: 100) ?? 25;
+        final PterodactylPage<PterodactylActivity> activity =
+            await pterodactylService.activity(
+              _profileId(parsed),
+              _server(parsed),
+              page: page,
+              perPage: perPage,
+            );
+        for (final PterodactylActivity item in activity.items) {
+          stdout.writeln(
+            '${item.timestamp.toIso8601String()}\t${_safe(item.event)}\t'
+            '${_safe(item.description)}\t${_safe(jsonEncode(item.properties))}',
+          );
+        }
+        stdout.writeln(
+          'page ${activity.pagination.currentPage}/'
+          '${activity.pagination.totalPages}\t${activity.pagination.total} total',
+        );
+        return 0;
+      case 'history':
+        return _printHistory(parsed);
+      case 'drive':
+      case 'files':
+      case 'smb':
+        return _drive(parsed, legacyNamespace: subcommand != 'drive');
+      case 'settings':
+        return _printSettings(_profileId(parsed), _server(parsed));
+      case 'rename':
+        final String? name =
+            parsed.option('name') ??
+            (parsed.positionals.length > 1
+                ? parsed.positionals.skip(1).join(' ')
+                : null);
+        if (name == null || name.trim().isEmpty) {
+          stderr.writeln(
+            'Usage: remote rename <server> <name> [--description <text>]',
+          );
+          return 2;
+        }
+        await pterodactylService.rename(
+          profileId: _profileId(parsed),
+          server: _server(parsed),
+          name: name,
+          description: parsed.option('description'),
+        );
+        stdout.writeln('[OK] Server renamed');
+        return 0;
+      case 'reinstall':
+        final String reinstallTarget = _server(parsed);
+        if (!_confirmed(parsed, reinstallTarget)) {
+          stderr.writeln(
+            'Reinstall replaces server files. Repeat with '
+            '--confirm ${_safe(reinstallTarget)}.',
+          );
+          return 2;
+        }
+        await pterodactylService.reinstall(_profileId(parsed), reinstallTarget);
+        stdout.writeln('[OK] Server reinstall requested');
+        return 0;
+      case 'delete':
+        final String deleteTarget = _server(parsed);
+        if (!_confirmed(parsed, deleteTarget)) {
+          stderr.writeln(
+            'Deletion is permanent. Repeat with '
+            '--confirm ${_safe(deleteTarget)}.',
+          );
+          return 2;
+        }
+        await pterodactylService.delete(
+          _profileId(parsed),
+          deleteTarget,
+          force: parsed.flag('force'),
+        );
+        stdout.writeln('[OK] Server deleted');
+        return 0;
+      case 'bulk':
+        return _bulk(parsed);
+      case 'variable':
+        return _updateVariable(parsed);
+      case 'image':
+        return _updateImage(parsed);
+      case 'limits':
+        return _updateLimits(parsed);
+      case 'startup':
+        return _updateStartup(parsed);
       case 'start':
       case 'stop':
       case 'restart':
@@ -140,9 +241,11 @@ Future<int> handleRemote(List<String> args) async {
           '[OK] Created ${_safe(created.name)} (${_safe(created.identifier)})',
         );
         return 0;
+      case 'create-many':
+        return _createMany(parsed);
       default:
         stderr.writeln(
-          'Usage: remote <connect|profiles|verify|list|nodes|stats|start|stop|restart|kill|console|command|create>',
+          'Usage: remote <account|connect|profiles|verify|list|nodes|stats|history|drive|permissions|activity|settings|start|stop|restart|kill|bulk|console|command|create|create-many|rename|reinstall|delete|variable|image|limits|startup>',
         );
         return 2;
     }
@@ -150,6 +253,147 @@ Future<int> handleRemote(List<String> args) async {
     stderr.writeln('[ERROR] $error');
     return 1;
   }
+}
+
+Future<int> _bulk(_RemoteArguments parsed) async {
+  const String usage =
+      'Usage: remote bulk <start|stop|restart|kill|reinstall|delete> '
+      '[servers...] [--all] [--state <running|offline>] '
+      '[--concurrency <1-8>]';
+  final String? rawAction = parsed.positionals.firstOrNull;
+  final PterodactylBulkAction? action = rawAction == null
+      ? null
+      : PterodactylBulkAction.values
+            .where(
+              (PterodactylBulkAction item) =>
+                  item.name == rawAction &&
+                  item != PterodactylBulkAction.create,
+            )
+            .firstOrNull;
+  if (action == null) {
+    stderr.writeln(usage);
+    return 2;
+  }
+  final PterodactylBulkServerState? state = switch (parsed
+      .option('state')
+      ?.trim()
+      .toLowerCase()) {
+    null => null,
+    'running' => PterodactylBulkServerState.running,
+    'offline' => PterodactylBulkServerState.offline,
+    _ => throw ArgumentError('--state must be running or offline.'),
+  };
+  final String profileId = _profileId(parsed);
+  final int concurrency =
+      _integerInRange(parsed, 'concurrency', minimum: 1, maximum: 8) ?? 4;
+  final List<PterodactylClientServer> targets = await pterodactylService
+      .resolveBulkServers(
+        profileId: profileId,
+        selectors: parsed.positionals.skip(1),
+        all: parsed.flag('all'),
+        state: state,
+      );
+  final List<String> identifiers = targets
+      .map((PterodactylClientServer server) => server.identifier)
+      .toList(growable: false);
+  if (action == PterodactylBulkAction.reinstall ||
+      action == PterodactylBulkAction.delete) {
+    final String token = PterodactylService.bulkConfirmationToken(
+      action: action,
+      profileId: profileId,
+      serverIdentifiers: identifiers,
+    );
+    if (parsed.option('confirm') != token) {
+      stderr.writeln(
+        '${action == PterodactylBulkAction.delete ? 'Deletion is permanent' : 'Reinstall replaces server files'}. '
+        'Repeat with --confirm ${_safe(token)}.',
+      );
+      return 2;
+    }
+  }
+
+  final PterodactylBulkResult result = switch (action) {
+    PterodactylBulkAction.start ||
+    PterodactylBulkAction.stop ||
+    PterodactylBulkAction.restart ||
+    PterodactylBulkAction.kill => await pterodactylService.bulkPower(
+      profileId: profileId,
+      serverIdentifiers: identifiers,
+      signal: PterodactylPowerSignal.values.byName(action.name),
+      concurrency: concurrency,
+    ),
+    PterodactylBulkAction.reinstall => await pterodactylService.bulkReinstall(
+      profileId: profileId,
+      serverIdentifiers: identifiers,
+      concurrency: concurrency,
+    ),
+    PterodactylBulkAction.delete => await pterodactylService.bulkDelete(
+      profileId: profileId,
+      serverIdentifiers: identifiers,
+      force: parsed.flag('force'),
+      concurrency: concurrency,
+    ),
+    PterodactylBulkAction.create => throw StateError('Unreachable action.'),
+  };
+  return _printBulkResult(result);
+}
+
+Future<int> _createMany(_RemoteArguments parsed) async {
+  const String usage =
+      'Usage: remote create-many --template <server> '
+      '(--names <a,b,c> | --prefix <name> --count <n>) '
+      '[--memory <MiB>] [--disk <MiB>] [--cpu <percent>] [--start] '
+      '[--concurrency <1-8>]';
+  final String? template = parsed.option('template');
+  final String? rawNames = parsed.option('names');
+  final String? prefix = parsed.option('prefix');
+  final int? count = _integerInRange(parsed, 'count', minimum: 1, maximum: 100);
+  if (template == null ||
+      (rawNames == null) == (prefix == null) ||
+      (prefix != null && count == null) ||
+      (rawNames != null && count != null)) {
+    stderr.writeln(usage);
+    return 2;
+  }
+  final List<String> names = rawNames != null
+      ? rawNames.split(',').map((String name) => name.trim()).toList()
+      : List<String>.generate(
+          count!,
+          (int index) => '$prefix${index + 1}',
+          growable: false,
+        );
+  final PterodactylBulkResult result = await pterodactylService
+      .bulkCreateFromTemplate(
+        profileId: _profileId(parsed),
+        template: template,
+        names: names,
+        memoryMiB: _integer(parsed, 'memory'),
+        diskMiB: _integer(parsed, 'disk'),
+        cpuPercent: _integer(parsed, 'cpu'),
+        startOnCompletion: parsed.flag('start'),
+        concurrency:
+            _integerInRange(parsed, 'concurrency', minimum: 1, maximum: 8) ?? 1,
+      );
+  return _printBulkResult(result);
+}
+
+int _printBulkResult(PterodactylBulkResult result) {
+  for (final PterodactylBulkItemResult item in result.items) {
+    final String identifier = item.identifier ?? '-';
+    if (item.succeeded) {
+      stdout.writeln('[OK]\t${_safe(identifier)}\t${_safe(item.name)}');
+    } else {
+      stdout.writeln(
+        '[ERROR]\t${_safe(identifier)}\t${_safe(item.name)}\t'
+        '${_safe(item.error ?? 'Unknown failure')}',
+      );
+    }
+  }
+  stdout.writeln(
+    'summary: ${result.succeededCount}/${result.totalCount} succeeded; '
+    '${result.failedCount} failed',
+  );
+  return result.isSuccess ? 0 : 1;
 }
 
 Future<int> _connect(_RemoteArguments parsed) async {
@@ -199,7 +443,7 @@ Future<int> _connect(_RemoteArguments parsed) async {
   if ((needsClientEnrollment || needsApplicationEnrollment) &&
       !Ui.hasTerminal) {
     stderr.writeln(
-      '[ERROR] Keychain enrollment requires an interactive terminal. The '
+      '[ERROR] API key enrollment requires an interactive terminal. The '
       'API key is never accepted as a command argument.',
     );
     return 2;
@@ -213,11 +457,7 @@ Future<int> _connect(_RemoteArguments parsed) async {
       stdout.writeln(
         'Create a Client API key at ${candidate.origin}/account/api.',
       );
-      stdout.writeln('Paste it into the secure macOS Keychain prompt.');
-      await pterodactylService.enrollCredential(
-        candidate,
-        PterodactylCredentialRole.client,
-      );
+      await _saveMaskedCredential(candidate, PterodactylCredentialRole.client);
       if (!hasClient) {
         newlyEnrolled.add(PterodactylCredentialRole.client);
       }
@@ -229,7 +469,7 @@ Future<int> _connect(_RemoteArguments parsed) async {
       stdout.writeln(
         'Grant Servers read/write, Allocations read, and Nodes read.',
       );
-      await pterodactylService.enrollCredential(
+      await _saveMaskedCredential(
         candidate,
         PterodactylCredentialRole.application,
       );
@@ -238,9 +478,16 @@ Future<int> _connect(_RemoteArguments parsed) async {
       }
     }
 
+    if (enrollApplication) {
+      await pterodactylService.verifyCredential(
+        candidate,
+        PterodactylCredentialRole.application,
+      );
+    }
     final PterodactylVerification result = await pterodactylService
         .verifyProfile(candidate);
     pterodactylService.saveProfile(candidate);
+    pterodactylService.selectProfile(candidate.id);
     profileCommitted = true;
     if (existing != null && existing.origin != candidate.origin) {
       for (final PterodactylCredentialRole role
@@ -287,17 +534,591 @@ Future<int> _connect(_RemoteArguments parsed) async {
   return 0;
 }
 
+Future<int> _account(_RemoteArguments parsed) async {
+  final String action = parsed.positionals.firstOrNull ?? 'list';
+  switch (action) {
+    case 'list':
+      return _listAccounts();
+    case 'add':
+      return _connect(parsed);
+    case 'use':
+      final String id = _accountId(parsed, position: 1);
+      pterodactylService.selectProfile(id);
+      stdout.writeln('[OK] Active remote account: $id');
+      return 0;
+    case 'rename':
+      final String id = _accountId(parsed, position: 1);
+      final PterodactylProfile? current = pterodactylService.profile(id);
+      if (current == null) throw StateError('Unknown Pterodactyl profile: $id');
+      final String name =
+          parsed.option('name') ??
+          (parsed.positionals.length > 2
+              ? parsed.positionals.skip(2).join(' ')
+              : '');
+      if (name.trim().isEmpty) {
+        stderr.writeln('Usage: remote account rename <id> <name>');
+        return 2;
+      }
+      pterodactylService.saveProfile(
+        PterodactylProfile(
+          id: current.id,
+          name: name,
+          panelUri: current.panelUri,
+          trustedCertificatePath: current.trustedCertificatePath,
+        ),
+      );
+      stdout.writeln('[OK] Remote account renamed');
+      return 0;
+    case 'key':
+      if (!Ui.hasTerminal) {
+        stderr.writeln(
+          '[ERROR] API key enrollment requires an interactive terminal.',
+        );
+        return 2;
+      }
+      final String id = parsed.positionals.length > 1
+          ? parsed.positionals[1]
+          : _profileId(parsed);
+      final PterodactylProfile? profile = pterodactylService.profile(id);
+      if (profile == null) {
+        throw StateError('Unknown Pterodactyl profile: $id');
+      }
+      await _replaceAccountCredential(profile, parsed.option('role'));
+      stdout.writeln('[OK] API key saved and verified for ${profile.id}');
+      return 0;
+    case 'remove':
+      final String id = _accountId(parsed, position: 1);
+      if (parsed.option('confirm') != id) {
+        stderr.writeln(
+          'Removing an account also removes its stored credentials. Repeat '
+          'with --confirm $id.',
+        );
+        return 2;
+      }
+      await pterodactylService.removeProfile(id);
+      stdout.writeln('[OK] Remote account removed');
+      return 0;
+    default:
+      stderr.writeln('Usage: remote account <list|add|use|rename|key|remove>');
+      return 2;
+  }
+}
+
+Future<int> _listAccounts() async {
+  final PterodactylProfile? active = pterodactylService.activeProfile();
+  for (final PterodactylProfile profile in pterodactylService.listProfiles()) {
+    final bool client = await pterodactylService.hasClientCredential(profile);
+    final bool application = await pterodactylService.hasApplicationCredential(
+      profile,
+    );
+    stdout.writeln(
+      '${profile.id}\t${active?.id == profile.id ? 'active' : '-'}\t'
+      '${profile.name}\t${profile.origin}\t'
+      'client=${client ? 'saved' : 'missing'}\t'
+      'application=${application ? 'saved' : 'optional'}',
+    );
+  }
+  return 0;
+}
+
+Future<void> _replaceAccountCredential(
+  PterodactylProfile profile,
+  String? requestedRole,
+) async {
+  final String value = await Ui.secret('Pterodactyl API key');
+  final PterodactylCredential credential = PterodactylCredential(value);
+  final PterodactylCredentialRole? inferred = inferPterodactylCredentialRole(
+    value,
+  );
+  final PterodactylCredentialRole role = requestedRole == null
+      ? inferred ??
+            PterodactylCredentialRole.values.byName(
+              await Ui.pick(
+                'API key type',
+                PterodactylCredentialRole.values
+                    .map((PterodactylCredentialRole item) => item.name)
+                    .toList(growable: false),
+              ),
+            )
+      : PterodactylCredentialRole.values.byName(
+          requestedRole.trim().toLowerCase(),
+        );
+  if (inferred != null && inferred != role) {
+    throw ArgumentError(
+      'The ${inferred.name} API-key prefix does not match --role ${role.name}.',
+    );
+  }
+  final PterodactylCredential? previous = await pterodactylService
+      .credentialForRollback(profile, role);
+  try {
+    await pterodactylService.saveCredential(profile, role, credential);
+    await pterodactylService.verifyCredential(profile, role);
+    await pterodactylService.verifyProfile(profile);
+  } catch (_) {
+    if (previous != null) {
+      await pterodactylService.restoreCredential(profile, role, previous);
+    } else {
+      await pterodactylService.removeCredential(profile, role);
+    }
+    rethrow;
+  }
+}
+
+Future<void> _saveMaskedCredential(
+  PterodactylProfile profile,
+  PterodactylCredentialRole role,
+) async {
+  final String value = await Ui.secret('${role.name} API key');
+  final PterodactylCredentialRole? inferred = inferPterodactylCredentialRole(
+    value,
+  );
+  if (inferred != null && inferred != role) {
+    throw FormatException(
+      'Expected a ${role.name} API key, received a ${inferred.name} key.',
+    );
+  }
+  await pterodactylService.saveCredential(
+    profile,
+    role,
+    PterodactylCredential(value),
+  );
+}
+
+String _accountId(_RemoteArguments parsed, {required int position}) {
+  if (parsed.positionals.length <= position ||
+      parsed.positionals[position].trim().isEmpty) {
+    throw ArgumentError('A remote account ID is required.');
+  }
+  return PterodactylProfile.normalizeId(parsed.positionals[position]);
+}
+
+Future<int> _printHistory(_RemoteArguments parsed) async {
+  final String profileId = _profileId(parsed);
+  final String server = _server(parsed);
+  final Duration window = parsePterodactylHistoryWindow(
+    parsed.option('since') ?? '24h',
+  );
+  final int limit =
+      _integerInRange(parsed, 'limit', minimum: 1, maximum: 10000) ?? 500;
+  final List<MetricSample> stored = await pterodactylHistoryService.read(
+    profileId,
+    server,
+    window: window,
+  );
+  final List<MetricSample> samples = stored.length <= limit
+      ? stored
+      : stored.sublist(stored.length - limit);
+  if (parsed.flag('json')) {
+    stdout.writeln(
+      '[${samples.map((MetricSample item) => item.toJsonLine()).join(',')}]',
+    );
+    return 0;
+  }
+  for (final MetricSample sample in samples) {
+    stdout.writeln(
+      '${sample.ts.toUtc().toIso8601String()}\t${sample.state.name}\t'
+      '${sample.cpuPercent ?? '-'}\t${sample.rssBytes ?? '-'}\t'
+      '${sample.diskBytes ?? '-'}\t${sample.networkRxBytes ?? '-'}\t'
+      '${sample.networkTxBytes ?? '-'}\t${sample.uptimeSeconds ?? '-'}',
+    );
+  }
+  return 0;
+}
+
+Future<int> _drive(
+  _RemoteArguments parsed, {
+  required bool legacyNamespace,
+}) async {
+  final String requestedAction = parsed.positionals.firstOrNull ?? 'status';
+  final String action = requestedAction == 'configure'
+      ? 'install'
+      : requestedAction;
+  if (legacyNamespace) {
+    stderr.writeln(
+      '[WARN] remote files/smb is now remote drive; using the local Drive '
+      'workflow.',
+    );
+  }
+  switch (action) {
+    case 'install':
+    case 'add':
+      final bool installing = action == 'install';
+      if (installing && !Ui.hasTerminal) {
+        stderr.writeln(
+          '[ERROR] Drive installation requires an interactive terminal so '
+          'SSH host fingerprints can be confirmed.',
+        );
+        return 2;
+      }
+      final bool allProfiles =
+          parsed.flag('all-profiles') ||
+          (installing && parsed.option('profile') == null);
+      if (parsed.flag('all-profiles') && parsed.option('profile') != null) {
+        throw ArgumentError('--profile and --all-profiles cannot be combined.');
+      }
+      if (allProfiles && parsed.option('username') != null) {
+        throw ArgumentError(
+          '--username can only be used while adding one profile.',
+        );
+      }
+      final List<PterodactylProfile> profiles = allProfiles
+          ? pterodactylService.listProfiles()
+          : <PterodactylProfile>[
+              pterodactylService.profile(_profileId(parsed)) ??
+                  (throw StateError('The selected remote profile is missing.')),
+            ];
+      if (profiles.isEmpty) {
+        throw StateError('No remote accounts are configured.');
+      }
+      final String? username = parsed.option('username');
+      final Map<String, String> usernameOverrides = username == null
+          ? const <String, String>{}
+          : <String, String>{profiles.single.id: username};
+      final Iterable<String> profileIds = profiles.map(
+        (PterodactylProfile profile) => profile.id,
+      );
+      final PterodactylSmbSettings drive = installing
+          ? await pterodactylSmbService.installDrive(
+              profileIds: profileIds,
+              panelUsernames: usernameOverrides,
+              mountRoot: parsed.option('mount-root'),
+              knownHostsFile: parsed.option('known-hosts'),
+              provisionSshKeys: !parsed.flag('no-key'),
+            )
+          : await pterodactylSmbService.configureAccounts(
+              profileIds: profileIds,
+              panelUsernames: usernameOverrides,
+              mountRoot: parsed.option('mount-root'),
+              knownHostsFile: parsed.option('known-hosts'),
+              provisionSshKeys: !parsed.flag('no-key'),
+            );
+      for (final PterodactylProfile profile in profiles) {
+        stdout.writeln('[OK] Added Drive account ${profile.id}');
+      }
+      stdout.writeln('drive:       ${_safe(drive.mountRoot)}');
+      if (!installing) {
+        stdout.writeln('next:        remote drive trust');
+        return 0;
+      }
+      if (!await _trustDriveHostKeys()) {
+        stdout.writeln('[CANCELLED] Multiplexor Drive was not started.');
+        return 0;
+      }
+      final PterodactylSmbStatus installed = await pterodactylSmbService
+          .startDrive();
+      _printDriveStatus(installed);
+      if (!parsed.flag('no-open')) {
+        final String opened = await pterodactylSmbService.openDrive();
+        stdout.writeln('[OK] Opened ${_safe(opened)}');
+      }
+      return 0;
+    case 'remove':
+      final String profileId = parsed.positionals.length > 1
+          ? PterodactylProfile.normalizeId(parsed.positionals[1])
+          : _profileId(parsed);
+      if (parsed.option('confirm') != profileId) {
+        stderr.writeln(
+          'Removing a Drive account also removes its saved password. Repeat '
+          'with --confirm $profileId.',
+        );
+        return 2;
+      }
+      await pterodactylSmbService.removeAccount(profileId);
+      stdout.writeln('[OK] Removed Drive account $profileId');
+      return 0;
+    case 'password':
+      if (!Ui.hasTerminal) {
+        stderr.writeln(
+          '[ERROR] SFTP password enrollment requires an interactive terminal.',
+        );
+        return 2;
+      }
+      final String profileId = parsed.positionals.length > 1
+          ? PterodactylProfile.normalizeId(parsed.positionals[1])
+          : _profileId(parsed);
+      await pterodactylSmbService.enrollPassword(profileId);
+      stdout.writeln('[OK] Saved SFTP password for $profileId');
+      return 0;
+    case 'trust':
+      if (!Ui.hasTerminal) {
+        stderr.writeln(
+          '[ERROR] SSH host-key trust requires an interactive terminal.',
+        );
+        return 2;
+      }
+      await _trustDriveHostKeys();
+      return 0;
+    case 'doctor':
+      final PterodactylSmbDoctorReport report = await pterodactylSmbService
+          .doctor();
+      for (final PterodactylSmbCheck check in report.checks) {
+        final String label = switch (check.level) {
+          PterodactylSmbCheckLevel.ready => 'OK',
+          PterodactylSmbCheckLevel.warning => 'WARN',
+          PterodactylSmbCheckLevel.error => 'ERROR',
+        };
+        stdout.writeln(
+          '[$label] ${_safe(check.name)}: ${_safe(check.message)}',
+        );
+      }
+      return report.isReady ? 0 : 1;
+    case 'authorize':
+      stdout.writeln(
+        '[OK] Multiplexor Drive is local and requires no administrator '
+        'authorization.',
+      );
+      return 0;
+    case 'start':
+      final PterodactylSmbStatus started = await pterodactylSmbService
+          .startDrive();
+      _printDriveStatus(started);
+      return started.running ? 0 : 1;
+    case 'stop':
+      final PterodactylSmbStatus stopped = await pterodactylSmbService
+          .stopDrive();
+      _printDriveStatus(stopped);
+      return 0;
+    case 'status':
+      _printDriveStatus(await pterodactylSmbService.status());
+      return 0;
+    case 'open':
+      final String? selector = parsed.positionals.length > 1
+          ? parsed.positionals.skip(1).join(' ').trim()
+          : null;
+      final String opened;
+      if (selector == null || selector.isEmpty) {
+        opened = await pterodactylSmbService.openDrive();
+      } else {
+        final String profileId = _profileId(parsed);
+        final PterodactylClientServerAccess access = await pterodactylService
+            .serverAccess(profileId, selector);
+        opened = await pterodactylSmbService.openServerFolder(
+          profileId: profileId,
+          serverIdentifier: access.server.identifier,
+        );
+      }
+      stdout.writeln('[OK] Opened ${_safe(opened)}');
+      return 0;
+    default:
+      stderr.writeln(
+        'Usage: remote drive <install|add|remove|password|trust|doctor|start|status|open|stop>',
+      );
+      return 2;
+  }
+}
+
+Future<bool> _trustDriveHostKeys() async {
+  if (!Ui.hasTerminal) {
+    stderr.writeln(
+      '[ERROR] SSH host-key trust requires an interactive terminal.',
+    );
+    return false;
+  }
+  final List<PterodactylSshHostKeyCandidate> candidates =
+      await pterodactylSmbService.scanHostKeys();
+  if (candidates.isEmpty) {
+    stdout.writeln('[OK] SSH host keys are already trusted.');
+    return true;
+  }
+  stdout.writeln('Verify these Wings SFTP fingerprints out-of-band:');
+  for (final PterodactylSshHostKeyCandidate candidate in candidates) {
+    stdout.writeln(
+      '${_safe(candidate.endpoint)}\t${_safe(candidate.keyType)}\t'
+      '${_safe(candidate.fingerprint)}',
+    );
+  }
+  final bool confirmed = await Ui.confirm(
+    'Trust exactly these ${candidates.length} SSH host keys?',
+    defaultValue: false,
+  );
+  if (!confirmed) {
+    stdout.writeln('[CANCELLED] No SSH host keys were changed.');
+    return false;
+  }
+  await pterodactylSmbService.trustHostKeys(candidates);
+  stdout.writeln('[OK] SSH host keys trusted');
+  return true;
+}
+
+void _printDriveStatus(PterodactylSmbStatus status) {
+  stdout.writeln('configured:  ${status.configured}');
+  stdout.writeln(
+    'drive:       ${_safe(status.mountRoot ?? pterodactylSmbService.drivePath)}',
+  );
+  stdout.writeln('running:     ${status.running}');
+  stdout.writeln(
+    'mounts:      ${status.runningMounts}/${status.mounts.length} running',
+  );
+  for (final PterodactylSmbMountStatus mount in status.mounts) {
+    stdout.writeln(
+      '${mount.running ? 'up' : 'down'}\t${_safe(mount.profileId)}\t'
+      '${_safe(mount.serverIdentifier)}\t${_safe(mount.serverName)}\t'
+      '${_safe(mount.mountPath)}',
+    );
+  }
+}
+
+Future<int> _printSettings(String profileId, String server) async {
+  final PterodactylClientServerAccess access = await pterodactylService
+      .serverAccess(profileId, server);
+  final PterodactylClientServer current = access.server;
+  stdout.writeln('name:        ${_safe(current.name)}');
+  stdout.writeln('description: ${_safe(current.description)}');
+  stdout.writeln('memory:      ${current.limits.memoryMiB} MiB');
+  stdout.writeln('swap:        ${current.limits.swapMiB} MiB');
+  stdout.writeln('disk:        ${current.limits.diskMiB} MiB');
+  stdout.writeln('io:          ${current.limits.ioWeight}');
+  stdout.writeln('cpu:         ${current.limits.cpuPercent}%');
+  stdout.writeln('threads:     ${current.limits.threads ?? '-'}');
+  stdout.writeln('oom disabled:${current.limits.oomDisabled}');
+  stdout.writeln(
+    'databases:   ${current.featureLimits.databases ?? 'unlimited'}',
+  );
+  stdout.writeln(
+    'allocations: ${current.featureLimits.allocations ?? 'unlimited'}',
+  );
+  stdout.writeln(
+    'backups:     ${current.featureLimits.backups ?? 'unlimited'}',
+  );
+  try {
+    final PterodactylServerStartup startup = await pterodactylService.startup(
+      profileId,
+      server,
+    );
+    stdout.writeln('startup:     ${_safe(startup.rawStartupCommand)}');
+    for (final PterodactylStartupVariable variable in startup.variables) {
+      stdout.writeln(
+        'variable:    ${_safe(variable.environmentVariable)}='
+        '${_safe(variable.serverValue ?? '')}\t'
+        '${variable.isEditable ? 'editable' : 'read-only'}',
+      );
+    }
+  } on StateError {
+    stdout.writeln('startup:     not granted');
+  }
+  return 0;
+}
+
+Future<int> _updateVariable(_RemoteArguments parsed) async {
+  final String? key = parsed.option('key');
+  final String? value = parsed.option('value');
+  if (key == null || key.trim().isEmpty || value == null) {
+    stderr.writeln(
+      'Usage: remote variable <server> --key <variable> --value <value>',
+    );
+    return 2;
+  }
+  final PterodactylStartupVariable updated = await pterodactylService
+      .updateStartupVariable(
+        profileId: _profileId(parsed),
+        server: _server(parsed),
+        key: key,
+        value: value,
+      );
+  stdout.writeln(
+    '[OK] ${_safe(updated.environmentVariable)}='
+    '${_safe(updated.serverValue ?? '')}',
+  );
+  return 0;
+}
+
+Future<int> _updateImage(_RemoteArguments parsed) async {
+  final String? image = parsed.option('image');
+  if (image == null || image.trim().isEmpty) {
+    stderr.writeln('Usage: remote image <server> --image <docker-image>');
+    return 2;
+  }
+  await pterodactylService.updateDockerImage(
+    profileId: _profileId(parsed),
+    server: _server(parsed),
+    dockerImage: image,
+  );
+  stdout.writeln('[OK] Docker image updated');
+  return 0;
+}
+
+Future<int> _updateLimits(_RemoteArguments parsed) async {
+  final bool hasUpdate =
+      <String>{
+        'allocation',
+        'memory',
+        'swap',
+        'disk',
+        'io',
+        'cpu',
+        'threads',
+        'databases',
+        'allocations',
+        'backups',
+        'add-allocation',
+        'remove-allocation',
+      }.any(parsed.options.containsKey) ||
+      parsed.flag('clear-threads') ||
+      parsed.flag('oom-disabled') ||
+      parsed.flag('oom-enabled');
+  if (!hasUpdate ||
+      (parsed.flag('oom-disabled') && parsed.flag('oom-enabled'))) {
+    stderr.writeln(
+      'Usage: remote limits <server> [--memory <MiB>] [--swap <MiB>] '
+      '[--disk <MiB>] [--io <10-1000>] [--cpu <percent>] '
+      '[--threads <set>|--clear-threads] '
+      '[--databases <count>] [--allocations <count>] [--backups <count>] '
+      '[--allocation <id>] [--add-allocation <id,...>] '
+      '[--remove-allocation <id,...>] [--oom-disabled|--oom-enabled]',
+    );
+    return 2;
+  }
+  await pterodactylService.updateBuildSettings(
+    profileId: _profileId(parsed),
+    server: _server(parsed),
+    allocationId: _nonNegativeInteger(parsed, 'allocation', minimum: 1),
+    memoryMiB: _nonNegativeInteger(parsed, 'memory'),
+    swapMiB: _nonNegativeInteger(parsed, 'swap', minimum: -1),
+    diskMiB: _nonNegativeInteger(parsed, 'disk'),
+    ioWeight: _integerInRange(parsed, 'io', minimum: 10, maximum: 1000),
+    cpuPercent: _nonNegativeInteger(parsed, 'cpu'),
+    threads: parsed.option('threads'),
+    clearThreads: parsed.flag('clear-threads'),
+    oomDisabled: parsed.flag('oom-disabled')
+        ? true
+        : parsed.flag('oom-enabled')
+        ? false
+        : null,
+    databaseLimit: _nonNegativeInteger(parsed, 'databases'),
+    allocationLimit: _nonNegativeInteger(parsed, 'allocations'),
+    backupLimit: _nonNegativeInteger(parsed, 'backups'),
+    addAllocationIds: _integerList(parsed, 'add-allocation'),
+    removeAllocationIds: _integerList(parsed, 'remove-allocation'),
+  );
+  stdout.writeln('[OK] Server resource limits updated');
+  return 0;
+}
+
+Future<int> _updateStartup(_RemoteArguments parsed) async {
+  final String? command = parsed.option('command');
+  if (command == null || command.trim().isEmpty) {
+    stderr.writeln('Usage: remote startup <server> --command <command>');
+    return 2;
+  }
+  await pterodactylService.updateStartupCommand(
+    profileId: _profileId(parsed),
+    server: _server(parsed),
+    startup: command,
+  );
+  stdout.writeln('[OK] Startup command updated');
+  return 0;
+}
+
 String _profileId(_RemoteArguments parsed) {
   final String? selected = parsed.option('profile');
   if (selected != null && selected.isNotEmpty) return selected;
+  final PterodactylProfile? active = pterodactylService.activeProfile();
+  if (active != null) return active.id;
   final List<PterodactylProfile> profiles = pterodactylService.listProfiles();
   if (profiles.isEmpty) {
     throw StateError('No Pterodactyl connection. Run remote connect.');
   }
-  if (profiles.length == 1) return profiles.single.id;
-  throw StateError(
-    'Multiple Pterodactyl connections exist; select one with --profile.',
-  );
+  return profiles.single.id;
 }
 
 String _server(_RemoteArguments parsed) {
@@ -318,6 +1139,47 @@ int? _integer(_RemoteArguments parsed, String name) {
   }
   return value;
 }
+
+int? _nonNegativeInteger(
+  _RemoteArguments parsed,
+  String name, {
+  int minimum = 0,
+}) => _integerInRange(parsed, name, minimum: minimum);
+
+int? _integerInRange(
+  _RemoteArguments parsed,
+  String name, {
+  required int minimum,
+  int? maximum,
+}) {
+  final String? raw = parsed.option(name);
+  if (raw == null) return null;
+  final int? value = int.tryParse(raw);
+  if (value == null ||
+      value < minimum ||
+      (maximum != null && value > maximum)) {
+    final String range = maximum == null ? '>=$minimum' : '$minimum-$maximum';
+    throw ArgumentError('--$name must be an integer in $range.');
+  }
+  return value;
+}
+
+List<int> _integerList(_RemoteArguments parsed, String name) {
+  final String? raw = parsed.option(name);
+  if (raw == null || raw.trim().isEmpty) return const <int>[];
+  final List<int> result = <int>[];
+  for (final String item in raw.split(',')) {
+    final int? value = int.tryParse(item.trim());
+    if (value == null || value < 1) {
+      throw ArgumentError('--$name must contain positive integer IDs.');
+    }
+    result.add(value);
+  }
+  return result;
+}
+
+bool _confirmed(_RemoteArguments parsed, String server) =>
+    parsed.option('confirm') == server;
 
 String _endpoint(String host, int port) =>
     '${_safe(host).contains(':') ? '[${_safe(host)}]' : _safe(host)}:$port';
@@ -447,7 +1309,7 @@ final class _RemoteArguments {
         continue;
       }
       final String key = value.substring(2);
-      if (key == 'start') {
+      if (_booleanOptions.contains(key)) {
         flags.add(key);
       } else if (index + 1 < values.length &&
           !values[index + 1].startsWith('--')) {
@@ -461,6 +1323,22 @@ final class _RemoteArguments {
   final Map<String, String> options = <String, String>{};
   final Set<String> flags = <String>{};
   final List<String> positionals = <String>[];
+
+  static const Set<String> _booleanOptions = <String>{
+    'all',
+    'all-profiles',
+    'allow-unencrypted',
+    'application',
+    'clear-threads',
+    'force',
+    'json',
+    'no-key',
+    'no-open',
+    'oom-disabled',
+    'oom-enabled',
+    'replace',
+    'start',
+  };
 
   String? option(String name) => options[name];
   bool flag(String name) => flags.contains(name);

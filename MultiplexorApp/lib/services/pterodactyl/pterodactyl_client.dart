@@ -151,6 +151,44 @@ final class PterodactylClient {
   final PterodactylTransport _transport;
   final bool _ownsTransport;
 
+  Future<PterodactylAccount> getAccount() => _getItem<PterodactylAccount>(
+    'api/client/account',
+    key: _requireClientKey(),
+    parser: PterodactylAccount.fromJson,
+  );
+
+  Future<List<PterodactylAccountSshKey>> listAccountSshKeys() async =>
+      (await _getPage<PterodactylAccountSshKey>(
+        'api/client/account/ssh-keys',
+        key: _requireClientKey(),
+        query: const <String, String>{},
+        parser: PterodactylAccountSshKey.fromJson,
+        paginationOptional: true,
+      )).items;
+
+  Future<PterodactylAccountSshKey> createAccountSshKey({
+    required String name,
+    required String publicKey,
+  }) {
+    final String normalizedName = name.trim();
+    if (normalizedName.isEmpty ||
+        RegExp(r'[\x00-\x1f\x7f]').hasMatch(normalizedName)) {
+      throw ArgumentError('name must contain printable characters.');
+    }
+    final String normalizedPublicKey =
+        PterodactylAccountSshKey.normalizePublicKey(publicKey);
+    return _sendItem<PterodactylAccountSshKey>(
+      'POST',
+      'api/client/account/ssh-keys',
+      key: _requireClientKey(),
+      body: <String, Object?>{
+        'name': normalizedName,
+        'public_key': normalizedPublicKey,
+      },
+      parser: PterodactylAccountSshKey.fromJson,
+    );
+  }
+
   Future<PterodactylPage<PterodactylClientServer>> listClientServers({
     int page = 1,
     int perPage = 100,
@@ -181,6 +219,34 @@ final class PterodactylClient {
         key: _requireClientKey(),
         parser: PterodactylClientServer.fromJson,
       );
+
+  Future<PterodactylClientServerAccess> getClientServerAccess(
+    String identifier,
+  ) async {
+    final String path =
+        'api/client/servers/${_segment(identifier, 'identifier')}';
+    final PterodactylTransportResponse response = await _request(
+      'GET',
+      path,
+      key: _requireClientKey(),
+    );
+    try {
+      final JsonObject root = _decodeObject(response.body);
+      final PterodactylClientServer server = PterodactylClientServer.fromJson(
+        _resourceAttributes(root),
+      );
+      final JsonObject meta = _optionalJsonObject(root, 'meta');
+      return PterodactylClientServerAccess(
+        server: server,
+        isOwner: _optionalBoolean(meta, 'is_server_owner') ?? server.isOwner,
+        permissions: _optionalStringList(meta, 'user_permissions'),
+      );
+    } on FormatException {
+      throw PterodactylProtocolException(
+        'Unexpected response shape for GET /$path.',
+      );
+    }
+  }
 
   Future<PterodactylResourceUsage> getServerResources(String identifier) =>
       _getItem<PterodactylResourceUsage>(
@@ -221,6 +287,109 @@ final class PterodactylClient {
     parser: PterodactylAllocation.fromClientJson,
     paginationOptional: true,
   )).items;
+
+  Future<PterodactylPage<PterodactylActivity>> listServerActivity(
+    String identifier, {
+    int page = 1,
+    int perPage = 25,
+  }) => _getPage<PterodactylActivity>(
+    'api/client/servers/${_segment(identifier, 'identifier')}/activity',
+    key: _requireClientKey(),
+    query: <String, String>{..._pageQuery(page, perPage), 'sort': '-timestamp'},
+    parser: PterodactylActivity.fromJson,
+  );
+
+  Future<List<PterodactylActivity>> listAllServerActivity(String identifier) =>
+      _collectPages<PterodactylActivity>(
+        (int page) => listServerActivity(identifier, page: page, perPage: 100),
+      );
+
+  Future<PterodactylServerStartup> getServerStartup(String identifier) async {
+    final String path =
+        'api/client/servers/${_segment(identifier, 'identifier')}/startup';
+    final PterodactylTransportResponse response = await _request(
+      'GET',
+      path,
+      key: _requireClientKey(),
+    );
+    try {
+      final JsonObject root = _decodeObject(response.body);
+      final Object? rawData = root['data'];
+      if (rawData is! List<Object?>) throw const FormatException();
+      final List<JsonObject> variables = rawData
+          .map<JsonObject>((Object? resource) {
+            if (resource is! Map<Object?, Object?>) {
+              throw const FormatException();
+            }
+            return _resourceAttributes(_asJsonObject(resource));
+          })
+          .toList(growable: false);
+      return PterodactylServerStartup.fromJson(
+        _requiredJsonObject(root, 'meta'),
+        variables,
+      );
+    } on FormatException {
+      throw PterodactylProtocolException(
+        'Unexpected response shape for GET /$path.',
+      );
+    }
+  }
+
+  Future<PterodactylStartupVariable> updateServerStartupVariable(
+    String identifier, {
+    required String key,
+    required String value,
+  }) {
+    if (key.trim().isEmpty) {
+      throw ArgumentError.value(key, 'key', 'must not be empty');
+    }
+    return _sendItem<PterodactylStartupVariable>(
+      'PUT',
+      'api/client/servers/${_segment(identifier, 'identifier')}/startup/variable',
+      key: _requireClientKey(),
+      body: <String, Object?>{'key': key, 'value': value},
+      parser: PterodactylStartupVariable.fromJson,
+    );
+  }
+
+  Future<void> renameServer(
+    String identifier, {
+    required String name,
+    String? description,
+  }) {
+    if (name.trim().isEmpty) {
+      throw ArgumentError.value(name, 'name', 'must not be empty');
+    }
+    return _sendNoContent(
+      'POST',
+      'api/client/servers/${_segment(identifier, 'identifier')}/settings/rename',
+      key: _requireClientKey(),
+      body: <String, Object?>{'name': name, 'description': ?description},
+    );
+  }
+
+  Future<void> reinstallServer(String identifier) => _sendNoContent(
+    'POST',
+    'api/client/servers/${_segment(identifier, 'identifier')}/settings/reinstall',
+    key: _requireClientKey(),
+    body: const <String, Object?>{},
+  );
+
+  Future<void> setServerDockerImage(String identifier, String dockerImage) {
+    if (dockerImage.trim().isEmpty) {
+      throw ArgumentError.value(
+        dockerImage,
+        'dockerImage',
+        'must not be empty',
+      );
+    }
+    return _sendNoContent(
+      'PUT',
+      'api/client/servers/${_segment(identifier, 'identifier')}/settings/docker-image',
+      key: _requireClientKey(),
+      body: <String, Object?>{'docker_image': dockerImage},
+    );
+  }
 
   Future<void> sendPowerSignal(
     String identifier,
@@ -275,6 +444,53 @@ final class PterodactylClient {
     body: request.toJson(),
     parser: PterodactylApplicationServer.fromJson,
   );
+
+  Future<PterodactylApplicationServer> updateApplicationServerDetails(
+    int id,
+    PterodactylUpdateServerDetailsRequest request,
+  ) => _sendItem<PterodactylApplicationServer>(
+    'PATCH',
+    'api/application/servers/${_positiveId(id)}/details',
+    key: _requireApplicationKey(),
+    body: request.toJson(),
+    parser: PterodactylApplicationServer.fromJson,
+  );
+
+  Future<PterodactylApplicationServer> updateApplicationServerBuild(
+    int id,
+    PterodactylUpdateServerBuildRequest request,
+  ) => _sendItem<PterodactylApplicationServer>(
+    'PATCH',
+    'api/application/servers/${_positiveId(id)}/build',
+    key: _requireApplicationKey(),
+    body: request.toJson(),
+    parser: PterodactylApplicationServer.fromJson,
+  );
+
+  Future<PterodactylApplicationServer> updateApplicationServerStartup(
+    int id,
+    PterodactylUpdateServerStartupRequest request,
+  ) => _sendItem<PterodactylApplicationServer>(
+    'PATCH',
+    'api/application/servers/${_positiveId(id)}/startup',
+    key: _requireApplicationKey(),
+    body: request.toJson(),
+    parser: PterodactylApplicationServer.fromJson,
+  );
+
+  Future<void> reinstallApplicationServer(int id) => _sendNoContent(
+    'POST',
+    'api/application/servers/${_positiveId(id)}/reinstall',
+    key: _requireApplicationKey(),
+    body: const <String, Object?>{},
+  );
+
+  Future<void> deleteApplicationServer(int id, {bool force = false}) =>
+      _sendNoContent(
+        'DELETE',
+        'api/application/servers/${_positiveId(id)}${force ? '/force' : ''}',
+        key: _requireApplicationKey(),
+      );
 
   Future<PterodactylPage<PterodactylNode>> listApplicationNodes({
     int page = 1,
@@ -400,7 +616,7 @@ final class PterodactylClient {
     String method,
     String path, {
     required String key,
-    required JsonObject body,
+    JsonObject? body,
   }) async {
     await _request(method, path, key: key, body: body);
   }
@@ -575,6 +791,35 @@ JsonObject _asJsonObject(Map<Object?, Object?> value) =>
       (Object? key, Object? item) =>
           MapEntry<String, Object?>(key is String ? key : key.toString(), item),
     );
+
+JsonObject _requiredJsonObject(JsonObject root, String key) {
+  final Object? value = root[key];
+  if (value is! Map<Object?, Object?>) throw const FormatException();
+  return _asJsonObject(value);
+}
+
+JsonObject _optionalJsonObject(JsonObject root, String key) {
+  final Object? value = root[key];
+  if (value == null) return <String, Object?>{};
+  if (value is! Map<Object?, Object?>) throw const FormatException();
+  return _asJsonObject(value);
+}
+
+bool? _optionalBoolean(JsonObject root, String key) {
+  final Object? value = root[key];
+  if (value == null) return null;
+  if (value is! bool) throw const FormatException();
+  return value;
+}
+
+List<String> _optionalStringList(JsonObject root, String key) {
+  final Object? value = root[key];
+  if (value == null) return const <String>[];
+  if (value is! List<Object?> || value.any((Object? item) => item is! String)) {
+    throw const FormatException();
+  }
+  return value.cast<String>().toList(growable: false);
+}
 
 JsonObject _resourceAttributes(JsonObject resource) {
   final Object? attributes = resource['attributes'];

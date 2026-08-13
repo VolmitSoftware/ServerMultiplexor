@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/term_events.dart';
 import '../../utils/terminal/term_io.dart';
 import 'pterodactyl_console_protocol.dart';
@@ -8,6 +9,8 @@ import 'pterodactyl_console_session.dart';
 
 abstract interface class PterodactylConsoleTerminalIo {
   bool get hasTerminal;
+  bool get supportsColor;
+  int get columns;
   Stream<TermEvent> get events;
 
   Future<void> activate();
@@ -15,24 +18,82 @@ abstract interface class PterodactylConsoleTerminalIo {
   Future<void> restore();
 }
 
+/// The synchronous terminal primitives behind the asynchronous console input
+/// pump. Keeping this boundary injectable makes it possible to prove that the
+/// pump releases stdin without turning the process-wide [stdin] into a Stream.
+abstract interface class PterodactylConsoleTerminalBackend {
+  bool get hasTerminal;
+  int get columns;
+
+  void activate();
+  TermEvent? readEventTimeout(Duration timeout);
+  void restore();
+}
+
+final class TermIoPterodactylConsoleTerminalBackend
+    implements PterodactylConsoleTerminalBackend {
+  const TermIoPterodactylConsoleTerminalBackend();
+
+  TermIo get _io => TermIo.instance;
+
+  @override
+  bool get hasTerminal => _io.hasTerminal;
+
+  @override
+  int get columns => _io.terminalColumns;
+
+  @override
+  void activate() {
+    _io.disableMouse();
+    _io.drainInput();
+    _io.setRawMode(true);
+    _io.showCursor();
+  }
+
+  @override
+  TermEvent? readEventTimeout(Duration timeout) =>
+      _io.readEventTimeout(timeout);
+
+  @override
+  void restore() => _io.restoreTerminal();
+}
+
 /// Asynchronous raw-terminal input that leaves WebSocket events free to run on
 /// the isolate event loop while a command is being edited.
 final class DartIoPterodactylConsoleTerminalIo
     implements PterodactylConsoleTerminalIo {
   DartIoPterodactylConsoleTerminalIo({
-    Duration escapeTimeout = const Duration(milliseconds: 120),
-  }) : _escapeTimeout = escapeTimeout;
+    PterodactylConsoleTerminalBackend backend =
+        const TermIoPterodactylConsoleTerminalBackend(),
+    Duration readTimeout = const Duration(milliseconds: 40),
+    void Function(String value)? writer,
+  }) : _backend = backend,
+       _readTimeout = readTimeout,
+       _writer = writer ?? stdout.write;
 
-  final Duration _escapeTimeout;
-  final StreamController<TermEvent> _events =
-      StreamController<TermEvent>.broadcast(sync: true);
-  final TermEventParser _parser = TermEventParser();
-  StreamSubscription<List<int>>? _input;
-  Timer? _partialTimer;
+  final PterodactylConsoleTerminalBackend _backend;
+  final Duration _readTimeout;
+  final void Function(String value) _writer;
+  final StreamController<TermEvent> _events = StreamController<TermEvent>(
+    sync: true,
+  );
+  Future<void>? _pump;
   bool _active = false;
+  bool _activatedBackend = false;
+  int _lastColumns = 0;
 
   @override
-  bool get hasTerminal => TermIo.instance.hasTerminal;
+  bool get hasTerminal => _backend.hasTerminal;
+
+  @override
+  bool get supportsColor {
+    final Map<String, String> environment = Platform.environment;
+    return !environment.containsKey('NO_COLOR') &&
+        (environment['TERM'] ?? '').toLowerCase() != 'dumb';
+  }
+
+  @override
+  int get columns => _backend.columns;
 
   @override
   Stream<TermEvent> get events => _events.stream;
@@ -44,57 +105,57 @@ final class DartIoPterodactylConsoleTerminalIo
       throw StateError('The remote console requires an interactive terminal.');
     }
     _active = true;
-    final TermIo io = TermIo.instance;
-    io.disableMouse();
-    io.drainInput();
-    io.setRawMode(true);
-    io.showCursor();
-    _input = stdin.listen(
-      _addBytes,
-      onError: (Object _) => _closeInput(),
-      onDone: _closeInput,
-      cancelOnError: true,
-    );
-  }
-
-  void _addBytes(List<int> bytes) {
-    if (!_active) return;
-    for (final int byte in bytes) {
-      _partialTimer?.cancel();
-      for (final TermEvent event in _parser.add(byte)) {
-        _events.add(event);
-      }
-      if (_parser.hasPartial) {
-        _partialTimer = Timer(_escapeTimeout, () {
-          final TermEvent? event = _parser.timeout();
-          if (event != null && !_events.isClosed) _events.add(event);
-        });
-      }
+    try {
+      _backend.activate();
+      _activatedBackend = true;
+      _lastColumns = columns;
+      _pump = _pumpEvents();
+    } catch (_) {
+      _active = false;
+      if (_activatedBackend) _backend.restore();
+      _activatedBackend = false;
+      rethrow;
     }
   }
 
-  void _closeInput() {
-    _partialTimer?.cancel();
-    final TermEvent? pending = _parser.timeout();
-    if (pending != null && !_events.isClosed) _events.add(pending);
-    if (!_events.isClosed) unawaited(_events.close());
+  Future<void> _pumpEvents() async {
+    try {
+      while (_active) {
+        final TermEvent? event = _backend.readEventTimeout(_readTimeout);
+        if (!_active) break;
+        if (event != null && !_events.isClosed) _events.add(event);
+        final int currentColumns = columns;
+        if (currentColumns != _lastColumns) {
+          _lastColumns = currentColumns;
+          if (!_events.isClosed) {
+            _events.add(const TermEvent(TermEventKind.unknown));
+          }
+        }
+        // The read itself is synchronous so stdin remains owned by TermIo.
+        // Yield after every bounded read to let WebSocket frames render.
+        await Future<void>.delayed(Duration.zero);
+      }
+    } catch (_) {
+      // A lost tty closes the event stream; the console lifecycle detaches.
+    } finally {
+      if (!_events.isClosed) await _events.close();
+    }
   }
 
   @override
-  void write(String value) => stdout.write(value);
+  void write(String value) => _writer(value);
 
   @override
   Future<void> restore() async {
-    if (!_active) return;
+    if (!_active && !_activatedBackend) return;
     _active = false;
-    _partialTimer?.cancel();
-    _partialTimer = null;
     try {
-      await _input?.cancel();
+      await _pump;
     } finally {
-      _input = null;
+      _pump = null;
       if (!_events.isClosed) await _events.close();
-      TermIo.instance.restoreTerminal();
+      if (_activatedBackend) _backend.restore();
+      _activatedBackend = false;
     }
   }
 }
@@ -106,24 +167,38 @@ final class PterodactylConsoleTerminal {
     required PterodactylConsoleConnection connection,
     PterodactylConsoleTerminalIo? terminal,
     String prompt = '> ',
+    Duration closeTimeout = const Duration(seconds: 2),
+    Duration outputBatchDelay = const Duration(milliseconds: 12),
   }) : _connection = connection,
        _terminal = terminal ?? DartIoPterodactylConsoleTerminalIo(),
-       _prompt = PterodactylConsoleSanitizer.text(prompt);
+       _prompt = PterodactylConsoleSanitizer.text(prompt),
+       _closeTimeout = closeTimeout,
+       _outputBatchDelay = outputBatchDelay;
 
   final PterodactylConsoleConnection _connection;
   final PterodactylConsoleTerminalIo _terminal;
   final String _prompt;
+  final Duration _closeTimeout;
+  final Duration _outputBatchDelay;
   final List<String> _buffer = <String>[];
   final List<String> _history = <String>[];
+  final List<String> _pendingOutput = <String>[];
   int _cursor = 0;
   int _historyIndex = 0;
-  String _stats = '';
+  String _state = 'connecting';
+  double? _cpu;
+  int? _memory;
+  int? _memoryLimit;
   bool _connected = false;
+  bool _chromeVisible = false;
+  bool _acceptOutput = true;
+  Timer? _outputTimer;
 
   Future<void> run() async {
     StreamSubscription<PterodactylConsoleEvent>? remoteEvents;
     try {
       await _terminal.activate();
+      _printHeader();
       remoteEvents = _connection.events.listen(_renderEvent);
       final Future<void> input = _inputLoop();
       final Future<void> connecting = _connection.connect();
@@ -141,12 +216,23 @@ final class PterodactylConsoleTerminal {
       _redraw();
       await Future.any<void>(<Future<void>>[input, _connection.done]);
     } finally {
+      _acceptOutput = false;
+      _outputTimer?.cancel();
+      _outputTimer = null;
       await remoteEvents?.cancel();
+      _flushOutput();
+      _finishDisplay();
       try {
-        await _connection.close();
-      } finally {
-        _terminal.write('\r\x1b[2K\n');
+        // Restore the shared terminal before waiting on network teardown so
+        // Escape always returns control to the dashboard immediately.
         await _terminal.restore();
+      } finally {
+        try {
+          await _connection.close().timeout(_closeTimeout);
+        } catch (_) {
+          // A stuck or failed socket close must not keep the CLI alive or
+          // replace the error that originally ended the session.
+        }
       }
     }
   }
@@ -208,6 +294,9 @@ final class PterodactylConsoleTerminal {
         _recall(-1);
       case TermEventKind.arrowDown:
         _recall(1);
+      case TermEventKind.unknown:
+        // The concrete terminal adapter emits this when the tty width changes.
+        _redraw();
       default:
         break;
     }
@@ -216,7 +305,11 @@ final class PterodactylConsoleTerminal {
 
   Future<bool> _submit() async {
     final String command = _buffer.join();
-    _terminal.write('\r\x1b[2K${_safe(_prompt)}${_safe(command)}\n');
+    _clearChrome();
+    _terminal.write(
+      '${_style(Ansi.gray)}${_safe(_prompt)}${_style(Ansi.reset)}',
+    );
+    _terminal.write('${_safe(command)}\r\n');
     _buffer.clear();
     _cursor = 0;
     if (command.trim() == ':exit') return true;
@@ -230,7 +323,11 @@ final class PterodactylConsoleTerminal {
     try {
       await _connection.sendCommand(command);
     } catch (_) {
-      _printLine('[error] Unable to send the console command.');
+      _printNotice(
+        'ERROR',
+        'Unable to send the console command.',
+        _style(Ansi.red),
+      );
     }
     _redraw();
     return false;
@@ -251,45 +348,81 @@ final class PterodactylConsoleTerminal {
   }
 
   void _renderEvent(PterodactylConsoleEvent event) {
+    if (!_acceptOutput) return;
     switch (event) {
       case PterodactylConsoleOutput(:final lines):
-        _printLines(lines);
+        _queueLines(
+          PterodactylConsoleLogFormatter.renderedLines(
+            lines,
+            colors: _terminal.supportsColor,
+          ),
+        );
       case PterodactylConsoleInstallOutput(:final lines):
-        _printLines(lines.map((String line) => '[install] $line'));
+        _queueLines(
+          lines.map(
+            (String line) =>
+                '${_style(Ansi.magenta)}[INSTALL]${_style(Ansi.reset)} '
+                '${_safe(line)}',
+          ),
+        );
       case PterodactylConsoleStatus(:final status):
-        _printLine('[status] $status');
+        _state = _safe(status).trim().toLowerCase();
+        _redraw();
       case PterodactylConsoleStats():
-        _stats = _statsLabel(event);
+        if (event.state case final String state) {
+          _state = _safe(state).trim().toLowerCase();
+        }
+        _cpu = event.cpuAbsolute;
+        _memory = event.memoryBytes;
+        _memoryLimit = event.memoryLimitBytes;
         _redraw();
       case PterodactylConsoleAuthenticated():
-        _printLine('[connected] Console authenticated.');
+        if (_state == 'connecting') _state = 'connected';
+        _redraw();
       case PterodactylConsoleTokenExpiring():
-        _printLine('[auth] Refreshing expiring console credentials.');
+        _state = 'refreshing auth';
+        _redraw();
       case PterodactylConsoleTokenExpired():
-        _printLine('[auth] Refreshing expired console credentials.');
+        _state = 'refreshing auth';
+        _redraw();
       case PterodactylConsoleDaemonMessage(:final message, :final isError):
-        _printLine('${isError ? '[daemon error]' : '[daemon]'} $message');
-      case PterodactylConsoleUnknownEvent(:final name):
-        _printLine('[event] $name');
+        _printNotice(
+          isError ? 'DAEMON ERROR' : 'DAEMON',
+          message,
+          _style(isError ? Ansi.red : Ansi.magenta),
+        );
+      case PterodactylConsoleUnknownEvent():
+        // Wings adds protocol events over time. Unknown names are safe to
+        // ignore here and remain available to protocol-level diagnostics.
+        break;
       case PterodactylConsoleProtocolWarning(:final message):
-        _printLine('[warning] $message');
+        _printNotice('WARNING', message, _style(Ansi.yellow));
       case PterodactylConsoleConnectionEvent(:final state, :final message):
-        if (message != null) {
-          _printLine('[${state.name}] $message');
+        _state = switch (state) {
+          PterodactylConsoleConnectionState.connecting => 'connecting',
+          PterodactylConsoleConnectionState.connected => 'connected',
+          PterodactylConsoleConnectionState.refreshing => 'refreshing auth',
+          PterodactylConsoleConnectionState.disconnected => 'disconnected',
+          PterodactylConsoleConnectionState.error => 'connection error',
+        };
+        if (message != null &&
+            (state == PterodactylConsoleConnectionState.error ||
+                state == PterodactylConsoleConnectionState.disconnected)) {
+          _printNotice(
+            state == PterodactylConsoleConnectionState.error
+                ? 'CONNECTION ERROR'
+                : 'DISCONNECTED',
+            message,
+            _style(
+              state == PterodactylConsoleConnectionState.error
+                  ? Ansi.red
+                  : Ansi.yellow,
+            ),
+          );
+        } else {
+          _redraw();
         }
     }
-  }
-
-  String _statsLabel(PterodactylConsoleStats stats) {
-    final List<String> fields = <String>[];
-    if (stats.state case final String state) fields.add(state);
-    if (stats.cpuAbsolute case final double cpu) {
-      fields.add('CPU ${cpu.toStringAsFixed(1)}%');
-    }
-    if (stats.memoryBytes case final int memory) {
-      fields.add('MEM ${_bytes(memory)}');
-    }
-    return fields.isEmpty ? '' : '[${fields.join(' · ')}] ';
   }
 
   static String _bytes(int value) {
@@ -301,26 +434,342 @@ final class PterodactylConsoleTerminal {
     return '${(value / mebibyte).toStringAsFixed(0)} MiB';
   }
 
-  void _printLines(Iterable<String> lines) {
-    for (final String line in lines) {
-      _printLine(line);
-    }
-  }
-
-  void _printLine(String value) {
-    final List<String> lines = _safe(value).split('\n');
-    _terminal.write('\r\x1b[2K${lines.join('\n')}\n');
+  void _printHeader() {
+    final int width = _usableWidth;
+    final String rule = '─' * width;
+    final String title =
+        '${_style(Ansi.cyan)}${_style(Ansi.bold)}MULTIPLEXOR'
+        '${_style(Ansi.reset)}  ${_style(Ansi.bold)}REMOTE CONSOLE'
+        '${_style(Ansi.reset)}';
+    _terminal.write(
+      '${Ansi.clipVisible(title, width)}\r\n'
+      '${_style(Ansi.gray)}${Ansi.clipVisible(rule, width)}'
+      '${_style(Ansi.reset)}\r\n',
+    );
     _redraw();
   }
 
+  int get _usableWidth {
+    final int columns = _terminal.columns;
+    if (columns < 1) return 1;
+    return columns > 240 ? 240 : columns;
+  }
+
+  void _queueLines(Iterable<String> lines) {
+    bool added = false;
+    for (final String line in lines) {
+      _pendingOutput.add(line);
+      added = true;
+    }
+    if (!added || _outputTimer != null) return;
+    _outputTimer = Timer(_outputBatchDelay, () {
+      _outputTimer = null;
+      _flushOutput();
+    });
+  }
+
+  void _flushOutput() {
+    if (_pendingOutput.isEmpty) return;
+    final List<String> lines = List<String>.of(_pendingOutput);
+    _pendingOutput.clear();
+    _clearChrome();
+    for (final String line in lines) {
+      _terminal.write('${_clipRendered(line)}${_style(Ansi.reset)}\r\n');
+    }
+    _redraw();
+  }
+
+  String _clipRendered(String line) => Ansi.clipVisible(line, _usableWidth);
+
+  void _printNotice(String label, String message, String tone) {
+    _queueLines(<String>[
+      '$tone[$label]${_style(Ansi.reset)} ${_safe(message)}',
+    ]);
+  }
+
+  void _clearChrome() {
+    if (!_chromeVisible) return;
+    _terminal.write('\r${Ansi.eraseLine}\x1b[1A\r${Ansi.eraseLine}');
+    _chromeVisible = false;
+  }
+
   void _redraw() {
+    if (!_connected && !_acceptOutput) return;
+    _clearChrome();
+    final String status = _statusLine();
     final String line = _buffer.join();
-    _terminal.write('\r\x1b[2K$_stats$_prompt${_safe(line)}');
-    final int moveLeft = _buffer.length - _cursor;
+    final String fullPrompt =
+        '${_style(Ansi.cyan)}${_safe(_prompt)}${_style(Ansi.reset)}';
+    final String prompt = Ansi.clipVisible(fullPrompt, _usableWidth);
+    final int promptWidth = Ansi.visibleLength(prompt);
+    final int available = (_usableWidth - promptWidth).clamp(0, 4096);
+    final String visibleInput = _safe(line).length <= available
+        ? _safe(line)
+        : _safe(line).substring(_safe(line).length - available);
+    _terminal.write(
+      '\r${Ansi.eraseLine}${_clipRendered(status)}\r\n'
+      '${Ansi.eraseLine}$prompt$visibleInput',
+    );
+    _chromeVisible = true;
+    final int hiddenCharacters = line.length - visibleInput.length;
+    final int visibleCursor = (_cursor - hiddenCharacters).clamp(
+      0,
+      visibleInput.length,
+    );
+    final int moveLeft = visibleInput.length - visibleCursor;
     if (moveLeft > 0) _terminal.write('\x1b[${moveLeft}D');
   }
 
+  String _statusLine() {
+    final List<String> metrics = <String>[
+      '${_style(_stateTone(_state))}${_state.toUpperCase()}'
+          '${_style(Ansi.reset)}',
+      if (_cpu case final double cpu) 'CPU ${cpu.toStringAsFixed(1)}%',
+      if (_memory case final int memory) _memoryLabel(memory),
+    ];
+    return '${metrics.join('${_style(Ansi.gray)} · ${_style(Ansi.reset)}')}  '
+        '${_style(Ansi.gray)}[Esc] back · [Enter] send · [:exit] back'
+        '${_style(Ansi.reset)}';
+  }
+
+  String _memoryLabel(int memory) {
+    final int? limit = _memoryLimit;
+    return limit != null && limit > 0
+        ? 'MEM ${_bytes(memory)} / ${_bytes(limit)}'
+        : 'MEM ${_bytes(memory)}';
+  }
+
+  static String _stateTone(String state) {
+    final String normalized = state.toLowerCase();
+    if (normalized.contains('error') || normalized.contains('offline')) {
+      return Ansi.red;
+    }
+    if (normalized.contains('stop') ||
+        normalized.contains('disconnect') ||
+        normalized.contains('refresh')) {
+      return Ansi.yellow;
+    }
+    if (normalized.contains('running') || normalized.contains('connect')) {
+      return Ansi.green;
+    }
+    return Ansi.gray;
+  }
+
+  void _finishDisplay() {
+    _clearChrome();
+    _terminal.write('${_style(Ansi.reset)}\r\n');
+  }
+
+  String _style(String ansi) => _terminal.supportsColor ? ansi : '';
+
   static String _safe(String value) => PterodactylConsoleSanitizer.text(value);
+}
+
+/// Makes Wings console output resemble Multiplexor's Local minimal console.
+///
+/// The remote protocol supplies already-rendered log text, so it cannot use
+/// the Local runtime's Log4j pattern directly. It can still remove the common
+/// timestamp/thread/level prefixes and suppress the manager-generated RCON
+/// client lifecycle noise that the Local Log4j filter removes. Unknown output
+/// is preserved verbatim after terminal sanitization.
+final class PterodactylConsoleLogFormatter {
+  PterodactylConsoleLogFormatter._();
+
+  static const Set<String> _levels = <String>{
+    'TRACE',
+    'DEBUG',
+    'INFO',
+    'WARN',
+    'ERROR',
+    'FATAL',
+  };
+
+  static final RegExp _compactMinecraftPrefix = RegExp(
+    r'^\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+'
+    r'(?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\](?::\s*|\s+)',
+    caseSensitive: false,
+  );
+  static final RegExp _threadedMinecraftPrefix = RegExp(
+    r'^\[[^\]\r\n]*\d{2}:\d{2}:\d{2}(?:\.\d+)?\]\s*'
+    r'\[[^\]\r\n]+/(?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\]\s*'
+    r'(?:\[[^\]\r\n]+\]\s*)?:?\s*',
+    caseSensitive: false,
+  );
+  static final RegExp _classicMinecraftPrefix = RegExp(
+    r'^(?:\d{4}-\d{2}-\d{2}[ T])?\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+'
+    r'\[(?:TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\]\s*:?[ \t]*',
+    caseSensitive: false,
+  );
+  static final RegExp _rconLifecycleNoise = RegExp(
+    r'^\s*Thread\s+RCON Client\b.*\b(?:started|shutting down)\s*$',
+    caseSensitive: false,
+  );
+  static final RegExp _wingsLifecycleNoise = RegExp(
+    r'^\s*container@pterodactyl~\s+Server marked as '
+    r'(?:starting|running|stopping|offline)\.*\s*$',
+    caseSensitive: false,
+  );
+  static final RegExp _routineDaemonNoise = RegExp(
+    r'^\s*\[Pterodactyl Daemon\]:\s*(?:'
+    r'Checking server disk space usage.*|'
+    r'Updating process configuration files.*|'
+    r'Ensuring file permissions are set correctly.*|'
+    r'Pulling Docker container image.*|'
+    r'Finished pulling Docker container image.*)\s*$',
+    caseSensitive: false,
+  );
+  static final List<RegExp> _severityPrefixes = <RegExp>[
+    RegExp(
+      r'^\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+'
+      r'(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\]',
+      caseSensitive: false,
+    ),
+    RegExp(
+      r'^\[[^\]\r\n]*\d{2}:\d{2}:\d{2}(?:\.\d+)?\]\s*'
+      r'\[[^\]\r\n]+/(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\]',
+      caseSensitive: false,
+    ),
+    RegExp(
+      r'^(?:\d{4}-\d{2}-\d{2}[ T])?\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+'
+      r'\[(TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\]',
+      caseSensitive: false,
+    ),
+  ];
+  static final RegExp _successMessage = RegExp(
+    r'^(?:Done \(|.+ (?:joined|logged in|connected)|Started .+|'
+    r'Server ready\b)',
+    caseSensitive: false,
+  );
+
+  static const Map<String, String> _legacyCodes = <String, String>{
+    '0': '\x1b[30m',
+    '1': '\x1b[34m',
+    '2': '\x1b[32m',
+    '3': '\x1b[36m',
+    '4': '\x1b[31m',
+    '5': '\x1b[35m',
+    '6': '\x1b[33m',
+    '7': '\x1b[37m',
+    '8': '\x1b[90m',
+    '9': '\x1b[94m',
+    'a': '\x1b[92m',
+    'b': '\x1b[96m',
+    'c': '\x1b[91m',
+    'd': '\x1b[95m',
+    'e': '\x1b[93m',
+    'f': '\x1b[97m',
+    'l': Ansi.bold,
+    'm': '\x1b[9m',
+    'n': '\x1b[4m',
+    'o': '\x1b[3m',
+    'r': Ansi.reset,
+  };
+
+  /// Formats [input] for display, or returns null for a line intentionally
+  /// hidden by the same RCON-noise policy as the Local console.
+  static String? line(String input) {
+    String output = PterodactylConsoleSanitizer.text(input);
+    if (_wingsLifecycleNoise.hasMatch(output) ||
+        _routineDaemonNoise.hasMatch(output)) {
+      return null;
+    }
+    output = output.replaceFirst(_threadedMinecraftPrefix, '');
+    output = output.replaceFirst(_compactMinecraftPrefix, '');
+    output = output.replaceFirst(_classicMinecraftPrefix, '');
+    if (output.trim().isEmpty || _rconLifecycleNoise.hasMatch(output)) {
+      return null;
+    }
+    return output;
+  }
+
+  /// A terminal-safe, severity-preserving representation of [input]. Remote
+  /// ANSI was removed by [line]; every escape emitted here is a fixed local
+  /// style, including translated Minecraft `§` formatting codes.
+  static String? renderedLine(String input, {bool colors = true}) {
+    final String sanitized = PterodactylConsoleSanitizer.text(input);
+    final String? message = line(sanitized);
+    if (message == null) return null;
+    final String? level = _severity(sanitized);
+    final bool success = _successMessage.hasMatch(message);
+    final String tone = !colors
+        ? ''
+        : success
+        ? Ansi.green
+        : switch (level) {
+            'TRACE' || 'DEBUG' => Ansi.gray,
+            'WARN' => Ansi.yellow,
+            'ERROR' || 'FATAL' => Ansi.red,
+            _ => '',
+          };
+    final String label = level == null
+        ? ''
+        : '${colors ? _levelTone(level) : ''}[$level]'
+              '${colors ? Ansi.reset : ''} ';
+    final String body = _minecraftStyles(message, colors: colors);
+    return '$label$tone$body${tone.isEmpty ? '' : Ansi.reset}';
+  }
+
+  static String? _severity(String input) {
+    for (final RegExp pattern in _severityPrefixes) {
+      final RegExpMatch? match = pattern.firstMatch(input);
+      if (match != null) {
+        final String level = match.group(1)!.toUpperCase();
+        if (_levels.contains(level)) return level;
+      }
+    }
+    return null;
+  }
+
+  static String _levelTone(String level) => switch (level) {
+    'WARN' => Ansi.yellow,
+    'ERROR' || 'FATAL' => Ansi.red,
+    'TRACE' || 'DEBUG' => Ansi.gray,
+    _ => Ansi.gray,
+  };
+
+  static String _minecraftStyles(String input, {required bool colors}) {
+    final StringBuffer output = StringBuffer();
+    int index = 0;
+    while (index < input.length) {
+      if (input.codeUnitAt(index) == 0x00a7 && index + 1 < input.length) {
+        final String code = input[index + 1].toLowerCase();
+        final String? ansi = _legacyCodes[code];
+        if (ansi != null) {
+          if (colors && RegExp(r'^[0-9a-f]$').hasMatch(code)) {
+            output.write(Ansi.reset);
+          }
+          if (colors) output.write(ansi);
+          index += 2;
+          continue;
+        }
+        // Unknown Minecraft formatting codes are controls, not content.
+        index += 2;
+        continue;
+      }
+      output.write(input[index]);
+      index++;
+    }
+    return output.toString();
+  }
+
+  static Iterable<String> lines(Iterable<String> input) sync* {
+    for (final String raw in input) {
+      final String? formatted = line(raw);
+      if (formatted != null) {
+        yield formatted;
+      }
+    }
+  }
+
+  static Iterable<String> renderedLines(
+    Iterable<String> input, {
+    bool colors = true,
+  }) sync* {
+    for (final String raw in input) {
+      final String? formatted = renderedLine(raw, colors: colors);
+      if (formatted != null) yield formatted;
+    }
+  }
 }
 
 final class _ConsoleConnected {

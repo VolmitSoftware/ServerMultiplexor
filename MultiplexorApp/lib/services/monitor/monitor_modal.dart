@@ -49,6 +49,9 @@ enum InstanceModalAction {
   stop,
   restart,
   console,
+  settings,
+  history,
+  reinstall,
   setPort,
   makeActive,
   motd,
@@ -77,6 +80,8 @@ enum WorkspaceModalAction {
   wipe,
   newInstance,
   connect,
+  files,
+  bulkActions,
 }
 
 /// The id prefix every instance-card button hitbox carries: the id is
@@ -390,6 +395,32 @@ List<List<ButtonSpec>> _remoteInstanceRows({
         label: 'CONSOLE',
         enabled: !stopped && !operationsBlocked,
       ),
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.history),
+        label: 'HISTORY',
+      ),
+    ],
+    <ButtonSpec>[
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.settings),
+        label: 'SETTINGS',
+      ),
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.folder),
+        label: 'OPEN FOLDER',
+      ),
+    ],
+    <ButtonSpec>[
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.reinstall),
+        label: 'REINSTALL',
+        danger: true,
+      ),
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.delete),
+        label: 'DELETE',
+        danger: true,
+      ),
     ],
   ];
 }
@@ -400,15 +431,19 @@ List<List<ButtonSpec>> _remoteWorkspaceRows() => <List<ButtonSpec>>[
       id: workspaceModalHitId(WorkspaceModalAction.connect),
       label: 'CONNECTION',
     ),
+    ButtonSpec(
+      id: workspaceModalHitId(WorkspaceModalAction.files),
+      label: 'FILES',
+    ),
   ],
   <ButtonSpec>[
     ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.startAll),
-      label: 'START ALL',
+      id: workspaceModalHitId(WorkspaceModalAction.createMany),
+      label: 'CREATE MANY',
     ),
     ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.stopAll),
-      label: 'STOP ALL',
+      id: workspaceModalHitId(WorkspaceModalAction.bulkActions),
+      label: 'BULK ACTIONS',
     ),
   ],
 ];

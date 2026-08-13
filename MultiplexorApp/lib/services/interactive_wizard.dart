@@ -26,11 +26,62 @@ import 'pterodactyl/pterodactyl_models.dart';
 import 'pterodactyl/pterodactyl_monitor_feed.dart';
 import 'pterodactyl/pterodactyl_profile.dart';
 import 'pterodactyl/pterodactyl_service.dart';
+import 'pterodactyl/pterodactyl_smb_models.dart';
+import 'pterodactyl/pterodactyl_smb_service.dart';
 import 'runtime_state.dart';
 
 /// The side effect a Remote quick key is allowed to perform after a fresh
 /// resource-state check.
 enum RemoteQuickActionEffect { none, start, stop, restart, kill, console }
+
+/// Fleet operation exposed by the Remote bulk-actions workflow.
+enum RemoteBulkAction {
+  start,
+  stop,
+  restart,
+  kill,
+  reinstall,
+  delete,
+  createMany,
+  done,
+}
+
+/// Which live subset of the Remote fleet a bulk operation targets.
+enum RemoteBulkTargetScope { all, selected, running, stopped }
+
+enum _RemoteAccountAction {
+  verify,
+  switchAccount,
+  add,
+  rename,
+  replaceClientKey,
+  replaceApplicationKey,
+  remove,
+  done,
+}
+
+enum _RemoteLimitField {
+  memory,
+  swap,
+  disk,
+  io,
+  cpu,
+  threads,
+  databases,
+  allocations,
+  backups,
+}
+
+enum _RemoteFilesAction {
+  configureActive,
+  configureAll,
+  trustHostKeys,
+  doctor,
+  start,
+  open,
+  stop,
+  done,
+}
 
 /// Resolves a Remote quick key against Pterodactyl's current runtime state.
 ///
@@ -54,9 +105,99 @@ RemoteQuickActionEffect remoteQuickActionEffect({
   };
 }
 
+/// Whether [action] requires a typed, count-bound confirmation phrase.
+bool remoteBulkActionRequiresTypedConfirmation(RemoteBulkAction action) =>
+    action == RemoteBulkAction.kill ||
+    action == RemoteBulkAction.reinstall ||
+    action == RemoteBulkAction.delete;
+
+String remoteBulkConfirmationPhrase(
+  RemoteBulkAction action,
+  int targetCount, {
+  String? allProfileId,
+}) {
+  if (!remoteBulkActionRequiresTypedConfirmation(action)) {
+    throw ArgumentError.value(
+      action,
+      'action',
+      'does not use typed confirmation',
+    );
+  }
+  if (targetCount < 1) {
+    throw RangeError.range(targetCount, 1, null, 'targetCount');
+  }
+  final String? normalizedProfile = allProfileId?.trim().toLowerCase();
+  if (normalizedProfile != null && normalizedProfile.isNotEmpty) {
+    return '${action.name.toUpperCase()} ALL $normalizedProfile';
+  }
+  return '${action.name.toUpperCase()} $targetCount';
+}
+
+/// Resolves a fresh fleet snapshot into the exact targets for one operation.
+///
+/// Power operations exclude suspended, installing, maintenance, unavailable,
+/// and unknown-state servers, then retain only the runtime state the signal
+/// can act on. Reinstall and delete remain available for every accessible
+/// server, mirroring their per-server management actions; running/stopped
+/// scopes still require a known runtime state.
+List<PterodactylFleetSample> remoteBulkTargets({
+  required Iterable<PterodactylFleetSample> fleet,
+  required RemoteBulkAction action,
+  required RemoteBulkTargetScope scope,
+  String? selectedIdentifier,
+}) {
+  final String? selected = selectedIdentifier?.trim().toLowerCase();
+  final List<PterodactylFleetSample> result = <PterodactylFleetSample>[];
+  for (final PterodactylFleetSample sample in fleet) {
+    final PterodactylResourceUsage? resources = sample.resources;
+    final String state = resources?.currentState.trim().toLowerCase() ?? '';
+    final bool stopped = state == 'offline';
+    final bool running = const <String>{
+      'starting',
+      'running',
+      'stopping',
+    }.contains(state);
+    final bool matchesScope = switch (scope) {
+      RemoteBulkTargetScope.all => true,
+      RemoteBulkTargetScope.selected =>
+        selected != null && sample.server.identifier.toLowerCase() == selected,
+      RemoteBulkTargetScope.running => running,
+      RemoteBulkTargetScope.stopped => stopped,
+    };
+    if (!matchesScope) continue;
+
+    final bool powerBlocked =
+        sample.server.isNodeUnderMaintenance ||
+        sample.server.status != null ||
+        resources == null ||
+        resources.isSuspended ||
+        (!running && !stopped);
+    final bool eligible = switch (action) {
+      RemoteBulkAction.start => !powerBlocked && stopped,
+      RemoteBulkAction.stop ||
+      RemoteBulkAction.restart ||
+      RemoteBulkAction.kill => !powerBlocked && running,
+      RemoteBulkAction.reinstall || RemoteBulkAction.delete => true,
+      RemoteBulkAction.createMany || RemoteBulkAction.done => false,
+    };
+    if (eligible) result.add(sample);
+  }
+  return List<PterodactylFleetSample>.unmodifiable(result);
+}
+
 String _safeRemoteText(String value) => PterodactylConsoleSanitizer.text(
   value,
 ).replaceAll(RegExp(r'[\r\n\t]'), ' ');
+
+bool pterodactylCredentialMatchesRole(
+  PterodactylCredential credential,
+  PterodactylCredentialRole expected,
+) {
+  final PterodactylCredentialRole? inferred = inferPterodactylCredentialRole(
+    credential.value,
+  );
+  return inferred == null || inferred == expected;
+}
 
 /// Monitor-driven interactive wizard.
 ///
@@ -73,12 +214,14 @@ class InteractiveWizard {
     required this.consumerService,
     required this.passthrough,
     required this.pterodactyl,
+    required this.pterodactylSmb,
     this.requestedConsumer,
   });
 
   final ConsumerService consumerService;
   final PassthroughService passthrough;
   final PterodactylService pterodactyl;
+  final PterodactylSmbService pterodactylSmb;
   final ConsumerProfile? requestedConsumer;
   ConsumerProfile? _consumerOverride;
   MonitorView _monitorView = MonitorView.local;
@@ -99,7 +242,13 @@ class InteractiveWizard {
 
   /// How far back a new monitor session backfills its charts from the trend
   /// store. Matches the longest window the dashboard can cycle to.
-  static const Duration _trendSeedWindow = Duration(hours: 24);
+  static const Duration _trendSeedWindow = Duration(days: 7);
+
+  /// Full-resolution retention is 24 hours before older samples are rolled
+  /// into five-minute buckets. These capacities keep that entire retained
+  /// window chartable at the Local two-second and Remote twenty-second floors.
+  static const int _localTrendCapacity = 65536;
+  static const int _remoteTrendCapacity = 32768;
 
   Future<void> run() async {
     if (!Ui.hasTerminal) {
@@ -180,19 +329,14 @@ class InteractiveWizard {
     final MetricsSampler sampler = MetricsSampler(
       captureMetrics: captureMetrics,
       store: await _trendStore(),
+      ringCapacity: _localTrendCapacity,
     );
     // Swept and seeded before the screen opens so the first frame carries
     // both live readings and whatever history the last session left behind.
     await Ui.spin('Loading servers', () async {
       await sampler.sweep();
-      await sampler.seedFromStore(sampler.instances, window: _trendSeedWindow);
-      // Session start is the one moment retention can be applied without
-      // stealing time from a frame, and it has to happen after the seed so
-      // this session still charts full-resolution history before the older
-      // half of it is rolled up. Awaited rather than fired and forgotten: an
-      // unawaited failure here would reach the root zone and take the
-      // isolate — and the dashboard — with it.
       await sampler.compactStore(sampler.instances);
+      await sampler.seedFromStore(sampler.instances, window: _trendSeedWindow);
     });
 
     final MonitorScreen screen = MonitorScreen(
@@ -250,13 +394,14 @@ class InteractiveWizard {
     final MetricsSampler sampler = MetricsSampler(
       captureMetrics: feed?.captureMetrics ?? () async => '',
       store: store,
+      ringCapacity: _remoteTrendCapacity,
     );
     if (profile != null) {
       await Ui.spin('Loading remote servers', () async {
         await sampler.sweep();
         final List<String> instances = feed?.instances ?? const <String>[];
-        await sampler.seedFromStore(instances, window: _trendSeedWindow);
         await sampler.compactStore(instances);
+        await sampler.seedFromStore(instances, window: _trendSeedWindow);
       });
     }
     Future<MonitorSnapshot> loadSnapshot() async {
@@ -327,6 +472,11 @@ class InteractiveWizard {
     if (profiles.isEmpty) {
       _remoteProfileId = null;
       return null;
+    }
+    final PterodactylProfile? active = pterodactyl.activeProfile();
+    if (active != null) {
+      _remoteProfileId = active.id;
+      return active;
     }
     final String? selected = _remoteProfileId;
     if (selected != null) {
@@ -467,6 +617,11 @@ class InteractiveWizard {
         await _quickRestart(name);
       case InstanceModalAction.console:
         await _quickConsole(name);
+      case InstanceModalAction.settings:
+      case InstanceModalAction.history:
+      case InstanceModalAction.reinstall:
+        Ui.note('That action is Remote-only.');
+        await Ui.pause();
       case InstanceModalAction.setPort:
         await _setInstancePort(name);
       case InstanceModalAction.makeActive:
@@ -515,9 +670,12 @@ class InteractiveWizard {
   /// where "nothing to do" is answered. Saying so and pausing is the point:
   /// a suspension that runs no command and returns immediately reads as a
   /// flash of the screen and nothing else.
-  Future<void> _monitorWorkspaceAction(WorkspaceModalAction action) async {
+  Future<void> _monitorWorkspaceAction(
+    WorkspaceModalAction action,
+    String? selectedIdentifier,
+  ) async {
     if (_monitorView == MonitorView.remote) {
-      await _remoteWorkspaceAction(action);
+      await _remoteWorkspaceAction(action, selectedIdentifier);
       return;
     }
     switch (action) {
@@ -549,6 +707,12 @@ class InteractiveWizard {
         await _createInstance();
       case WorkspaceModalAction.connect:
         Ui.note('Remote connection settings are not available in Local view.');
+        await Ui.pause();
+      case WorkspaceModalAction.files:
+        Ui.note('Remote file sharing is not available in Local view.');
+        await Ui.pause();
+      case WorkspaceModalAction.bulkActions:
+        Ui.note('Remote bulk actions are not available in Local view.');
         await Ui.pause();
     }
   }
@@ -631,6 +795,16 @@ class InteractiveWizard {
         await _remotePower(identifier, PterodactylPowerSignal.restart);
       case InstanceModalAction.console:
         await _remoteConsole(identifier);
+      case InstanceModalAction.settings:
+        await _remoteSettings(identifier);
+      case InstanceModalAction.history:
+        await _remoteHistory(identifier);
+      case InstanceModalAction.reinstall:
+        await _remoteReinstall(identifier);
+      case InstanceModalAction.folder:
+        await _remoteOpenFolder(identifier);
+      case InstanceModalAction.delete:
+        await _remoteDelete(identifier);
       case InstanceModalAction.setPort:
       case InstanceModalAction.makeActive:
       case InstanceModalAction.motd:
@@ -638,16 +812,17 @@ class InteractiveWizard {
       case InstanceModalAction.unlock:
       case InstanceModalAction.isolated:
       case InstanceModalAction.shared:
-      case InstanceModalAction.folder:
       case InstanceModalAction.update:
       case InstanceModalAction.factoryReset:
-      case InstanceModalAction.delete:
         Ui.note('That action is Local-only.');
         await Ui.pause();
     }
   }
 
-  Future<void> _remoteWorkspaceAction(WorkspaceModalAction action) async {
+  Future<void> _remoteWorkspaceAction(
+    WorkspaceModalAction action,
+    String? selectedIdentifier,
+  ) async {
     switch (action) {
       case WorkspaceModalAction.connect:
         await _connectPterodactyl();
@@ -663,9 +838,14 @@ class InteractiveWizard {
         if (confirmed) {
           await _remotePowerAll(PterodactylPowerSignal.stop);
         }
+      case WorkspaceModalAction.files:
+        await _remoteFiles();
+      case WorkspaceModalAction.bulkActions:
+        await _remoteBulkActions(selectedIdentifier);
+      case WorkspaceModalAction.createMany:
+        await _remoteCreateMany();
       case WorkspaceModalAction.buildTuning:
       case WorkspaceModalAction.pullBuilds:
-      case WorkspaceModalAction.createMany:
       case WorkspaceModalAction.wipe:
         Ui.note('That workspace action is Local-only.');
         await Ui.pause();
@@ -692,6 +872,680 @@ class InteractiveWizard {
       'Attaching to $identifier. Press Esc, Ctrl-C, or enter :exit to detach.',
     );
     await PterodactylConsoleTerminal(connection: connection).run();
+  }
+
+  Future<void> _remoteOpenFolder(String identifier) async {
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final PterodactylSftpAccount? driveAccount =
+        pterodactylSmb.settings?.accounts[profile.id];
+    if (driveAccount == null || !driveAccount.enabled) {
+      await Ui.spin('Preparing Multiplexor Drive', () {
+        return pterodactylSmb.installDrive(profileIds: <String>[profile.id]);
+      });
+    }
+    final PterodactylSmbDoctorReport report = await pterodactylSmb.doctor();
+    final bool needsHostTrust = report.checks.any(
+      (PterodactylSmbCheck check) =>
+          check.name == 'ssh-host-keys' &&
+          check.level == PterodactylSmbCheckLevel.error,
+    );
+    if (needsHostTrust && !await _trustRemoteFileHostKeys(pauseAfter: false)) {
+      Ui.note('Open Folder cancelled; no SSH host keys were trusted.');
+      await Ui.pause();
+      return;
+    }
+    final String openedPath = await Ui.spin(
+      'Opening remote server folder',
+      () => pterodactylSmb.openServerFolder(
+        profileId: profile.id,
+        serverIdentifier: identifier,
+      ),
+    );
+    Ui.success('Opened $openedPath');
+  }
+
+  Future<void> _remoteSettings(String identifier) async {
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final PterodactylClientServerAccess access = await Ui.spin(
+      'Loading remote settings',
+      () => pterodactyl.serverAccess(profile.id, identifier),
+    );
+    final PterodactylClientServer server = access.server;
+    PterodactylServerStartup? startup;
+    if (access.allows(PterodactylServerPermission.startupRead)) {
+      startup = await Ui.spin(
+        'Loading startup settings',
+        () => pterodactyl.startup(profile.id, server.identifier),
+      );
+    }
+
+    Ui.appHeader('REMOTE SETTINGS', <String>[
+      _safeRemoteText(server.name),
+      profile.name,
+    ]);
+    Ui.keyValue('identifier', server.identifier);
+    Ui.keyValue('name', _safeRemoteText(server.name));
+    Ui.keyValue(
+      'description',
+      server.description.isEmpty ? 'none' : _safeRemoteText(server.description),
+    );
+    Ui.keyValue(
+      'permissions',
+      access.isOwner
+          ? 'owner (all)'
+          : (access.permissions.toList()..sort()).join(', '),
+    );
+    Ui.keyValue(
+      'limits',
+      '${server.limits.memoryMiB} MiB RAM · ${server.limits.cpuPercent}% CPU · '
+          '${server.limits.diskMiB} MiB disk',
+    );
+    Ui.keyValue(
+      'features',
+      '${server.featureLimits.databases ?? 0} db · '
+          '${server.featureLimits.allocations ?? 0} allocations · '
+          '${server.featureLimits.backups ?? 0} backups',
+    );
+    Ui.keyValue(
+      'docker image',
+      server.dockerImage.isEmpty ? 'not reported' : server.dockerImage,
+    );
+    Ui.keyValue(
+      'startup',
+      startup?.rawStartupCommand ??
+          (access.allows(PterodactylServerPermission.startupRead)
+              ? 'not reported'
+              : 'hidden (startup.read not granted)'),
+    );
+    Ui.blank();
+
+    final int selected = await Ui.choose('Modify remote settings', <String>[
+      'Name & description',
+      'Startup variable',
+      'Docker image',
+      'Resource & feature limits',
+      'Startup command',
+    ]);
+    switch (selected) {
+      case 0:
+        await _remoteRename(profile, access);
+      case 1:
+        await _remoteStartupVariable(profile, access, startup);
+      case 2:
+        await _remoteDockerImage(profile, access, startup);
+      case 3:
+        await _remoteLimits(profile, access);
+      case 4:
+        await _remoteStartupCommand(profile, access, startup);
+    }
+  }
+
+  Future<void> _remoteRename(
+    PterodactylProfile profile,
+    PterodactylClientServerAccess access,
+  ) async {
+    final PterodactylClientServer server = access.server;
+    if (!access.allows(PterodactylServerPermission.settingsRename)) {
+      Ui.note(
+        'Client permission settings.rename is absent; Multiplexor will try '
+        'the Application API.',
+      );
+    }
+    final String name = await Ui.input(
+      'Server name',
+      defaultValue: server.name,
+      validator: (String value) => value.trim().isNotEmpty,
+      validationMessage: 'Name cannot be empty',
+    );
+    final String description = await Ui.input(
+      'Description',
+      defaultValue: server.description,
+    );
+    final bool updated = await _runRemoteMutationWithApplicationRepair(
+      profile: profile,
+      progressLabel: 'Updating remote server details',
+      purpose: 'rename or describe this server',
+      operation: () => pterodactyl.rename(
+        profileId: profile.id,
+        server: server.identifier,
+        name: name,
+        description: description,
+      ),
+    );
+    if (updated) Ui.success('Updated ${server.identifier}');
+    await Ui.pause();
+  }
+
+  Future<void> _remoteStartupVariable(
+    PterodactylProfile profile,
+    PterodactylClientServerAccess access,
+    PterodactylServerStartup? startup,
+  ) async {
+    if (startup == null) {
+      Ui.warn(
+        'The Client account lacks startup.read, so editable variables cannot '
+        'be listed safely.',
+      );
+      await Ui.pause();
+      return;
+    }
+    final List<PterodactylStartupVariable> variables = startup.variables
+        .where((PterodactylStartupVariable item) => item.isEditable)
+        .toList(growable: false);
+    if (variables.isEmpty) {
+      Ui.note('This server exposes no editable startup variables.');
+      await Ui.pause();
+      return;
+    }
+    final int selected = await Ui.choose('Startup variable', <String>[
+      for (final PterodactylStartupVariable variable in variables)
+        '${variable.name} (${variable.environmentVariable}) = '
+            '${variable.serverValue ?? variable.defaultValue ?? ''}',
+    ]);
+    final PterodactylStartupVariable variable = variables[selected];
+    Ui.keyValue('variable', variable.environmentVariable);
+    if (variable.description?.isNotEmpty == true) {
+      Ui.keyValue('description', _safeRemoteText(variable.description!));
+    }
+    if (variable.rules.isNotEmpty) Ui.keyValue('rules', variable.rules);
+    final String value = await Ui.input(
+      'New value',
+      defaultValue: variable.serverValue ?? variable.defaultValue ?? '',
+    );
+    if (!access.allows(PterodactylServerPermission.startupUpdate)) {
+      Ui.note(
+        'Client permission startup.update is absent; Multiplexor will try '
+        'the Application API.',
+      );
+    }
+    final bool updated = await _runRemoteMutationWithApplicationRepair(
+      profile: profile,
+      progressLabel: 'Updating startup variable',
+      purpose: 'modify startup variables',
+      operation: () async {
+        await pterodactyl.updateStartupVariable(
+          profileId: profile.id,
+          server: access.server.identifier,
+          key: variable.environmentVariable,
+          value: value,
+        );
+      },
+    );
+    if (updated) Ui.success('Updated ${variable.environmentVariable}');
+    await Ui.pause();
+  }
+
+  Future<void> _remoteDockerImage(
+    PterodactylProfile profile,
+    PterodactylClientServerAccess access,
+    PterodactylServerStartup? startup,
+  ) async {
+    if (startup == null) {
+      Ui.warn(
+        'The Client account lacks startup.read, so the Panel\'s allowed '
+        'Docker images cannot be listed.',
+      );
+      await Ui.pause();
+      return;
+    }
+    final List<MapEntry<String, String>> images = startup.dockerImages.entries
+        .toList(growable: false);
+    if (images.isEmpty) {
+      Ui.note('This server exposes no selectable Docker images.');
+      await Ui.pause();
+      return;
+    }
+    final int selected = await Ui.choose('Allowed Docker image', <String>[
+      for (final MapEntry<String, String> image in images)
+        '${image.key}: ${image.value}',
+    ]);
+    final String dockerImage = images[selected].value;
+    if (!access.allows(PterodactylServerPermission.startupDockerImage)) {
+      Ui.note(
+        'Client permission startup.docker-image is absent; Multiplexor will '
+        'try the Application API.',
+      );
+    }
+    final bool updated = await _runRemoteMutationWithApplicationRepair(
+      profile: profile,
+      progressLabel: 'Updating Docker image',
+      purpose: 'change the Docker image',
+      operation: () => pterodactyl.updateDockerImage(
+        profileId: profile.id,
+        server: access.server.identifier,
+        dockerImage: dockerImage,
+      ),
+    );
+    if (updated) Ui.success('Docker image set to $dockerImage');
+    await Ui.pause();
+  }
+
+  Future<void> _remoteLimits(
+    PterodactylProfile profile,
+    PterodactylClientServerAccess access,
+  ) async {
+    final PterodactylServerLimits limits = access.server.limits;
+    final PterodactylFeatureLimits features = access.server.featureLimits;
+    final List<_RemoteLimitField> fields = _RemoteLimitField.values;
+    final int selected = await Ui.choose('Admin limit', <String>[
+      'Memory MiB (${limits.memoryMiB})',
+      'Swap MiB (${limits.swapMiB})',
+      'Disk MiB (${limits.diskMiB})',
+      'IO weight (${limits.ioWeight})',
+      'CPU percent (${limits.cpuPercent})',
+      'CPU threads (${limits.threads ?? 'all'})',
+      'Database limit (${features.databases ?? 0})',
+      'Allocation limit (${features.allocations ?? 0})',
+      'Backup limit (${features.backups ?? 0})',
+    ]);
+    final _RemoteLimitField field = fields[selected];
+    final String current = switch (field) {
+      _RemoteLimitField.memory => '${limits.memoryMiB}',
+      _RemoteLimitField.swap => '${limits.swapMiB}',
+      _RemoteLimitField.disk => '${limits.diskMiB}',
+      _RemoteLimitField.io => '${limits.ioWeight}',
+      _RemoteLimitField.cpu => '${limits.cpuPercent}',
+      _RemoteLimitField.threads => limits.threads ?? 'all',
+      _RemoteLimitField.databases => '${features.databases ?? 0}',
+      _RemoteLimitField.allocations => '${features.allocations ?? 0}',
+      _RemoteLimitField.backups => '${features.backups ?? 0}',
+    };
+    final String value = await Ui.input(
+      field == _RemoteLimitField.threads
+          ? 'New value (use "all" to clear)'
+          : 'New integer value',
+      defaultValue: current,
+      validator: field == _RemoteLimitField.threads
+          ? (String candidate) => candidate.trim().isNotEmpty
+          : (String candidate) => int.tryParse(candidate) != null,
+      validationMessage: field == _RemoteLimitField.threads
+          ? 'Enter a thread set or "all"'
+          : 'Enter an integer accepted by Pterodactyl',
+    );
+    final int? integer = field == _RemoteLimitField.threads
+        ? null
+        : int.parse(value);
+    final bool updated = await _runRemoteMutationWithApplicationRepair(
+      profile: profile,
+      progressLabel: 'Updating server limits',
+      purpose: 'change administrative server limits',
+      operation: () async {
+        await pterodactyl.updateBuildSettings(
+          profileId: profile.id,
+          server: access.server.identifier,
+          memoryMiB: field == _RemoteLimitField.memory ? integer : null,
+          swapMiB: field == _RemoteLimitField.swap ? integer : null,
+          diskMiB: field == _RemoteLimitField.disk ? integer : null,
+          ioWeight: field == _RemoteLimitField.io ? integer : null,
+          cpuPercent: field == _RemoteLimitField.cpu ? integer : null,
+          threads: field == _RemoteLimitField.threads && value != 'all'
+              ? value
+              : null,
+          clearThreads: field == _RemoteLimitField.threads && value == 'all',
+          databaseLimit: field == _RemoteLimitField.databases ? integer : null,
+          allocationLimit: field == _RemoteLimitField.allocations
+              ? integer
+              : null,
+          backupLimit: field == _RemoteLimitField.backups ? integer : null,
+        );
+      },
+    );
+    if (updated) Ui.success('Updated ${field.name}');
+    await Ui.pause();
+  }
+
+  Future<void> _remoteStartupCommand(
+    PterodactylProfile profile,
+    PterodactylClientServerAccess access,
+    PterodactylServerStartup? startup,
+  ) async {
+    final String current = startup?.rawStartupCommand.isNotEmpty == true
+        ? startup!.rawStartupCommand
+        : access.server.invocation;
+    final String command = await Ui.input(
+      'Startup command',
+      defaultValue: current,
+      validator: (String value) => value.trim().isNotEmpty,
+      validationMessage: 'Startup command cannot be empty',
+    );
+    final bool updated = await _runRemoteMutationWithApplicationRepair(
+      profile: profile,
+      progressLabel: 'Updating startup command',
+      purpose: 'change the startup command',
+      operation: () async {
+        await pterodactyl.updateStartupCommand(
+          profileId: profile.id,
+          server: access.server.identifier,
+          startup: command,
+        );
+      },
+    );
+    if (updated) Ui.success('Updated startup command');
+    await Ui.pause();
+  }
+
+  Future<void> _remoteHistory(String identifier) async {
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final PterodactylClientServerAccess access = await Ui.spin(
+      'Checking activity permission',
+      () => pterodactyl.serverAccess(profile.id, identifier),
+    );
+    if (!access.allows(PterodactylServerPermission.activityRead)) {
+      Ui.warn(
+        'The Client account lacks activity.read for '
+        '${_safeRemoteText(access.server.name)}.',
+      );
+      await Ui.pause();
+      return;
+    }
+    final PterodactylPage<PterodactylActivity> page = await Ui.spin(
+      'Loading remote activity history',
+      () => pterodactyl.activity(
+        profile.id,
+        access.server.identifier,
+        perPage: 25,
+      ),
+    );
+    Ui.appHeader('REMOTE ACTIVITY', <String>[
+      _safeRemoteText(access.server.name),
+      '${page.pagination.total} events',
+    ]);
+    if (page.items.isEmpty) {
+      Ui.note('No activity events were returned.');
+    } else {
+      for (final PterodactylActivity event in page.items) {
+        final String timestamp = event.timestamp
+            .toLocal()
+            .toIso8601String()
+            .replaceFirst('T', ' ');
+        final String detail = event.description.isEmpty
+            ? event.event
+            : '${event.event} · ${_safeRemoteText(event.description)}';
+        Ui.info('$timestamp  ${_safeRemoteText(detail)}');
+      }
+    }
+    Ui.note('Resource charts retain seven days of sampled monitor history.');
+    await Ui.pause();
+  }
+
+  Future<PterodactylClientServerAccess?> _confirmRemoteDestructiveAction({
+    required String identifier,
+    required String action,
+    required String consequence,
+  }) async {
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final PterodactylClientServerAccess access = await Ui.spin(
+      'Loading remote server identity',
+      () => pterodactyl.serverAccess(profile.id, identifier),
+    );
+    final PterodactylClientServer server = access.server;
+    final bool continueToTypedConfirmation = await Ui.confirm(
+      '$action ${_safeRemoteText(server.name)}? $consequence',
+      defaultValue: false,
+    );
+    if (!continueToTypedConfirmation) return null;
+    final String typed = await Ui.input(
+      'Type "${_safeRemoteText(server.name)}" or "${server.identifier}"',
+    );
+    if (typed != server.name && typed != server.identifier) {
+      Ui.warn('Confirmation did not match; $action cancelled.');
+      await Ui.pause();
+      return null;
+    }
+    return access;
+  }
+
+  Future<void> _remoteReinstall(String identifier) async {
+    final PterodactylClientServerAccess? access =
+        await _confirmRemoteDestructiveAction(
+          identifier: identifier,
+          action: 'Reinstall',
+          consequence: 'All server files will be replaced.',
+        );
+    if (access == null) return;
+    final PterodactylProfile profile = _requireRemoteProfile();
+    if (!access.allows(PterodactylServerPermission.settingsReinstall)) {
+      Ui.note(
+        'Client permission settings.reinstall is absent; Multiplexor will '
+        'try the Application API.',
+      );
+    }
+    final bool reinstalled = await _runRemoteMutationWithApplicationRepair(
+      profile: profile,
+      progressLabel: 'Requesting remote reinstall',
+      purpose: 'reinstall this server',
+      operation: () =>
+          pterodactyl.reinstall(profile.id, access.server.identifier),
+    );
+    if (reinstalled) {
+      Ui.success('Reinstall requested for ${access.server.name}');
+    }
+    await Ui.pause();
+  }
+
+  Future<void> _remoteDelete(String identifier) async {
+    final PterodactylClientServerAccess? access =
+        await _confirmRemoteDestructiveAction(
+          identifier: identifier,
+          action: 'Delete',
+          consequence: 'This permanently destroys the server and its files.',
+        );
+    if (access == null) return;
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final bool deleted = await _runRemoteMutationWithApplicationRepair(
+      profile: profile,
+      progressLabel: 'Deleting remote server',
+      purpose: 'delete this server',
+      operation: () => pterodactyl.delete(profile.id, access.server.identifier),
+    );
+    if (deleted) Ui.success('Deleted ${_safeRemoteText(access.server.name)}');
+    await Ui.pause();
+  }
+
+  Future<bool> _runRemoteMutationWithApplicationRepair({
+    required PterodactylProfile profile,
+    required String progressLabel,
+    required String purpose,
+    required Future<void> Function() operation,
+  }) async {
+    try {
+      await Ui.spin(progressLabel, operation);
+      return true;
+    } on PterodactylApiException catch (error) {
+      if (!error.isUnauthorized) rethrow;
+      Ui.warn('The current API credentials are not allowed to $purpose.');
+      final bool repair = await Ui.confirm(
+        'Add or replace the Application API key and retry?',
+        defaultValue: false,
+      );
+      if (!repair) return false;
+      final PterodactylCredential? previous = await pterodactyl
+          .credentialForRollback(
+            profile,
+            PterodactylCredentialRole.application,
+          );
+      try {
+        await _enrollPterodactylCredential(
+          profile,
+          PterodactylCredentialRole.application,
+        );
+        await pterodactyl.verifyCredential(
+          profile,
+          PterodactylCredentialRole.application,
+        );
+        await Ui.spin('Retrying: $progressLabel', operation);
+        return true;
+      } catch (_) {
+        if (previous != null) {
+          await pterodactyl.restoreCredential(
+            profile,
+            PterodactylCredentialRole.application,
+            previous,
+          );
+        } else {
+          await pterodactyl.removeCredential(
+            profile,
+            PterodactylCredentialRole.application,
+          );
+        }
+        rethrow;
+      }
+    }
+  }
+
+  Future<void> _remoteFiles() async {
+    while (true) {
+      final PterodactylSmbStatus status = await pterodactylSmb.status();
+      final List<PterodactylProfile> profiles = pterodactyl.listProfiles();
+      final PterodactylProfile? active = _selectedRemoteProfile();
+      Ui.clearScreen();
+      Ui.appHeader('MULTIPLEXOR DRIVE', <String>[
+        status.running
+            ? 'available'
+            : status.runningMounts > 0
+            ? 'needs repair'
+            : 'stopped',
+        '${status.runningMounts}/${status.mounts.length} mounted',
+      ]);
+      Ui.info(
+        'Every accessible Pterodactyl server appears in one local folder as '
+        '<account>/<server-name>--<id>.',
+      );
+      Ui.keyValue('local drive', status.mountRoot ?? pterodactylSmb.drivePath);
+
+      final List<_RemoteFilesAction> actions = <_RemoteFilesAction>[
+        if (active != null) _RemoteFilesAction.configureActive,
+        if (profiles.length > 1) _RemoteFilesAction.configureAll,
+        if (status.configured) _RemoteFilesAction.trustHostKeys,
+        _RemoteFilesAction.doctor,
+        if (status.configured && !status.running) _RemoteFilesAction.start,
+        if (status.configured) _RemoteFilesAction.open,
+        if (status.runningMounts > 0) _RemoteFilesAction.stop,
+        _RemoteFilesAction.done,
+      ];
+      final int selected = await Ui.choose('Multiplexor Drive', <String>[
+        for (final _RemoteFilesAction action in actions)
+          switch (action) {
+            _RemoteFilesAction.configureActive =>
+              'Configure active account (${active!.name})',
+            _RemoteFilesAction.configureAll => 'Configure every saved account',
+            _RemoteFilesAction.trustHostKeys =>
+              'Verify and trust Wings SSH host keys',
+            _RemoteFilesAction.doctor => 'Run drive diagnostics',
+            _RemoteFilesAction.start => 'Start Multiplexor Drive',
+            _RemoteFilesAction.open => 'Open Multiplexor Drive',
+            _RemoteFilesAction.stop => 'Stop Multiplexor Drive',
+            _RemoteFilesAction.done => 'Return to dashboard',
+          },
+      ]);
+      switch (actions[selected]) {
+        case _RemoteFilesAction.configureActive:
+          await _configureRemoteFiles(<PterodactylProfile>[active!]);
+        case _RemoteFilesAction.configureAll:
+          await _configureRemoteFiles(profiles);
+        case _RemoteFilesAction.trustHostKeys:
+          await _trustRemoteFileHostKeys();
+        case _RemoteFilesAction.doctor:
+          await _showRemoteFilesDoctor();
+        case _RemoteFilesAction.start:
+          final PterodactylSmbStatus started = await Ui.spin(
+            'Starting Multiplexor Drive',
+            pterodactylSmb.startDrive,
+          );
+          if (started.running) {
+            Ui.success(
+              'Multiplexor Drive is available at ${started.mountRoot}',
+            );
+          } else {
+            Ui.warn('Multiplexor Drive did not become fully ready.');
+          }
+          await Ui.pause();
+        case _RemoteFilesAction.open:
+          final String openedPath = await Ui.spin(
+            'Opening Multiplexor Drive',
+            pterodactylSmb.openDrive,
+          );
+          Ui.success('Opened $openedPath');
+          await Ui.pause();
+        case _RemoteFilesAction.stop:
+          await Ui.spin('Stopping Multiplexor Drive', pterodactylSmb.stopDrive);
+          Ui.success('Multiplexor Drive stopped');
+          await Ui.pause();
+        case _RemoteFilesAction.done:
+          return;
+      }
+    }
+  }
+
+  Future<void> _configureRemoteFiles(List<PterodactylProfile> profiles) async {
+    if (profiles.isEmpty) {
+      Ui.warn('Add a remote account before configuring Multiplexor Drive.');
+      await Ui.pause();
+      return;
+    }
+    await Ui.spin('Generating and registering SFTP identities', () async {
+      await pterodactylSmb.installDrive(
+        profileIds: profiles.map((PterodactylProfile profile) => profile.id),
+      );
+    });
+    Ui.success('Configured ${profiles.length} remote file account(s)');
+    Ui.note(
+      'Next, verify the Wings SSH fingerprints before starting the drive.',
+    );
+    await Ui.pause();
+  }
+
+  Future<bool> _trustRemoteFileHostKeys({bool pauseAfter = true}) async {
+    final List<PterodactylSshHostKeyCandidate> candidates = await Ui.spin(
+      'Scanning Wings SSH host keys',
+      pterodactylSmb.scanHostKeys,
+    );
+    Ui.appHeader('WINGS SSH HOST KEYS', <String>[
+      '${candidates.length} fingerprints',
+    ]);
+    for (final PterodactylSshHostKeyCandidate candidate in candidates) {
+      Ui.keyValue(
+        '${candidate.endpoint} ${candidate.keyType}',
+        candidate.fingerprint,
+      );
+    }
+    Ui.warn(
+      'Compare these fingerprints with the Wings host before trusting them.',
+    );
+    final bool confirmed = await Ui.confirm(
+      'Trust exactly these SSH host keys?',
+      defaultValue: false,
+    );
+    if (!confirmed) {
+      Ui.note('No SSH trust settings were changed.');
+      if (pauseAfter) await Ui.pause();
+      return false;
+    }
+    await pterodactylSmb.trustHostKeys(candidates);
+    Ui.success('Wings SSH host keys trusted');
+    if (pauseAfter) await Ui.pause();
+    return true;
+  }
+
+  Future<void> _showRemoteFilesDoctor() async {
+    final PterodactylSmbDoctorReport report = await Ui.spin(
+      'Checking Multiplexor Drive prerequisites',
+      pterodactylSmb.doctor,
+    );
+    Ui.appHeader('MULTIPLEXOR DRIVE DOCTOR', <String>[
+      report.isReady ? 'ready' : 'needs attention',
+    ]);
+    for (final PterodactylSmbCheck check in report.checks) {
+      switch (check.level) {
+        case PterodactylSmbCheckLevel.ready:
+          Ui.success('${check.name}: ${check.message}');
+        case PterodactylSmbCheckLevel.warning:
+          Ui.warn('${check.name}: ${check.message}');
+        case PterodactylSmbCheckLevel.error:
+          Ui.error('${check.name}: ${check.message}');
+      }
+    }
+    await Ui.pause();
   }
 
   Future<void> _remotePowerAll(PterodactylPowerSignal signal) async {
@@ -731,64 +1585,622 @@ class InteractiveWizard {
     await Ui.pause();
   }
 
-  Future<bool> _connectPterodactyl() async {
-    final List<PterodactylProfile> profiles = pterodactyl.listProfiles();
-    PterodactylProfile profile;
-    bool newProfile = false;
-    if (profiles.isEmpty) {
-      final String id = await Ui.input(
-        'Connection ID',
-        defaultValue: 'remote',
-        validator: PterodactylProfile.isValidId,
-        validationMessage: 'Use lowercase letters, digits, - or _',
-      );
-      final String name = await Ui.input('Connection name', defaultValue: id);
-      final String url = await Ui.input(
-        'Pterodactyl panel URL',
-        validator: _validPanelUrl,
-        validationMessage:
-            'Enter an HTTPS origin such as https://panel.example.com',
-      );
-      profile = PterodactylProfile(
-        id: id,
-        name: name,
-        panelUri: Uri.parse(url),
-      );
-      newProfile = true;
-    } else if (profiles.length == 1) {
-      profile = profiles.single;
-    } else {
-      final String selected = await Ui.pick('Remote connection', <String>[
-        for (final PterodactylProfile item in profiles)
-          '${item.name} (${item.id})',
+  Future<void> _remoteBulkActions(String? selectedIdentifier) async {
+    while (true) {
+      Ui.clearScreen();
+      Ui.appHeader('REMOTE BULK ACTIONS', <String>[
+        _requireRemoteProfile().name,
+        'Esc returns to dashboard',
       ]);
-      profile =
-          profiles[profiles.indexWhere(
-            (PterodactylProfile item) => selected.endsWith('(${item.id})'),
-          )];
+      final List<RemoteBulkAction> actions = <RemoteBulkAction>[
+        RemoteBulkAction.start,
+        RemoteBulkAction.restart,
+        RemoteBulkAction.stop,
+        RemoteBulkAction.kill,
+        RemoteBulkAction.reinstall,
+        RemoteBulkAction.delete,
+        RemoteBulkAction.createMany,
+        RemoteBulkAction.done,
+      ];
+      final int selected = await Ui.choose('Bulk action', <String>[
+        'Start stopped servers',
+        'Restart running servers',
+        'Stop running servers',
+        'Kill running servers',
+        'Reinstall servers',
+        'Delete servers',
+        'Create many servers',
+        'Return to dashboard',
+      ]);
+      final RemoteBulkAction action = actions[selected];
+      if (action == RemoteBulkAction.done) return;
+      try {
+        if (action == RemoteBulkAction.createMany) {
+          await _remoteCreateMany();
+        } else {
+          await _runRemoteBulkAction(action, selectedIdentifier);
+        }
+      } on PromptBackNavigation {
+        // Escape inside target selection or confirmation returns to the bulk
+        // action list. Escape on that outer list returns to the dashboard.
+      }
     }
-    final String? previousProfileId = _remoteProfileId;
-    final PterodactylVerification verification;
+  }
+
+  Future<void> _runRemoteBulkAction(
+    RemoteBulkAction action,
+    String? selectedIdentifier,
+  ) async {
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final List<PterodactylFleetSample> fleet = await Ui.spin(
+      'Refreshing remote fleet',
+      () => pterodactyl.captureFleet(profile.id),
+    );
+    final List<PterodactylFleetSample>? targets = await _pickRemoteBulkTargets(
+      fleet: fleet,
+      action: action,
+      selectedIdentifier: selectedIdentifier,
+    );
+    if (targets == null) return;
+    if (targets.isEmpty) {
+      Ui.note('No eligible servers are selected.');
+      await Ui.pause();
+      return;
+    }
+    final List<PterodactylFleetSample> allEligible = remoteBulkTargets(
+      fleet: fleet,
+      action: action,
+      scope: RemoteBulkTargetScope.all,
+      selectedIdentifier: selectedIdentifier,
+    );
+    if (!await _confirmRemoteBulkAction(
+      profile: profile,
+      action: action,
+      targets: targets,
+      allEligibleCount: allEligible.length,
+    )) {
+      return;
+    }
+
+    final List<String> identifiers = targets
+        .map((PterodactylFleetSample sample) => sample.server.identifier)
+        .toList(growable: false);
+    for (final PterodactylFleetSample sample in targets) {
+      Ui.keyValue(
+        'pending',
+        '${_safeRemoteText(sample.server.name)} '
+            '(${sample.server.identifier})',
+      );
+    }
+    final PterodactylBulkResult result = await Ui.spin(
+      '${action.name}: ${targets.length} remote servers',
+      () => switch (action) {
+        RemoteBulkAction.start => pterodactyl.bulkPower(
+          profileId: profile.id,
+          serverIdentifiers: identifiers,
+          signal: PterodactylPowerSignal.start,
+        ),
+        RemoteBulkAction.stop => pterodactyl.bulkPower(
+          profileId: profile.id,
+          serverIdentifiers: identifiers,
+          signal: PterodactylPowerSignal.stop,
+        ),
+        RemoteBulkAction.restart => pterodactyl.bulkPower(
+          profileId: profile.id,
+          serverIdentifiers: identifiers,
+          signal: PterodactylPowerSignal.restart,
+        ),
+        RemoteBulkAction.kill => pterodactyl.bulkPower(
+          profileId: profile.id,
+          serverIdentifiers: identifiers,
+          signal: PterodactylPowerSignal.kill,
+        ),
+        RemoteBulkAction.reinstall => pterodactyl.bulkReinstall(
+          profileId: profile.id,
+          serverIdentifiers: identifiers,
+        ),
+        RemoteBulkAction.delete => pterodactyl.bulkDelete(
+          profileId: profile.id,
+          serverIdentifiers: identifiers,
+        ),
+        RemoteBulkAction.createMany || RemoteBulkAction.done =>
+          throw StateError('Invalid existing-server bulk action: $action'),
+      },
+    );
+    Ui.blank();
+    for (int index = 0; index < result.items.length; index++) {
+      final PterodactylBulkItemResult item = result.items[index];
+      final String target = item.identifier ?? item.target;
+      final String label =
+          '${index + 1}/${result.totalCount} '
+          '${_safeRemoteText(item.name)} (${_safeRemoteText(target)})';
+      if (item.succeeded) {
+        Ui.success('$label: ${result.action.name} accepted');
+      } else {
+        Ui.error('$label: ${_safeRemoteText(item.error ?? 'unknown failure')}');
+      }
+    }
+    Ui.blank();
+    if (result.isSuccess) {
+      Ui.success(
+        '${result.action.name}: all ${result.succeededCount} targets succeeded',
+      );
+    } else {
+      Ui.warn(
+        '${result.action.name}: ${result.succeededCount} succeeded, '
+        '${result.failedCount} failed',
+      );
+    }
+    await Ui.pause();
+  }
+
+  Future<List<PterodactylFleetSample>?> _pickRemoteBulkTargets({
+    required List<PterodactylFleetSample> fleet,
+    required RemoteBulkAction action,
+    required String? selectedIdentifier,
+  }) async {
+    final List<PterodactylFleetSample> eligible = remoteBulkTargets(
+      fleet: fleet,
+      action: action,
+      scope: RemoteBulkTargetScope.all,
+      selectedIdentifier: selectedIdentifier,
+    );
+    if (eligible.isEmpty) {
+      Ui.note('No servers are currently eligible for ${action.name}.');
+      await Ui.pause();
+      return const <PterodactylFleetSample>[];
+    }
+    final List<RemoteBulkTargetScope> candidatePresets =
+        <RemoteBulkTargetScope>[
+          RemoteBulkTargetScope.all,
+          if (selectedIdentifier != null) RemoteBulkTargetScope.selected,
+          RemoteBulkTargetScope.running,
+          RemoteBulkTargetScope.stopped,
+        ];
+    final Map<RemoteBulkTargetScope, List<PterodactylFleetSample>> byPreset =
+        <RemoteBulkTargetScope, List<PterodactylFleetSample>>{
+          for (final RemoteBulkTargetScope scope in candidatePresets)
+            scope: remoteBulkTargets(
+              fleet: fleet,
+              action: action,
+              scope: scope,
+              selectedIdentifier: selectedIdentifier,
+            ),
+        };
+    final List<RemoteBulkTargetScope> presets = candidatePresets
+        .where(
+          (RemoteBulkTargetScope scope) =>
+              scope == RemoteBulkTargetScope.all || byPreset[scope]!.isNotEmpty,
+        )
+        .toList(growable: false);
+    final Set<String> selectedIds = <String>{
+      for (final PterodactylFleetSample sample
+          in byPreset[RemoteBulkTargetScope.selected] ??
+              const <PterodactylFleetSample>[])
+        sample.server.identifier,
+    };
+
+    while (true) {
+      final List<String> options = <String>[
+        for (final RemoteBulkTargetScope scope in presets)
+          '${scope == RemoteBulkTargetScope.all ? 'Select' : 'Preset'} '
+              '${scope.name} (${byPreset[scope]!.length})',
+        for (final PterodactylFleetSample sample in eligible)
+          '${selectedIds.contains(sample.server.identifier) ? '[x]' : '[ ]'} '
+              '${_safeRemoteText(sample.server.name)} '
+              '(${sample.server.identifier}) · '
+              '${sample.resources?.currentState ?? 'state unavailable'}',
+        'Continue with ${selectedIds.length} selected',
+        'Back to bulk actions',
+      ];
+      final int choice;
+      try {
+        choice = await Ui.choose('Select ${action.name} targets', options);
+      } on PromptBackNavigation {
+        return null;
+      }
+      if (choice < presets.length) {
+        selectedIds
+          ..clear()
+          ..addAll(
+            byPreset[presets[choice]]!.map(
+              (PterodactylFleetSample sample) => sample.server.identifier,
+            ),
+          );
+        continue;
+      }
+      final int serverIndex = choice - presets.length;
+      if (serverIndex < eligible.length) {
+        final String identifier = eligible[serverIndex].server.identifier;
+        if (!selectedIds.remove(identifier)) selectedIds.add(identifier);
+        continue;
+      }
+      if (serverIndex == eligible.length) {
+        if (selectedIds.isEmpty) {
+          Ui.warn('Select at least one server.');
+          await Ui.pause();
+          continue;
+        }
+        return List<PterodactylFleetSample>.unmodifiable(
+          eligible.where(
+            (PterodactylFleetSample sample) =>
+                selectedIds.contains(sample.server.identifier),
+          ),
+        );
+      }
+      return null;
+    }
+  }
+
+  Future<bool> _confirmRemoteBulkAction({
+    required PterodactylProfile profile,
+    required RemoteBulkAction action,
+    required List<PterodactylFleetSample> targets,
+    required int allEligibleCount,
+  }) async {
+    Ui.clearScreen();
+    Ui.appHeader('CONFIRM BULK ${action.name.toUpperCase()}', <String>[
+      profile.name,
+      '${targets.length} targets',
+    ]);
+    for (final PterodactylFleetSample sample in targets) {
+      Ui.keyValue(
+        sample.server.identifier,
+        '${_safeRemoteText(sample.server.name)} · '
+        '${sample.resources?.currentState ?? 'state unavailable'}',
+      );
+    }
+    final bool confirmed = await Ui.confirm(
+      '${action.name} these ${targets.length} remote servers?',
+      defaultValue: false,
+    );
+    if (!confirmed) return false;
+    if (!remoteBulkActionRequiresTypedConfirmation(action)) return true;
+
+    final bool entireEligibleFleet = targets.length == allEligibleCount;
+    final String phrase = remoteBulkConfirmationPhrase(
+      action,
+      targets.length,
+      allProfileId:
+          entireEligibleFleet &&
+              (action == RemoteBulkAction.reinstall ||
+                  action == RemoteBulkAction.delete)
+          ? profile.id
+          : null,
+    );
+    final String typed = await Ui.input('Type "$phrase" to continue');
+    if (typed != phrase) {
+      Ui.warn('Confirmation did not match; bulk ${action.name} cancelled.');
+      await Ui.pause();
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _remoteCreateMany() async {
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final PterodactylVerification verification =
+        await _ensureApplicationCredential(profile);
+    if (!verification.capabilities.contains(PterodactylCapability.create)) {
+      Ui.warn('Remote creation is unavailable for this connection.');
+      await Ui.pause();
+      return;
+    }
+    final List<PterodactylClientServer> allServers = await Ui.spin(
+      'Loading remote templates',
+      () => pterodactyl.listServers(profile.id),
+    );
+    final List<PterodactylClientServer> templates = allServers
+        .where(
+          (PterodactylClientServer server) =>
+              pterodactyl.canUseAsTemplate(profile.id, server),
+        )
+        .toList(growable: false);
+    if (templates.isEmpty) {
+      Ui.warn('No owned remote server exists to use as a template.');
+      await Ui.pause();
+      return;
+    }
+    final int templateIndex =
+        await Ui.choose('Clone remote configuration from', <String>[
+          for (final PterodactylClientServer template in templates)
+            '${_safeRemoteText(template.name)} (${template.identifier})',
+        ]);
+    final PterodactylClientServer template = templates[templateIndex];
+    final String countText = await Ui.input(
+      'How many servers (1-50)',
+      defaultValue: '2',
+      validator: (String value) {
+        final int? count = int.tryParse(value.trim());
+        return count != null && count >= 1 && count <= 50;
+      },
+      validationMessage: 'Enter a whole number from 1 through 50',
+    );
+    final int count = int.parse(countText.trim());
+    final String pattern = await Ui.input(
+      'Server name pattern (use {n} for the number)',
+      defaultValue: '${template.name} {n}',
+      validator: (String value) => value.trim().isNotEmpty,
+      validationMessage: 'Name pattern cannot be empty',
+    );
+    final List<String> names = <String>[
+      for (int index = 1; index <= count; index++)
+        pattern.contains('{n}')
+            ? pattern.replaceAll('{n}', '$index').trim()
+            : count == 1
+            ? pattern.trim()
+            : '${pattern.trim()} $index',
+    ];
+    Ui.appHeader('CREATE MANY REMOTE SERVERS', <String>[
+      '${names.length} servers',
+      _safeRemoteText(template.name),
+    ]);
+    for (int index = 0; index < names.length; index++) {
+      Ui.keyValue('${index + 1}', _safeRemoteText(names[index]));
+    }
+    if (!await Ui.confirm(
+      'Create all ${names.length} servers?',
+      defaultValue: false,
+    )) {
+      return;
+    }
+
+    for (final String name in names) {
+      Ui.keyValue('pending', _safeRemoteText(name));
+    }
+    final PterodactylBulkResult result = await Ui.spin(
+      'Creating ${names.length} remote servers',
+      () => pterodactyl.bulkCreateFromTemplate(
+        profileId: profile.id,
+        template: template.identifier,
+        names: names,
+      ),
+    );
+    Ui.blank();
+    for (int index = 0; index < result.items.length; index++) {
+      final PterodactylBulkItemResult item = result.items[index];
+      final String label =
+          '${index + 1}/${result.totalCount} ${_safeRemoteText(item.name)}';
+      if (item.succeeded) {
+        Ui.success(
+          '$label: created ${_safeRemoteText(item.identifier ?? item.target)}',
+        );
+      } else {
+        Ui.error('$label: ${_safeRemoteText(item.error ?? 'unknown failure')}');
+      }
+    }
+    Ui.blank();
+    if (result.isSuccess) {
+      Ui.success('Created all ${result.succeededCount} remote servers');
+    } else {
+      Ui.warn(
+        'Create many: ${result.succeededCount} succeeded, '
+        '${result.failedCount} failed',
+      );
+    }
+    await Ui.pause();
+  }
+
+  Future<bool> _connectPterodactyl() async {
+    bool changed = false;
+    while (true) {
+      final List<PterodactylProfile> profiles = pterodactyl.listProfiles();
+      final PterodactylProfile? active = pterodactyl.activeProfile();
+      Ui.clearScreen();
+      Ui.appHeader('REMOTE ACCOUNTS', <String>[
+        if (active != null)
+          '${active.name} · ${active.origin}'
+        else
+          'not connected',
+        '${profiles.length} saved',
+      ]);
+      final List<_RemoteAccountAction> actions = <_RemoteAccountAction>[
+        if (active != null) _RemoteAccountAction.verify,
+        if (profiles.length > 1) _RemoteAccountAction.switchAccount,
+        _RemoteAccountAction.add,
+        if (active != null) _RemoteAccountAction.rename,
+        if (active != null) _RemoteAccountAction.replaceClientKey,
+        if (active != null) _RemoteAccountAction.replaceApplicationKey,
+        if (active != null) _RemoteAccountAction.remove,
+        _RemoteAccountAction.done,
+      ];
+      final int selected = await Ui.choose('Connection manager', <String>[
+        for (final _RemoteAccountAction action in actions)
+          switch (action) {
+            _RemoteAccountAction.verify => 'Verify active connection',
+            _RemoteAccountAction.switchAccount => 'Switch active connection',
+            _RemoteAccountAction.add => 'Add connection',
+            _RemoteAccountAction.rename => 'Rename display name',
+            _RemoteAccountAction.replaceClientKey => 'Replace Client API key',
+            _RemoteAccountAction.replaceApplicationKey =>
+              'Replace Application API key',
+            _RemoteAccountAction.remove => 'Remove connection',
+            _RemoteAccountAction.done => 'Return to dashboard',
+          },
+      ]);
+      final _RemoteAccountAction action = actions[selected];
+      switch (action) {
+        case _RemoteAccountAction.verify:
+          final PterodactylVerification verification =
+              await _verifyRemoteWithRepair(active!);
+          _showRemoteVerification(verification);
+          changed = true;
+          _remoteConnectionChanged = true;
+          await Ui.pause();
+        case _RemoteAccountAction.switchAccount:
+          final PterodactylProfile selectedProfile = await _pickRemoteProfile(
+            profiles,
+            'Use remote connection',
+          );
+          pterodactyl.selectProfile(selectedProfile.id);
+          _remoteProfileId = selectedProfile.id;
+          changed = true;
+          _remoteConnectionChanged = true;
+          Ui.success('Using ${selectedProfile.name}');
+        case _RemoteAccountAction.add:
+          await _addPterodactylConnection(profiles);
+          changed = true;
+          _remoteConnectionChanged = true;
+        case _RemoteAccountAction.rename:
+          final String name = await Ui.input(
+            'Connection display name',
+            defaultValue: active!.name,
+            validator: (String value) => value.trim().isNotEmpty,
+            validationMessage: 'Name cannot be empty',
+          );
+          pterodactyl.saveProfile(
+            PterodactylProfile(
+              id: active.id,
+              name: name,
+              panelUri: active.panelUri,
+              trustedCertificatePath: active.trustedCertificatePath,
+            ),
+          );
+          changed = true;
+          _remoteConnectionChanged = true;
+          Ui.success('Renamed connection to $name');
+        case _RemoteAccountAction.replaceClientKey:
+          final PterodactylVerification verification =
+              await _replaceCredentialAndVerify(
+                active!,
+                PterodactylCredentialRole.client,
+                progressLabel: 'Verifying replacement Client key',
+              );
+          _showRemoteVerification(verification);
+          changed = true;
+          _remoteConnectionChanged = true;
+          await Ui.pause();
+        case _RemoteAccountAction.replaceApplicationKey:
+          final PterodactylVerification verification =
+              await _replaceCredentialAndVerify(
+                active!,
+                PterodactylCredentialRole.application,
+                progressLabel: 'Verifying replacement Application key',
+              );
+          _showRemoteVerification(verification);
+          changed = true;
+          _remoteConnectionChanged = true;
+          await Ui.pause();
+        case _RemoteAccountAction.remove:
+          final bool confirmed = await Ui.confirm(
+            'Remove ${active!.name} and its stored API credentials?',
+            defaultValue: false,
+          );
+          if (confirmed) {
+            await pterodactyl.removeProfile(active.id);
+            final PterodactylProfile? next = pterodactyl.activeProfile();
+            _remoteProfileId = next?.id;
+            changed = true;
+            _remoteConnectionChanged = true;
+            Ui.success('Removed ${active.name}');
+          }
+        case _RemoteAccountAction.done:
+          _remoteConnectionChanged = _remoteConnectionChanged || changed;
+          return changed;
+      }
+    }
+  }
+
+  Future<void> _addPterodactylConnection(
+    List<PterodactylProfile> existing,
+  ) async {
+    final String id = await Ui.input(
+      'Connection ID',
+      defaultValue: 'remote',
+      validator: (String value) =>
+          PterodactylProfile.isValidId(value) &&
+          !existing.any(
+            (PterodactylProfile item) =>
+                item.id == PterodactylProfile.normalizeId(value),
+          ),
+      validationMessage:
+          'Use a unique ID with lowercase letters, digits, - or _',
+    );
+    final String name = await Ui.input('Connection name', defaultValue: id);
+    final String url = await Ui.input(
+      'Pterodactyl panel URL',
+      validator: _validPanelUrl,
+      validationMessage:
+          'Enter an HTTPS origin such as https://panel.example.com',
+    );
+    final PterodactylProfile profile = PterodactylProfile(
+      id: id,
+      name: name,
+      panelUri: Uri.parse(url),
+    );
     try {
-      if (!await pterodactyl.hasClientCredential(profile)) {
+      final PterodactylCredentialRole firstRole =
+          await _promptAnyPterodactylCredential(profile);
+      if (firstRole == PterodactylCredentialRole.application) {
+        Ui.warn(
+          'Application keys cannot open Client server, console, or activity '
+          'routes. Add a Client key for day-to-day access.',
+        );
         await _enrollPterodactylCredential(
           profile,
           PterodactylCredentialRole.client,
         );
+        await pterodactyl.verifyCredential(
+          profile,
+          PterodactylCredentialRole.application,
+        );
       }
-      verification = await _verifyRemoteWithRepair(profile);
-      if (newProfile) {
-        pterodactyl.saveProfile(profile);
-      }
+      final PterodactylVerification verification =
+          await _verifyRemoteWithRepair(profile);
+      pterodactyl.saveProfile(profile);
+      pterodactyl.selectProfile(profile.id);
       _remoteProfileId = profile.id;
-      // A verified connect/repair always rebuilds the Remote session. Besides
-      // changing credentials and permissions, it may reveal a differently
-      // sized admin-all fleet whose safe polling cadence must be recomputed.
-      _remoteConnectionChanged = true;
+      _showRemoteVerification(verification);
+      await Ui.pause();
     } catch (_) {
-      _remoteProfileId = previousProfileId;
+      await pterodactyl.removeCredential(
+        profile,
+        PterodactylCredentialRole.client,
+      );
+      await pterodactyl.removeCredential(
+        profile,
+        PterodactylCredentialRole.application,
+      );
       rethrow;
     }
+  }
+
+  Future<PterodactylCredentialRole> _promptAnyPterodactylCredential(
+    PterodactylProfile profile,
+  ) async {
+    Ui.info(
+      'Paste a Client (ptlc_) or Application (ptla_) API key. Unknown '
+      'prefixes are accepted after you identify the key type.',
+    );
+    final PterodactylCredential credential = await _promptCredential('API key');
+    PterodactylCredentialRole? role = inferPterodactylCredentialRole(
+      credential.value,
+    );
+    if (role == null) {
+      final int choice = await Ui.choose('API key type', <String>[
+        'Client API key',
+        'Application API key',
+      ]);
+      role = choice == 0
+          ? PterodactylCredentialRole.client
+          : PterodactylCredentialRole.application;
+    }
+    await pterodactyl.saveCredential(profile, role, credential);
+    return role;
+  }
+
+  Future<PterodactylProfile> _pickRemoteProfile(
+    List<PterodactylProfile> profiles,
+    String title,
+  ) async {
+    final int selected = await Ui.choose(title, <String>[
+      for (final PterodactylProfile profile in profiles)
+        '${profile.name} (${profile.id}) · ${profile.origin}',
+    ]);
+    return profiles[selected];
+  }
+
+  void _showRemoteVerification(PterodactylVerification verification) {
     Ui.success('Connected to ${verification.profile.origin}');
     Ui.keyValue('servers', '${verification.serverCount}');
     Ui.keyValue('nodes', verification.nodeCount?.toString() ?? 'not granted');
@@ -801,8 +2213,6 @@ class InteractiveWizard {
     for (final String warning in verification.warnings) {
       Ui.warn(warning);
     }
-    await Ui.pause();
-    return _remoteConnectionChanged;
   }
 
   Future<void> _enrollPterodactylCredential(
@@ -818,8 +2228,30 @@ class InteractiveWizard {
         );
         Ui.note('Grant Servers read/write, Allocations read, and Nodes read.');
     }
-    Ui.note('Paste it only into the macOS Keychain prompt that follows.');
-    await pterodactyl.enrollCredential(profile, role);
+    final PterodactylCredential credential = await _promptCredential(
+      role == PterodactylCredentialRole.client
+          ? 'Client API key'
+          : 'Application API key',
+    );
+    if (!pterodactylCredentialMatchesRole(credential, role)) {
+      throw FormatException(
+        'That is a standard '
+        '${inferPterodactylCredentialRole(credential.value)!.name} API key, '
+        'not a ${role.name} API key.',
+      );
+    }
+    await pterodactyl.saveCredential(profile, role, credential);
+  }
+
+  Future<PterodactylCredential> _promptCredential(String prompt) async {
+    while (true) {
+      final String value = (await Ui.secret(prompt)).trim();
+      try {
+        return PterodactylCredential(value);
+      } on FormatException {
+        Ui.warn('Enter a non-empty API key without spaces or control bytes.');
+      }
+    }
   }
 
   Future<PterodactylVerification> _verifyRemoteWithRepair(
@@ -887,6 +2319,7 @@ class InteractiveWizard {
         .credentialForRollback(profile, role);
     try {
       await _enrollPterodactylCredential(profile, role);
+      await pterodactyl.verifyCredential(profile, role);
       return await Ui.spin(
         progressLabel,
         () => pterodactyl.verifyProfile(profile),
@@ -894,6 +2327,8 @@ class InteractiveWizard {
     } catch (_) {
       if (previous != null) {
         await pterodactyl.restoreCredential(profile, role, previous);
+      } else {
+        await pterodactyl.removeCredential(profile, role);
       }
       rethrow;
     }

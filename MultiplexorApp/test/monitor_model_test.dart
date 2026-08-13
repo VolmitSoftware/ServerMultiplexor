@@ -217,6 +217,7 @@ void main() {
       expect(rangeLabel(const Duration(hours: 1)), '1h');
       expect(rangeLabel(const Duration(hours: 6)), '6h');
       expect(rangeLabel(const Duration(hours: 24)), '24h');
+      expect(rangeLabel(const Duration(days: 7)), '7d');
     });
 
     test('falls back to a compact duration for an off-cycle range', () {
@@ -887,7 +888,7 @@ void main() {
             consumerName: 'remote:production',
             view: MonitorView.remote,
           ),
-          columns: 132,
+          columns: 200,
           lines: 40,
         ).rows,
       );
@@ -898,13 +899,14 @@ void main() {
       expect(footer, contains('S stop'));
       expect(footer, contains('X kill'));
       expect(footer, contains('O live console'));
+      expect(footer, contains('n new'));
+      expect(footer, contains('b bulk'));
+      expect(footer, contains('w workspace'));
       expect(footer, contains('c connection'));
       expect(footer, contains('r range'));
       expect(footer, isNot(contains('g consoles')));
-      expect(footer, isNot(contains('n new')));
       expect(footer, isNot(contains('b build')));
       expect(footer, isNot(contains('c consumer')));
-      expect(footer, isNot(contains('w workspace')));
     });
 
     test('keeps the workspace card hint at the reference width', () {
@@ -1088,6 +1090,96 @@ void main() {
       expectChip(rows, frame.hitboxes, 22, 'ws:consumer', 'CONSUMER');
       expectChip(rows, frame.hitboxes, 22, 'ws:consoles', 'CONSOLES');
       expectChip(rows, frame.hitboxes, 22, 'ws:more', 'MORE');
+    });
+
+    test('makes the top-right Local and Remote tab labels clickable', () {
+      final MonitorFrame local = frameOf(columns: 132, lines: 40);
+      final MonitorSnapshot base = twoServers();
+      final MonitorFrame remote = frameOf(
+        snapshot: MonitorSnapshot(
+          instances: base.instances,
+          history: base.history,
+          consumerName: 'remote:production',
+          view: MonitorView.remote,
+        ),
+        columns: 132,
+        lines: 40,
+      );
+
+      for (final (MonitorFrame frame, String label) in <(MonitorFrame, String)>[
+        (local, 'TAB REMOTE'),
+        (remote, 'TAB LOCAL'),
+      ]) {
+        final MonitorHitbox hit = frame.hitboxes.singleWhere(
+          (MonitorHitbox item) => item.id == viewSwitchHitId,
+        );
+        final String row = Ansi.strip(frame.rows[hit.row]);
+        expect(row.substring(hit.colStart, hit.colEnd), label);
+        expect(
+          hitTest(frame.hitboxes, row: hit.row, col: hit.colStart),
+          viewSwitchHitId,
+        );
+        expect(
+          hitTest(frame.hitboxes, row: hit.row, col: hit.colEnd - 1),
+          viewSwitchHitId,
+        );
+        expect(
+          hitTest(frame.hitboxes, row: hit.row, col: hit.colEnd),
+          isNot(viewSwitchHitId),
+        );
+      }
+    });
+
+    test('keeps the view tab visible beside an oversized provider name', () {
+      final MonitorSnapshot base = twoServers();
+      final MonitorFrame frame = frameOf(
+        snapshot: MonitorSnapshot(
+          instances: base.instances,
+          history: base.history,
+          consumerName:
+              'remote:${List<String>.filled(12, 'production-panel-').join()}',
+          view: MonitorView.remote,
+        ),
+      );
+      final MonitorHitbox hit = frame.hitboxes.singleWhere(
+        (MonitorHitbox item) => item.id == viewSwitchHitId,
+      );
+
+      expect(
+        Ansi.strip(frame.rows.first).substring(hit.colStart, hit.colEnd),
+        'TAB LOCAL',
+      );
+    });
+
+    test('gives the view tab hover and press feedback without moving it', () {
+      final MonitorTheme color = MonitorTheme.detect(
+        env: <String, String>{'COLORTERM': 'truecolor'},
+        isTty: true,
+      );
+      String header({String? hoveredId, String? pressedId}) =>
+          buildMonitorFrame(
+            snapshot: twoServers(),
+            selectedIndex: 0,
+            frame: 0,
+            columns: 132,
+            lines: 40,
+            theme: color,
+            range: range,
+            now: now,
+            hoveredId: hoveredId,
+            pressedId: pressedId,
+          ).rows.first;
+
+      final String normal = header();
+      final String hovered = header(hoveredId: viewSwitchHitId);
+      final String pressed = header(
+        hoveredId: viewSwitchHitId,
+        pressedId: viewSwitchHitId,
+      );
+      expect(Ansi.strip(hovered), Ansi.strip(normal));
+      expect(Ansi.strip(pressed), Ansi.strip(normal));
+      expect(hovered, contains('${color.bold}${color.accent}TAB REMOTE'));
+      expect(pressed, contains('${color.bold}${color.textStrong}TAB REMOTE'));
     });
 
     test('swaps in the start chip when the selection is stopped', () {
