@@ -384,6 +384,64 @@ void main() {
     expect(startup.variables.single.environmentVariable, 'SERVER_JARFILE');
   });
 
+  test('loads unpaginated Application eggs with variable defaults', () async {
+    final _FakeTransport transport = _FakeTransport(<_Reply>[
+      _Reply(
+        200,
+        jsonEncode(<String, Object?>{
+          'object': 'list',
+          'data': <Object?>[
+            <String, Object?>{
+              'object': 'egg',
+              'attributes': <String, Object?>{
+                'id': 2,
+                'uuid': '00000000-0000-0000-0000-000000000002',
+                'name': 'Paper',
+                'nest': 1,
+                'author': 'support@example.test',
+                'description': 'Minecraft server',
+                'startup': null,
+                'docker_images': <String, Object?>{
+                  'Java 21': 'ghcr.io/pterodactyl/yolks:java_21',
+                },
+                'relationships': <String, Object?>{
+                  'variables': <String, Object?>{
+                    'data': <Object?>[
+                      <String, Object?>{
+                        'object': 'egg_variable',
+                        'attributes': <String, Object?>{
+                          'name': 'Server Jar File',
+                          'env_variable': 'SERVER_JARFILE',
+                          'default_value': 'server.jar',
+                          'rules': 'required|string',
+                          'user_editable': true,
+                          'user_viewable': true,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ],
+        }),
+      ),
+    ]);
+
+    final List<PterodactylEgg> eggs = await _client(
+      transport,
+    ).listAllNestEggs(1);
+
+    expect(eggs.single.name, 'Paper');
+    expect(eggs.single.startup, isNull);
+    expect(eggs.single.variables.single.defaultValue, 'server.jar');
+    expect(eggs.single.variables.single.isRequired, isTrue);
+    expect(
+      transport.requests.single.uri.queryParameters['include'],
+      'variables',
+    );
+  });
+
   test('sends Client lifecycle and editable startup operations', () async {
     final _FakeTransport transport = _FakeTransport(<_Reply>[
       const _Reply(204, ''),

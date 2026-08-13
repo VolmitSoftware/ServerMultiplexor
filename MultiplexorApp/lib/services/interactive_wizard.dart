@@ -49,6 +49,168 @@ enum RemoteBulkAction {
 /// Which live subset of the Remote fleet a bulk operation targets.
 enum RemoteBulkTargetScope { all, selected, running, stopped }
 
+/// Configuration source offered by Remote server creation.
+enum RemoteCreateSource { panelEgg, cloneExisting, done }
+
+const bool remoteCreateFinalConfirmationDefault = false;
+
+List<RemoteCreateSource> remoteCreateSources({
+  required bool hasPanelEggs,
+  required bool hasTemplates,
+}) => <RemoteCreateSource>[
+  if (hasPanelEggs) RemoteCreateSource.panelEgg,
+  if (hasTemplates) RemoteCreateSource.cloneExisting,
+  RemoteCreateSource.done,
+];
+
+List<String> remoteCreateNames({required String pattern, required int count}) {
+  final String normalized = pattern.trim();
+  if (normalized.isEmpty) {
+    throw ArgumentError.value(pattern, 'pattern', 'must not be empty');
+  }
+  if (count < 1 || count > 100) {
+    throw RangeError.range(count, 1, 100, 'count');
+  }
+  return List<String>.unmodifiable(<String>[
+    for (int index = 1; index <= count; index++)
+      normalized.contains('{n}')
+          ? normalized.replaceAll('{n}', '$index').trim()
+          : count == 1
+          ? normalized
+          : '$normalized $index',
+  ]);
+}
+
+int remoteCreateOwnerInitialIndex(
+  List<PterodactylUser> users,
+  int? recommendedOwnerId,
+) {
+  if (recommendedOwnerId == null) return 0;
+  final int index = users.indexWhere(
+    (PterodactylUser user) => user.id == recommendedOwnerId,
+  );
+  return index < 0 ? 0 : index;
+}
+
+List<PterodactylEggVariable> remoteCreatePromptVariables(PterodactylEgg egg) =>
+    List<PterodactylEggVariable>.unmodifiable(
+      egg.variables.where(
+        (PterodactylEggVariable variable) =>
+            variable.userEditable ||
+            (variable.isRequired && variable.defaultValue.trim().isEmpty),
+      ),
+    );
+
+List<PterodactylNode> remoteCreateEligibleNodes(
+  PterodactylCreationCatalog catalog,
+  int serverCount,
+) {
+  if (serverCount < 1) {
+    throw RangeError.range(serverCount, 1, null, 'serverCount');
+  }
+  return List<PterodactylNode>.unmodifiable(
+    catalog.nodes.where(
+      (PterodactylNode node) =>
+          !node.maintenanceMode &&
+          catalog.freeAllocationCount(node.id) >= serverCount,
+    ),
+  );
+}
+
+List<PterodactylEgg> remoteCreateUsableEggs(
+  PterodactylCreationCatalog catalog,
+) => List<PterodactylEgg>.unmodifiable(
+  catalog.eggs.where(
+    (PterodactylEgg egg) =>
+        egg.startup?.trim().isNotEmpty == true && egg.dockerImages.isNotEmpty,
+  ),
+);
+
+String? remoteCreatePartialEggInventoryNote(
+  PterodactylCreationCatalog catalog,
+) {
+  final String? permission = catalog.eggInventoryUnavailablePermission;
+  if (permission == null || catalog.templates.isEmpty) return null;
+  return 'Panel egg creation is unavailable (missing $permission); '
+      'continuing with clone existing.';
+}
+
+bool remoteCreateResultNeedsCredentialRepair(PterodactylBulkResult result) {
+  return result.items.any((PterodactylBulkItemResult item) {
+    final String error = (item.error ?? '').toLowerCase();
+    return !item.succeeded &&
+        (error.contains('http 401') ||
+            error.contains('http 403') ||
+            error.contains('unauthor') ||
+            error.contains('forbidden'));
+  });
+}
+
+bool remoteCreationCatalogErrorNeedsCredentialRepair(Object error) =>
+    error is PterodactylCreationCatalogPermissionException ||
+    (error is PterodactylApiException && error.isUnauthorized);
+
+bool remoteCreationCatalogAccessAvailable(
+  PterodactylVerification verification,
+) => verification.capabilities.contains(PterodactylCapability.configure);
+
+Future<bool> remoteCreateStepOrBack(Future<void> Function() operation) async {
+  try {
+    await operation();
+    return true;
+  } on PromptBackNavigation {
+    return false;
+  }
+}
+
+final class RemoteCreateResultRow {
+  const RemoteCreateResultRow({
+    required this.position,
+    required this.total,
+    required this.item,
+  });
+
+  final int position;
+  final int total;
+  final PterodactylBulkItemResult item;
+}
+
+List<RemoteCreateResultRow> remoteCreateResultRows(
+  PterodactylBulkResult result,
+) => List<RemoteCreateResultRow>.unmodifiable(<RemoteCreateResultRow>[
+  for (int index = 0; index < result.items.length; index++)
+    RemoteCreateResultRow(
+      position: index + 1,
+      total: result.totalCount,
+      item: result.items[index],
+    ),
+]);
+
+final class _RemoteEggChoice {
+  const _RemoteEggChoice({required this.nest, required this.egg});
+
+  final PterodactylNest nest;
+  final PterodactylEgg egg;
+}
+
+final class _RemoteEggPlanSelection {
+  const _RemoteEggPlanSelection({
+    required this.plan,
+    required this.owner,
+    required this.node,
+    required this.nest,
+    required this.egg,
+    required this.imageLabel,
+  });
+
+  final PterodactylEggCreatePlan plan;
+  final PterodactylUser owner;
+  final PterodactylNode node;
+  final PterodactylNest nest;
+  final PterodactylEgg egg;
+  final String imageLabel;
+}
+
 enum _RemoteAccountAction {
   verify,
   switchAccount,
@@ -1877,90 +2039,550 @@ class InteractiveWizard {
     return true;
   }
 
-  Future<void> _remoteCreateMany() async {
+  Future<void> _remoteCreateMany() => _createRemoteServers(many: true);
+
+  Future<void> _createRemoteServers({required bool many}) async {
     final PterodactylProfile profile = _requireRemoteProfile();
     final PterodactylVerification verification =
         await _ensureApplicationCredential(profile);
-    if (!verification.capabilities.contains(PterodactylCapability.create)) {
-      Ui.warn('Remote creation is unavailable for this connection.');
+    if (!remoteCreationCatalogAccessAvailable(verification)) {
+      Ui.warn('Remote creation inventory is unavailable for this connection.');
+      _showRemoteCreationPermissionHelp();
       await Ui.pause();
       return;
     }
-    final List<PterodactylClientServer> allServers = await Ui.spin(
-      'Loading remote templates',
-      () => pterodactyl.listServers(profile.id),
+
+    final PterodactylCreationCatalog? initialCatalog =
+        await _loadRemoteCreationCatalog(profile);
+    if (initialCatalog == null) return;
+    final PterodactylCreationCatalog catalog = initialCatalog;
+    final String? partialEggNote = remoteCreatePartialEggInventoryNote(catalog);
+    if (partialEggNote != null) Ui.note(partialEggNote);
+    final List<PterodactylEgg> usableEggs = remoteCreateUsableEggs(catalog);
+    if (usableEggs.isEmpty && catalog.templates.isEmpty) {
+      Ui.warn(
+        catalog.eggs.isEmpty
+            ? 'The panel has no existing server to clone and no eggs to '
+                  'create from.'
+            : 'The panel has no existing server to clone, and every egg is '
+                  'missing a startup command or Docker image.',
+      );
+      Ui.note(
+        'Add an egg in the Pterodactyl admin panel, or configure a startup '
+        'command and Docker image on an existing egg, then try again.',
+      );
+      await Ui.pause();
+      return;
+    }
+
+    final List<RemoteCreateSource> sources = remoteCreateSources(
+      hasPanelEggs: usableEggs.isNotEmpty,
+      hasTemplates: catalog.templates.isNotEmpty,
     );
-    final List<PterodactylClientServer> templates = allServers
-        .where(
-          (PterodactylClientServer server) =>
-              pterodactyl.canUseAsTemplate(profile.id, server),
-        )
-        .toList(growable: false);
-    if (templates.isEmpty) {
-      Ui.warn('No owned remote server exists to use as a template.');
-      await Ui.pause();
-      return;
+    if (usableEggs.isNotEmpty && catalog.templates.isNotEmpty) {
+      while (true) {
+        final int sourceIndex = await Ui.choose(
+          many ? 'Create many servers from' : 'Create server from',
+          <String>[
+            'Panel egg · works without an existing server',
+            'Clone an existing server configuration',
+            'Back',
+          ],
+        );
+        final RemoteCreateSource source = sources[sourceIndex];
+        if (source == RemoteCreateSource.done) return;
+        final bool completed = await remoteCreateStepOrBack(
+          () => _runRemoteCreateSource(
+            source: source,
+            profile: profile,
+            catalog: catalog,
+            usableEggs: usableEggs,
+            many: many,
+          ),
+        );
+        if (completed) return;
+      }
     }
+    await _runRemoteCreateSource(
+      source: sources.first,
+      profile: profile,
+      catalog: catalog,
+      usableEggs: usableEggs,
+      many: many,
+    );
+  }
+
+  Future<void> _runRemoteCreateSource({
+    required RemoteCreateSource source,
+    required PterodactylProfile profile,
+    required PterodactylCreationCatalog catalog,
+    required List<PterodactylEgg> usableEggs,
+    required bool many,
+  }) async {
+    switch (source) {
+      case RemoteCreateSource.panelEgg:
+        return _createRemoteServersFromEgg(
+          profile: profile,
+          catalog: catalog,
+          usableEggs: usableEggs,
+          many: many,
+        );
+      case RemoteCreateSource.cloneExisting:
+        return _createRemoteServersFromTemplate(
+          profile: profile,
+          catalog: catalog,
+          many: many,
+        );
+      case RemoteCreateSource.done:
+        return;
+    }
+  }
+
+  Future<PterodactylCreationCatalog?> _loadRemoteCreationCatalog(
+    PterodactylProfile profile,
+  ) async {
+    while (true) {
+      try {
+        return await Ui.spin(
+          'Loading panel creation catalog',
+          () => pterodactyl.creationCatalog(
+            profile.id,
+            allowPartialEggInventory: true,
+          ),
+        );
+      } on Object catch (error) {
+        if (!remoteCreationCatalogErrorNeedsCredentialRepair(error)) rethrow;
+        if (error is PterodactylCreationCatalogPermissionException) {
+          Ui.warn(
+            'The Application API key is missing ${error.permission} for the '
+            'panel creation catalog.',
+          );
+        } else {
+          Ui.warn(
+            'The Application API key cannot read the panel creation catalog.',
+          );
+        }
+        _showRemoteCreationPermissionHelp();
+        final bool repaired = await _repairRemoteCreationCatalog(profile);
+        if (!repaired) return null;
+      }
+    }
+  }
+
+  Future<bool> _repairRemoteCreationCatalog(PterodactylProfile profile) async {
+    final bool repair = await Ui.confirm(
+      'Replace the Application API key and retry?',
+      defaultValue: true,
+    );
+    if (!repair) {
+      await Ui.pause();
+      return false;
+    }
+    final PterodactylVerification repaired = await _replaceCredentialAndVerify(
+      profile,
+      PterodactylCredentialRole.application,
+      progressLabel: 'Verifying replacement Application key',
+    );
+    if (remoteCreationCatalogAccessAvailable(repaired)) {
+      return true;
+    }
+    Ui.warn('The replacement Application key still cannot create servers.');
+    _showRemoteCreationPermissionHelp();
+    await Ui.pause();
+    return false;
+  }
+
+  void _showRemoteCreationPermissionHelp() {
+    Ui.note(
+      'Application key permissions needed: Users READ, Nodes READ, '
+      'Allocations READ, Nests READ, Eggs READ, and Servers READ/WRITE.',
+    );
+  }
+
+  Future<void> _createRemoteServersFromTemplate({
+    required PterodactylProfile profile,
+    required PterodactylCreationCatalog catalog,
+    required bool many,
+  }) async {
     final int templateIndex =
         await Ui.choose('Clone remote configuration from', <String>[
-          for (final PterodactylClientServer template in templates)
+          for (final PterodactylApplicationServer template in catalog.templates)
             '${_safeRemoteText(template.name)} (${template.identifier})',
         ]);
-    final PterodactylClientServer template = templates[templateIndex];
-    final String countText = await Ui.input(
-      'How many servers (1-50)',
-      defaultValue: '2',
-      validator: (String value) {
-        final int? count = int.tryParse(value.trim());
-        return count != null && count >= 1 && count <= 50;
-      },
-      validationMessage: 'Enter a whole number from 1 through 50',
+    final PterodactylApplicationServer template =
+        catalog.templates[templateIndex];
+    final List<String> names = await _promptRemoteCreateNames(
+      many: many,
+      defaultPattern: many ? '${template.name} {n}' : '${template.name} Copy',
     );
-    final int count = int.parse(countText.trim());
-    final String pattern = await Ui.input(
-      'Server name pattern (use {n} for the number)',
-      defaultValue: '${template.name} {n}',
-      validator: (String value) => value.trim().isNotEmpty,
-      validationMessage: 'Name pattern cannot be empty',
-    );
-    final List<String> names = <String>[
-      for (int index = 1; index <= count; index++)
-        pattern.contains('{n}')
-            ? pattern.replaceAll('{n}', '$index').trim()
-            : count == 1
-            ? pattern.trim()
-            : '${pattern.trim()} $index',
-    ];
-    Ui.appHeader('CREATE MANY REMOTE SERVERS', <String>[
-      '${names.length} servers',
-      _safeRemoteText(template.name),
-    ]);
-    for (int index = 0; index < names.length; index++) {
-      Ui.keyValue('${index + 1}', _safeRemoteText(names[index]));
-    }
-    if (!await Ui.confirm(
-      'Create all ${names.length} servers?',
+    final bool startOnCompletion = await Ui.confirm(
+      many
+          ? 'Start each server after creation?'
+          : 'Start the server after creation?',
       defaultValue: false,
+    );
+    Ui.clearScreen();
+    Ui.appHeader(
+      many ? 'CREATE MANY REMOTE SERVERS' : 'CREATE REMOTE SERVER',
+      <String>[
+        profile.name,
+        '${names.length} server${names.length == 1 ? '' : 's'}',
+      ],
+    );
+    Ui.keyValue('source', 'Clone ${_safeRemoteText(template.name)}');
+    Ui.keyValue('resources', 'Inherited from template');
+    Ui.keyValue('start', startOnCompletion ? 'after creation' : 'no');
+    _showRemoteCreateNames(names);
+    if (!await Ui.confirm(
+      names.length == 1
+          ? 'Create this remote server?'
+          : 'Create all ${names.length} remote servers?',
+      defaultValue: remoteCreateFinalConfirmationDefault,
+    )) {
+      return;
+    }
+    final PterodactylBulkResult? result = await _runRemoteBulkCreate(
+      profile: profile,
+      progressLabel: 'Creating ${names.length} remote server(s)',
+      operation: () => pterodactyl.bulkCreateFromTemplate(
+        profileId: profile.id,
+        template: template.identifier,
+        names: names,
+        startOnCompletion: startOnCompletion,
+      ),
+    );
+    if (result == null) return;
+    await _finishRemoteCreation(profile, result);
+  }
+
+  Future<void> _createRemoteServersFromEgg({
+    required PterodactylProfile profile,
+    required PterodactylCreationCatalog catalog,
+    required List<PterodactylEgg> usableEggs,
+    required bool many,
+  }) async {
+    final _RemoteEggChoice? choice = await _chooseRemoteEgg(
+      catalog,
+      usableEggs,
+    );
+    if (choice == null) return;
+    final List<String> names = await _promptRemoteCreateNames(
+      many: many,
+      defaultPattern: many
+          ? '${choice.egg.name} {n}'
+          : '${choice.egg.name} Server',
+    );
+    final _RemoteEggPlanSelection? selection = await _buildRemoteEggCreatePlan(
+      catalog: catalog,
+      choice: choice,
+      serverCount: names.length,
+    );
+    if (selection == null) return;
+
+    Ui.clearScreen();
+    Ui.appHeader(
+      many ? 'CREATE MANY REMOTE SERVERS' : 'CREATE REMOTE SERVER',
+      <String>[
+        profile.name,
+        '${names.length} server${names.length == 1 ? '' : 's'}',
+      ],
+    );
+    Ui.keyValue(
+      'source',
+      '${_safeRemoteText(selection.nest.name)} / '
+          '${_safeRemoteText(selection.egg.name)}',
+    );
+    Ui.keyValue('owner', _safeRemoteText(selection.owner.username));
+    Ui.keyValue(
+      'node',
+      '${_safeRemoteText(selection.node.name)} · '
+          '${catalog.freeAllocationCount(selection.node.id)} free allocations'
+          '${selection.node.maintenanceMode ? ' · MAINTENANCE' : ''}',
+    );
+    Ui.keyValue('image', _safeRemoteText(selection.imageLabel));
+    Ui.keyValue('memory', '${selection.plan.memoryMiB} MiB');
+    Ui.keyValue(
+      'disk',
+      selection.plan.diskMiB == 0
+          ? 'unlimited'
+          : '${selection.plan.diskMiB} MiB',
+    );
+    Ui.keyValue(
+      'CPU',
+      selection.plan.cpuPercent == 0
+          ? 'unlimited'
+          : '${selection.plan.cpuPercent}%',
+    );
+    Ui.keyValue('variables', '${selection.plan.environment.length} customized');
+    Ui.keyValue(
+      'start',
+      selection.plan.startOnCompletion ? 'after creation' : 'no',
+    );
+    _showRemoteCreateNames(names);
+    if (!await Ui.confirm(
+      names.length == 1
+          ? 'Create this remote server?'
+          : 'Create all ${names.length} remote servers?',
+      defaultValue: remoteCreateFinalConfirmationDefault,
     )) {
       return;
     }
 
-    for (final String name in names) {
-      Ui.keyValue('pending', _safeRemoteText(name));
-    }
-    final PterodactylBulkResult result = await Ui.spin(
-      'Creating ${names.length} remote servers',
-      () => pterodactyl.bulkCreateFromTemplate(
+    final PterodactylBulkResult? result = await _runRemoteBulkCreate(
+      profile: profile,
+      progressLabel: 'Creating ${names.length} remote server(s)',
+      operation: () => pterodactyl.bulkCreateFromEgg(
         profileId: profile.id,
-        template: template.identifier,
         names: names,
+        plan: selection.plan,
       ),
     );
+    if (result == null) return;
+    await _finishRemoteCreation(profile, result);
+  }
+
+  Future<List<String>> _promptRemoteCreateNames({
+    required bool many,
+    required String defaultPattern,
+  }) async {
+    int count = 1;
+    if (many) {
+      final String countText = await Ui.input(
+        'How many servers (1-50)',
+        defaultValue: '2',
+        validator: (String value) {
+          final int? parsed = int.tryParse(value.trim());
+          return parsed != null && parsed >= 1 && parsed <= 50;
+        },
+        validationMessage: 'Enter a whole number from 1 through 50',
+      );
+      count = int.parse(countText.trim());
+    }
+    final String pattern = await Ui.input(
+      many ? 'Server name pattern (use {n} for the number)' : 'Server name',
+      defaultValue: defaultPattern,
+      validator: (String value) => value.trim().isNotEmpty,
+      validationMessage: 'Server name cannot be empty',
+    );
+    return remoteCreateNames(pattern: pattern, count: count);
+  }
+
+  Future<_RemoteEggChoice?> _chooseRemoteEgg(
+    PterodactylCreationCatalog catalog,
+    List<PterodactylEgg> usableEggs,
+  ) async {
+    final List<PterodactylNest> nests = catalog.nests
+        .where(
+          (PterodactylNest nest) =>
+              usableEggs.any((PterodactylEgg egg) => egg.nestId == nest.id),
+        )
+        .toList(growable: false);
+    if (nests.isEmpty) {
+      Ui.warn('No readable nest contains a creation-ready egg.');
+      _showRemoteCreationPermissionHelp();
+      await Ui.pause();
+      return null;
+    }
+    final int nestIndex = await Ui.choose('Panel nest', <String>[
+      for (final PterodactylNest nest in nests)
+        '${_safeRemoteText(nest.name)} · '
+            '${usableEggs.where((PterodactylEgg egg) => egg.nestId == nest.id).length} eggs',
+    ]);
+    final PterodactylNest nest = nests[nestIndex];
+    final List<PterodactylEgg> eggs = usableEggs
+        .where((PterodactylEgg egg) => egg.nestId == nest.id)
+        .toList(growable: false);
+    final int eggIndex = await Ui.choose('Panel egg', <String>[
+      for (final PterodactylEgg egg in eggs)
+        '${_safeRemoteText(egg.name)} · ${egg.dockerImages.length} image(s)',
+    ]);
+    return _RemoteEggChoice(nest: nest, egg: eggs[eggIndex]);
+  }
+
+  Future<_RemoteEggPlanSelection?> _buildRemoteEggCreatePlan({
+    required PterodactylCreationCatalog catalog,
+    required _RemoteEggChoice choice,
+    required int serverCount,
+  }) async {
+    if (catalog.users.isEmpty) {
+      Ui.warn('No panel user is available to own the new server(s).');
+      Ui.note(
+        'Create a panel user or repair Users READ on the Application key.',
+      );
+      _showRemoteCreationPermissionHelp();
+      await Ui.pause();
+      return null;
+    }
+    final int ownerIndex = await Ui.choose(
+      'Server owner',
+      <String>[
+        for (final PterodactylUser user in catalog.users)
+          '${_safeRemoteText(user.username)} · '
+              '${_safeRemoteText('${user.firstName} ${user.lastName}'.trim())}'
+              '${user.id == catalog.recommendedOwnerId ? ' · connected account' : ''}',
+      ],
+      initialIndex: remoteCreateOwnerInitialIndex(
+        catalog.users,
+        catalog.recommendedOwnerId,
+      ),
+    );
+    final PterodactylUser owner = catalog.users[ownerIndex];
+    final List<PterodactylNode> nodes = remoteCreateEligibleNodes(
+      catalog,
+      serverCount,
+    );
+    if (nodes.isEmpty) {
+      Ui.warn(
+        'No node has $serverCount free allocation${serverCount == 1 ? '' : 's'}.',
+      );
+      Ui.note(
+        'Add free allocations on a node, or repair Nodes and Allocations READ '
+        'on the Application key.',
+      );
+      _showRemoteCreationPermissionHelp();
+      await Ui.pause();
+      return null;
+    }
+    final int nodeIndex = await Ui.choose('Deployment node', <String>[
+      for (final PterodactylNode node in nodes)
+        '${_safeRemoteText(node.name)} · '
+            '${catalog.freeAllocationCount(node.id)} free allocations'
+            '${node.maintenanceMode ? ' · MAINTENANCE' : ''}',
+    ]);
+    final PterodactylNode node = nodes[nodeIndex];
+
+    final List<MapEntry<String, String>> images = choice
+        .egg
+        .dockerImages
+        .entries
+        .toList(growable: false);
+    final int imageIndex = await Ui.choose('Docker image', <String>[
+      for (final MapEntry<String, String> image in images)
+        '${_safeRemoteText(image.key)} → ${_safeRemoteText(image.value)}',
+    ]);
+    final MapEntry<String, String> image = images[imageIndex];
+    final Map<String, String> environment = <String, String>{};
+    for (final PterodactylEggVariable variable in remoteCreatePromptVariables(
+      choice.egg,
+    )) {
+      final bool valueRequired =
+          variable.isRequired && variable.defaultValue.trim().isEmpty;
+      final String value = await Ui.input(
+        '${variable.name} (${variable.environmentVariable})'
+        '${valueRequired ? ' · required' : ''}',
+        defaultValue: variable.defaultValue.isEmpty
+            ? null
+            : variable.defaultValue,
+        validator: valueRequired
+            ? (String input) => input.trim().isNotEmpty
+            : null,
+        validationMessage: '${variable.environmentVariable} is required',
+      );
+      environment[variable.environmentVariable] = value;
+    }
+    final int memoryMiB = await _promptRemoteResourceLimit(
+      'Memory limit MiB (0 = unlimited)',
+      4096,
+    );
+    final int diskMiB = await _promptRemoteResourceLimit(
+      'Disk limit MiB (0 = unlimited)',
+      0,
+    );
+    final int cpuPercent = await _promptRemoteResourceLimit(
+      'CPU limit percent (0 = unlimited)',
+      0,
+    );
+    final bool startOnCompletion = await Ui.confirm(
+      serverCount == 1
+          ? 'Start the server after creation?'
+          : 'Start each server after creation?',
+      defaultValue: false,
+    );
+    final String startup = choice.egg.startup!;
+    return _RemoteEggPlanSelection(
+      plan: PterodactylEggCreatePlan(
+        ownerId: owner.id,
+        nodeId: node.id,
+        eggId: choice.egg.id,
+        dockerImage: image.value,
+        startup: startup,
+        environment: environment,
+        memoryMiB: memoryMiB,
+        diskMiB: diskMiB,
+        cpuPercent: cpuPercent,
+        startOnCompletion: startOnCompletion,
+      ),
+      owner: owner,
+      node: node,
+      nest: choice.nest,
+      egg: choice.egg,
+      imageLabel: image.key,
+    );
+  }
+
+  Future<int> _promptRemoteResourceLimit(
+    String prompt,
+    int defaultValue,
+  ) async {
+    final String value = await Ui.input(
+      prompt,
+      defaultValue: '$defaultValue',
+      validator: (String input) {
+        final int? parsed = int.tryParse(input.trim());
+        return parsed != null && parsed >= 0;
+      },
+      validationMessage: 'Enter zero or a positive whole number',
+    );
+    return int.parse(value.trim());
+  }
+
+  void _showRemoteCreateNames(List<String> names) {
+    for (int index = 0; index < names.length; index++) {
+      Ui.keyValue('name ${index + 1}', _safeRemoteText(names[index]));
+    }
+  }
+
+  Future<PterodactylBulkResult?> _runRemoteBulkCreate({
+    required PterodactylProfile profile,
+    required String progressLabel,
+    required Future<PterodactylBulkResult> Function() operation,
+  }) async {
+    try {
+      return await Ui.spin(progressLabel, operation);
+    } on PterodactylApiException catch (error) {
+      if (!error.isUnauthorized) rethrow;
+      Ui.warn('The Application API key cannot complete server creation.');
+      _showRemoteCreationPermissionHelp();
+      final bool repair = await Ui.confirm(
+        'Replace the Application API key and retry?',
+        defaultValue: true,
+      );
+      if (!repair) return null;
+      final PterodactylVerification repaired =
+          await _replaceCredentialAndVerify(
+            profile,
+            PterodactylCredentialRole.application,
+            progressLabel: 'Verifying replacement Application key',
+          );
+      if (!remoteCreationCatalogAccessAvailable(repaired)) {
+        Ui.warn('The replacement Application key still cannot create servers.');
+        _showRemoteCreationPermissionHelp();
+        await Ui.pause();
+        return null;
+      }
+      return Ui.spin('Retrying: $progressLabel', operation);
+    }
+  }
+
+  Future<void> _finishRemoteCreation(
+    PterodactylProfile profile,
+    PterodactylBulkResult result,
+  ) async {
     Ui.blank();
-    for (int index = 0; index < result.items.length; index++) {
-      final PterodactylBulkItemResult item = result.items[index];
+    for (final RemoteCreateResultRow row in remoteCreateResultRows(result)) {
+      final PterodactylBulkItemResult item = row.item;
       final String label =
-          '${index + 1}/${result.totalCount} ${_safeRemoteText(item.name)}';
+          '${row.position}/${row.total} ${_safeRemoteText(item.name)}';
       if (item.succeeded) {
         Ui.success(
           '$label: created ${_safeRemoteText(item.identifier ?? item.target)}',
@@ -1971,12 +2593,28 @@ class InteractiveWizard {
     }
     Ui.blank();
     if (result.isSuccess) {
-      Ui.success('Created all ${result.succeededCount} remote servers');
+      Ui.success('Created all ${result.succeededCount} remote server(s)');
     } else {
       Ui.warn(
-        'Create many: ${result.succeededCount} succeeded, '
+        'Creation: ${result.succeededCount} succeeded, '
         '${result.failedCount} failed',
       );
+    }
+    if (remoteCreateResultNeedsCredentialRepair(result)) {
+      Ui.warn('One or more requests were rejected by the Application API key.');
+      _showRemoteCreationPermissionHelp();
+      final bool repair = await Ui.confirm(
+        'Replace the Application API key for the next attempt?',
+        defaultValue: true,
+      );
+      if (repair) {
+        await _replaceCredentialAndVerify(
+          profile,
+          PterodactylCredentialRole.application,
+          progressLabel: 'Verifying replacement Application key',
+        );
+        Ui.success('Application API key replaced. Retry only failed names.');
+      }
     }
     await Ui.pause();
   }
@@ -2226,7 +2864,10 @@ class InteractiveWizard {
         Ui.info(
           'Create an Application API key at ${profile.origin}/admin/api/new',
         );
-        Ui.note('Grant Servers read/write, Allocations read, and Nodes read.');
+        Ui.note(
+          'Grant Users, Nodes, Allocations, Nests, and Eggs read plus Servers '
+          'read/write.',
+        );
     }
     final PterodactylCredential credential = await _promptCredential(
       role == PterodactylCredentialRole.client
@@ -2284,7 +2925,7 @@ class InteractiveWizard {
     PterodactylVerification verification = await _verifyRemoteWithRepair(
       profile,
     );
-    if (verification.capabilities.contains(PterodactylCapability.create)) {
+    if (remoteCreationCatalogAccessAvailable(verification)) {
       return verification;
     }
     if (!await pterodactyl.hasApplicationCredential(profile)) {
@@ -2294,8 +2935,8 @@ class InteractiveWizard {
       );
     }
     verification = await _verifyRemoteWithRepair(profile);
-    if (!verification.capabilities.contains(PterodactylCapability.create)) {
-      Ui.warn('The stored Application key cannot create servers.');
+    if (!remoteCreationCatalogAccessAvailable(verification)) {
+      Ui.warn('The stored Application key cannot read creation inventory.');
       final bool replace = await Ui.confirm(
         'Replace the Application API key now?',
         defaultValue: true,
@@ -2334,107 +2975,7 @@ class InteractiveWizard {
     }
   }
 
-  Future<void> _createRemoteInstance() async {
-    final PterodactylProfile profile = _requireRemoteProfile();
-    final PterodactylVerification verification =
-        await _ensureApplicationCredential(profile);
-    if (!verification.capabilities.contains(PterodactylCapability.create)) {
-      Ui.warn('Remote creation is unavailable for this connection.');
-      await Ui.pause();
-      return;
-    }
-    final List<PterodactylClientServer> allServers = await Ui.spin(
-      'Loading remote templates',
-      () => pterodactyl.listServers(profile.id),
-    );
-    final List<PterodactylClientServer> servers = allServers
-        .where(
-          (PterodactylClientServer server) =>
-              pterodactyl.canUseAsTemplate(profile.id, server),
-        )
-        .toList(growable: false);
-    if (servers.isEmpty) {
-      Ui.warn('No owned remote server exists to use as a template.');
-      await Ui.pause();
-      return;
-    }
-    final String selected =
-        await Ui.pick('Clone remote configuration from', <String>[
-          for (final PterodactylClientServer server in servers)
-            '${_safeRemoteText(server.name)} (${server.identifier})',
-        ]);
-    final PterodactylClientServer template = servers.firstWhere(
-      (PterodactylClientServer server) =>
-          selected.endsWith('(${server.identifier})'),
-    );
-    final String name = await Ui.input(
-      'New remote server name',
-      validator: (String value) => value.trim().isNotEmpty,
-      validationMessage: 'Name cannot be empty',
-    );
-    final bool confirmed = await Ui.confirm(
-      'Create $name from ${_safeRemoteText(template.name)} using the next free allocation(s)?',
-      defaultValue: false,
-    );
-    if (!confirmed) {
-      return;
-    }
-    PterodactylApplicationServer created;
-    try {
-      created = await _submitRemoteCreate(
-        profile: profile,
-        template: template,
-        name: name,
-        progressLabel: 'Creating remote server',
-      );
-    } on PterodactylApiException catch (error) {
-      if (!error.isUnauthorized) rethrow;
-      Ui.warn(
-        'The Application key can read creation data but cannot write servers.',
-      );
-      final bool replace = await Ui.confirm(
-        'Replace the Application API key and retry?',
-        defaultValue: true,
-      );
-      if (!replace) rethrow;
-      final PterodactylVerification repaired =
-          await _replaceCredentialAndVerify(
-            profile,
-            PterodactylCredentialRole.application,
-            progressLabel: 'Verifying replacement Application key',
-          );
-      if (!repaired.capabilities.contains(PterodactylCapability.create)) {
-        throw StateError(
-          'The replacement key cannot read the nodes and allocations needed '
-          'for remote creation.',
-        );
-      }
-      created = await _submitRemoteCreate(
-        profile: profile,
-        template: template,
-        name: name,
-        progressLabel: 'Retrying remote creation',
-      );
-    }
-    Ui.success(
-      'Created ${_safeRemoteText(created.name)} (${created.identifier})',
-    );
-    await Ui.pause();
-  }
-
-  Future<PterodactylApplicationServer> _submitRemoteCreate({
-    required PterodactylProfile profile,
-    required PterodactylClientServer template,
-    required String name,
-    required String progressLabel,
-  }) => Ui.spin(
-    progressLabel,
-    () => pterodactyl.createFromTemplate(
-      profileId: profile.id,
-      template: template.identifier,
-      name: name,
-    ),
-  );
+  Future<void> _createRemoteInstance() => _createRemoteServers(many: false);
 
   PterodactylProfile _requireRemoteProfile() {
     final PterodactylProfile? profile = _selectedRemoteProfile();

@@ -52,3 +52,16 @@ final class PterodactylApiException extends PterodactylException {
 final class PterodactylProtocolException extends PterodactylException {
   const PterodactylProtocolException(super.message);
 }
+
+/// An Application key cannot read one resource required to build the
+/// zero-server creation catalog.
+final class PterodactylCreationCatalogPermissionException
+    extends PterodactylException {
+  const PterodactylCreationCatalogPermissionException({
+    required this.permission,
+  }) : super(
+         'Creation catalog requires Application API $permission permission.',
+       );
+
+  final String permission;
+}

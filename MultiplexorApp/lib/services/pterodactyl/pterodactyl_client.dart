@@ -117,7 +117,10 @@ enum PterodactylClientServerScope {
   accessible,
   adminAll;
 
-  String? get queryValue => this == adminAll ? 'admin-all' : null;
+  Map<String, String> get query => switch (this) {
+    accessible => const <String, String>{},
+    adminAll => const <String, String>{'type': 'admin-all'},
+  };
 }
 
 final class PterodactylClient {
@@ -195,9 +198,10 @@ final class PterodactylClient {
     PterodactylClientServerScope scope =
         PterodactylClientServerScope.accessible,
   }) async {
-    final Map<String, String> query = _pageQuery(page, perPage);
-    final String? type = scope.queryValue;
-    if (type != null) query['type'] = type;
+    final Map<String, String> query = <String, String>{
+      ..._pageQuery(page, perPage),
+      ...scope.query,
+    };
     return _getPage<PterodactylClientServer>(
       'api/client',
       key: _requireClientKey(),
@@ -560,9 +564,18 @@ final class PterodactylClient {
   }) => _getPage<PterodactylEgg>(
     'api/application/nests/${_positiveId(nestId)}/eggs',
     key: _requireApplicationKey(),
-    query: _pageQuery(page, perPage),
+    query: <String, String>{
+      ..._pageQuery(page, perPage),
+      'include': 'variables',
+    },
     parser: PterodactylEgg.fromJson,
+    paginationOptional: true,
   );
+
+  Future<List<PterodactylEgg>> listAllNestEggs(int nestId) =>
+      _collectPages<PterodactylEgg>(
+        (int page) => listNestEggs(nestId, page: page),
+      );
 
   void close() {
     if (_ownsTransport) _transport.close();

@@ -28,37 +28,6 @@ void main() {
     expect(requestsPerMinute, lessThanOrEqualTo(100));
   });
 
-  test('shared servers are not offered as creation templates', () {
-    final Directory temporary = Directory.systemTemp.createTempSync(
-      'multiplexor-pterodactyl-service-',
-    );
-    addTearDown(() => temporary.deleteSync(recursive: true));
-    final PterodactylProfile profile = PterodactylProfile(
-      id: 'remote',
-      name: 'Remote',
-      panelUri: Uri.parse('https://panel.example.test'),
-    );
-    final PterodactylProfileStore profiles = PterodactylProfileStore(
-      temporary.path,
-    )..save(profile);
-    final PterodactylService service = PterodactylService(
-      profileStore: profiles,
-      credentialStore: PterodactylCredentialStore(
-        temporary.path,
-        environment: const <String, String>{},
-      ),
-    );
-
-    expect(
-      service.canUseAsTemplate(profile.id, _server(isOwner: false)),
-      isFalse,
-    );
-    expect(
-      service.canUseAsTemplate(profile.id, _server(isOwner: true)),
-      isTrue,
-    );
-  });
-
   test('bulk confirmation token is exact, normalized, and stable', () {
     expect(
       PterodactylService.bulkConfirmationToken(
@@ -319,12 +288,10 @@ void main() {
   test('bulk create reserves unique allocations before requests', () async {
     final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
       _ServiceTransport(<_ServiceReply>[
-        _ServiceReply(200, _serverListResponse(isOwner: true)),
-        _ServiceReply(200, _serverListResponse(empty: true)),
-      ]),
-      _ServiceTransport(<_ServiceReply>[
         _ServiceReply(200, _applicationServerListResponse(empty: true)),
-        _ServiceReply(200, _applicationServerResponse()),
+        _ServiceReply(200, _applicationServerListResponse(empty: false)),
+        _ServiceReply(200, _userListResponse()),
+        _ServiceReply(200, _nodeListResponse(diskMiB: 100000)),
         _ServiceReply(200, _allocationListResponse(4)),
         _ServiceReply(201, _applicationServerResponse(name: 'Clone One')),
         _ServiceReply(201, _applicationServerResponse(name: 'Clone Two')),
@@ -337,10 +304,21 @@ void main() {
           profileId: fixture.profile.id,
           template: 'server01',
           names: <String>['Clone One', 'Clone Two'],
+          ownerId: 5,
           concurrency: 2,
         );
 
     expect(result.isSuccess, isTrue);
+    expect(fixture.clientRoles, <bool>[false]);
+    expect(
+      fixture.transports.single.requests
+          .where(
+            (PterodactylTransportRequest request) =>
+                request.uri.path == '/api/client',
+          )
+          .toList(),
+      isEmpty,
+    );
     final List<Map<String, Object?>> payloads = fixture.transports.last.requests
         .where(
           (PterodactylTransportRequest request) =>
@@ -376,12 +354,10 @@ void main() {
     () async {
       final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
         _ServiceTransport(<_ServiceReply>[
-          _ServiceReply(200, _serverListResponse(isOwner: true)),
-          _ServiceReply(200, _serverListResponse(empty: true)),
-        ]),
-        _ServiceTransport(<_ServiceReply>[
           _ServiceReply(200, _applicationServerListResponse(empty: true)),
-          _ServiceReply(200, _applicationServerResponse()),
+          _ServiceReply(200, _applicationServerListResponse(empty: false)),
+          _ServiceReply(200, _userListResponse()),
+          _ServiceReply(200, _nodeListResponse(diskMiB: 100000)),
           _ServiceReply(200, _allocationListResponse(1)),
         ]),
       ]);
@@ -392,6 +368,7 @@ void main() {
           profileId: fixture.profile.id,
           template: 'server01',
           names: <String>['One', 'Two'],
+          ownerId: 5,
         ),
         throwsStateError,
       );
@@ -405,6 +382,720 @@ void main() {
       );
     },
   );
+
+  test(
+    'template create validates names and node viability before POST',
+    () async {
+      final _ServiceTransport longNameTransport = _ServiceTransport(
+        const <_ServiceReply>[],
+      );
+      final _ServiceFixture longNameFixture = _serviceFixture(
+        <_ServiceTransport>[longNameTransport],
+      );
+      addTearDown(longNameFixture.close);
+      await expectLater(
+        longNameFixture.service.bulkCreateFromTemplate(
+          profileId: longNameFixture.profile.id,
+          template: 'server01',
+          names: <String>['valid', 'x' * 192],
+          ownerId: 5,
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        longNameFixture.service.createFromTemplate(
+          profileId: longNameFixture.profile.id,
+          template: 'server01',
+          name: 'x' * 192,
+          ownerId: 5,
+        ),
+        throwsArgumentError,
+      );
+      expect(longNameTransport.requests, isEmpty);
+
+      final List<({String label, String nodeResponse, int? memory, int? disk})>
+      cases = <({String label, String nodeResponse, int? memory, int? disk})>[
+        (
+          label: 'missing node',
+          nodeResponse: _nodeListResponse(nodeId: 4, diskMiB: 100000),
+          memory: null,
+          disk: null,
+        ),
+        (
+          label: 'maintenance',
+          nodeResponse: _nodeListResponse(
+            maintenanceMode: true,
+            diskMiB: 100000,
+          ),
+          memory: null,
+          disk: null,
+        ),
+        (
+          label: 'aggregate capacity',
+          nodeResponse: _nodeListResponse(
+            memoryMiB: 4096,
+            allocatedMemoryMiB: 2048,
+            diskMiB: 100000,
+          ),
+          memory: null,
+          disk: null,
+        ),
+        (
+          label: 'already over capacity at zero request',
+          nodeResponse: _nodeListResponse(
+            memoryMiB: 4096,
+            allocatedMemoryMiB: 4097,
+            diskMiB: 100000,
+          ),
+          memory: 0,
+          disk: 0,
+        ),
+      ];
+
+      for (final ({String label, String nodeResponse, int? memory, int? disk})
+          item
+          in cases) {
+        final _ServiceTransport transport = _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _applicationServerListResponse(empty: false)),
+          _ServiceReply(200, _userListResponse()),
+          _ServiceReply(200, item.nodeResponse),
+        ]);
+        final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+          transport,
+        ]);
+        addTearDown(fixture.close);
+        await expectLater(
+          fixture.service.bulkCreateFromTemplate(
+            profileId: fixture.profile.id,
+            template: 'server01',
+            names: const <String>['One', 'Two'],
+            memoryMiB: item.memory,
+            diskMiB: item.disk,
+            ownerId: 5,
+          ),
+          throwsStateError,
+          reason: item.label,
+        );
+        expect(
+          transport.requests.where(
+            (PterodactylTransportRequest request) => request.method == 'POST',
+          ),
+          isEmpty,
+          reason: item.label,
+        );
+      }
+    },
+  );
+
+  test('template capacity treats Panel overallocate -1 as unlimited', () async {
+    final _ServiceTransport transport = _ServiceTransport(<_ServiceReply>[
+      _ServiceReply(200, _applicationServerListResponse(empty: true)),
+      _ServiceReply(200, _applicationServerListResponse(empty: false)),
+      _ServiceReply(200, _userListResponse()),
+      _ServiceReply(
+        200,
+        _nodeListResponse(
+          memoryMiB: 1,
+          allocatedMemoryMiB: 999999,
+          memoryOverallocatePercent: -1,
+          diskMiB: 1,
+          allocatedDiskMiB: 999999,
+          diskOverallocatePercent: -1,
+        ),
+      ),
+      _ServiceReply(200, _allocationListResponse(2)),
+      _ServiceReply(201, _applicationServerResponse(name: 'Unlimited')),
+    ]);
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      transport,
+    ]);
+    addTearDown(fixture.close);
+
+    final PterodactylBulkResult result = await fixture.service
+        .bulkCreateFromTemplate(
+          profileId: fixture.profile.id,
+          template: 'server01',
+          names: const <String>['Unlimited'],
+          memoryMiB: 999999,
+          diskMiB: 999999,
+          ownerId: 5,
+        );
+
+    expect(result.isSuccess, isTrue);
+    expect(
+      transport.requests.where(
+        (PterodactylTransportRequest request) => request.method == 'POST',
+      ),
+      hasLength(1),
+    );
+  });
+
+  test(
+    'creation catalog bootstraps an empty Panel and recommends Client owner',
+    () async {
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _accountResponse('panel-user')),
+        ]),
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _userListResponse()),
+          _ServiceReply(200, _nodeListResponse()),
+          _ServiceReply(200, _nestListResponse()),
+          _ServiceReply(200, _eggListResponse()),
+          _ServiceReply(200, _allocationListResponse(2)),
+        ]),
+      ]);
+      addTearDown(fixture.close);
+
+      final PterodactylCreationCatalog catalog = await fixture.service
+          .creationCatalog(fixture.profile.id);
+
+      expect(catalog.templates, isEmpty);
+      expect(catalog.users.single.username, 'panel-user');
+      expect(catalog.recommendedOwnerId, 5);
+      expect(catalog.nodes.single.name, 'Node One');
+      expect(catalog.nests.single.name, 'Minecraft');
+      expect(catalog.eggs.single.variables, hasLength(2));
+      expect(catalog.freeAllocationCount(3), 2);
+      expect(
+        fixture.transports.expand(
+          (_ServiceTransport transport) => transport.requests,
+        ),
+        isNot(
+          contains(
+            predicate<PterodactylTransportRequest>(
+              (PterodactylTransportRequest request) => request.method == 'POST',
+            ),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'creation catalog identifies the missing Application permission',
+    () async {
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _accountResponse('panel-user')),
+        ]),
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          const _ServiceReply(403, '{"errors":[{"code":"Forbidden"}]}'),
+        ]),
+      ]);
+      addTearDown(fixture.close);
+
+      await expectLater(
+        fixture.service.creationCatalog(fixture.profile.id),
+        throwsA(
+          isA<PterodactylCreationCatalogPermissionException>().having(
+            (PterodactylCreationCatalogPermissionException error) =>
+                error.permission,
+            'permission',
+            'Users READ',
+          ),
+        ),
+      );
+      expect(
+        fixture.transports
+            .expand((_ServiceTransport transport) => transport.requests)
+            .where(
+              (PterodactylTransportRequest request) => request.method == 'POST',
+            ),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'partial catalog preserves cloning when nest ACL is unavailable',
+    () async {
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _accountResponse('panel-user')),
+        ]),
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _applicationServerListResponse(empty: false)),
+          _ServiceReply(200, _userListResponse()),
+          _ServiceReply(200, _nodeListResponse(diskMiB: 100000)),
+          const _ServiceReply(403, '{"errors":[{"code":"Forbidden"}]}'),
+          _ServiceReply(200, _allocationListResponse(2)),
+        ]),
+      ]);
+      addTearDown(fixture.close);
+
+      final PterodactylCreationCatalog catalog = await fixture.service
+          .creationCatalog(fixture.profile.id, allowPartialEggInventory: true);
+
+      expect(catalog.templates, hasLength(1));
+      expect(catalog.users, hasLength(1));
+      expect(catalog.nodes, hasLength(1));
+      expect(catalog.nests, isEmpty);
+      expect(catalog.eggs, isEmpty);
+      expect(catalog.freeAllocationCount(3), 2);
+      expect(catalog.eggInventoryUnavailablePermission, 'Nests READ');
+    },
+  );
+
+  test('partial catalog clears nests when egg ACL is unavailable', () async {
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      _ServiceTransport(<_ServiceReply>[
+        _ServiceReply(200, _accountResponse('panel-user')),
+      ]),
+      _ServiceTransport(<_ServiceReply>[
+        _ServiceReply(200, _applicationServerListResponse(empty: true)),
+        _ServiceReply(200, _applicationServerListResponse(empty: false)),
+        _ServiceReply(200, _userListResponse()),
+        _ServiceReply(200, _nodeListResponse(diskMiB: 100000)),
+        _ServiceReply(200, _nestListResponse()),
+        const _ServiceReply(403, '{"errors":[{"code":"Forbidden"}]}'),
+        _ServiceReply(200, _allocationListResponse(2)),
+      ]),
+    ]);
+    addTearDown(fixture.close);
+
+    final PterodactylCreationCatalog catalog = await fixture.service
+        .creationCatalog(fixture.profile.id, allowPartialEggInventory: true);
+
+    expect(catalog.templates, hasLength(1));
+    expect(catalog.nests, isEmpty);
+    expect(catalog.eggs, isEmpty);
+    expect(catalog.eggInventoryUnavailablePermission, 'Eggs READ');
+  });
+
+  test(
+    'strict and empty-template catalogs still require egg inventory',
+    () async {
+      Future<void> expectDenied({
+        required bool hasTemplate,
+        required bool allowPartial,
+      }) async {
+        final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+          _ServiceTransport(<_ServiceReply>[
+            _ServiceReply(200, _accountResponse('panel-user')),
+          ]),
+          _ServiceTransport(<_ServiceReply>[
+            _ServiceReply(200, _applicationServerListResponse(empty: true)),
+            _ServiceReply(
+              200,
+              _applicationServerListResponse(empty: !hasTemplate),
+            ),
+            _ServiceReply(200, _userListResponse()),
+            _ServiceReply(200, _nodeListResponse()),
+            const _ServiceReply(403, '{"errors":[{"code":"Forbidden"}]}'),
+          ]),
+        ]);
+        addTearDown(fixture.close);
+
+        await expectLater(
+          fixture.service.creationCatalog(
+            fixture.profile.id,
+            allowPartialEggInventory: allowPartial,
+          ),
+          throwsA(
+            isA<PterodactylCreationCatalogPermissionException>().having(
+              (PterodactylCreationCatalogPermissionException error) =>
+                  error.permission,
+              'permission',
+              'Nests READ',
+            ),
+          ),
+        );
+      }
+
+      await expectDenied(hasTemplate: true, allowPartial: false);
+      await expectDenied(hasTemplate: false, allowPartial: true);
+    },
+  );
+
+  test('creation catalog types a Servers READ probe failure', () async {
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      _ServiceTransport(<_ServiceReply>[
+        _ServiceReply(200, _accountResponse('panel-user')),
+      ]),
+      _ServiceTransport(<_ServiceReply>[
+        const _ServiceReply(403, '{"errors":[{"code":"Forbidden"}]}'),
+      ]),
+      _ServiceTransport(const <_ServiceReply>[]),
+    ]);
+    addTearDown(fixture.close);
+
+    await expectLater(
+      fixture.service.creationCatalog(fixture.profile.id),
+      throwsA(
+        isA<PterodactylCreationCatalogPermissionException>().having(
+          (PterodactylCreationCatalogPermissionException error) =>
+              error.permission,
+          'permission',
+          'Servers READ',
+        ),
+      ),
+    );
+    expect(
+      fixture.transports
+          .expand((_ServiceTransport transport) => transport.requests)
+          .where(
+            (PterodactylTransportRequest request) => request.method == 'POST',
+          ),
+      isEmpty,
+    );
+  });
+
+  test(
+    'verification advertises create only after full catalog ACL probes',
+    () async {
+      final _ServiceFixture ready = _serviceFixture(<_ServiceTransport>[
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _serverListResponse(empty: true)),
+          _ServiceReply(200, _serverListResponse(empty: true)),
+        ]),
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _nodeListResponse()),
+          _ServiceReply(200, _userListResponse()),
+          _ServiceReply(200, _allocationListResponse(1)),
+          _ServiceReply(200, _nestListResponse()),
+          _ServiceReply(200, _eggListResponse()),
+        ]),
+      ]);
+      addTearDown(ready.close);
+
+      final PterodactylVerification verified = await ready.service
+          .verifyProfile(ready.profile);
+      expect(verified.capabilities, contains(PterodactylCapability.create));
+
+      final _ServiceFixture denied = _serviceFixture(<_ServiceTransport>[
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _serverListResponse(empty: true)),
+          _ServiceReply(200, _serverListResponse(empty: true)),
+        ]),
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _nodeListResponse()),
+          _ServiceReply(200, _userListResponse()),
+          _ServiceReply(200, _allocationListResponse(1)),
+          _ServiceReply(200, _nestListResponse()),
+          const _ServiceReply(403, '{"errors":[{"code":"Forbidden"}]}'),
+        ]),
+      ]);
+      addTearDown(denied.close);
+
+      final PterodactylVerification rejected = await denied.service
+          .verifyProfile(denied.profile);
+      expect(
+        rejected.capabilities,
+        isNot(contains(PterodactylCapability.create)),
+      );
+      expect(rejected.warnings.single, contains('Eggs READ'));
+    },
+  );
+
+  test(
+    'verification accepts an Application template without egg ACLs',
+    () async {
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _serverListResponse(empty: true)),
+          _ServiceReply(200, _serverListResponse(empty: true)),
+        ]),
+        _ServiceTransport(<_ServiceReply>[
+          _ServiceReply(200, _applicationServerListResponse(empty: true)),
+          _ServiceReply(200, _applicationServerListResponse(empty: false)),
+          _ServiceReply(200, _nodeListResponse()),
+          _ServiceReply(200, _userListResponse()),
+          _ServiceReply(200, _allocationListResponse(1)),
+        ]),
+      ]);
+      addTearDown(fixture.close);
+
+      final PterodactylVerification verified = await fixture.service
+          .verifyProfile(fixture.profile);
+
+      expect(verified.capabilities, contains(PterodactylCapability.create));
+      expect(
+        fixture.transports.last.requests.where(
+          (PterodactylTransportRequest request) =>
+              request.uri.path.contains('/nests'),
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test('verification finds a usable egg after an empty first nest', () async {
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      _ServiceTransport(<_ServiceReply>[
+        _ServiceReply(200, _serverListResponse(empty: true)),
+        _ServiceReply(200, _serverListResponse(empty: true)),
+      ]),
+      _ServiceTransport(<_ServiceReply>[
+        _ServiceReply(200, _applicationServerListResponse(empty: true)),
+        _ServiceReply(200, _applicationServerListResponse(empty: true)),
+        _ServiceReply(200, _nodeListResponse()),
+        _ServiceReply(200, _userListResponse()),
+        _ServiceReply(200, _allocationListResponse(1)),
+        _ServiceReply(200, _nestListResponse(count: 2)),
+        _ServiceReply(200, _eggListResponse(empty: true)),
+        _ServiceReply(200, _eggListResponse(nestId: 2)),
+      ]),
+    ]);
+    addTearDown(fixture.close);
+
+    final PterodactylVerification verified = await fixture.service
+        .verifyProfile(fixture.profile);
+
+    expect(verified.capabilities, contains(PterodactylCapability.create));
+    expect(
+      fixture.transports.last.requests
+          .where(
+            (PterodactylTransportRequest request) =>
+                request.uri.path.contains('/eggs'),
+          )
+          .map((PterodactylTransportRequest request) => request.uri.path),
+      <String>[
+        '/api/application/nests/1/eggs',
+        '/api/application/nests/2/eggs',
+      ],
+    );
+  });
+
+  test(
+    'egg create succeeds from zero servers with defaults and unique ports',
+    () async {
+      final _ServiceTransport transport = _eggCreateTransport(
+        allocationCount: 2,
+        createdNames: const <String>['Bootstrap One', 'Bootstrap Two'],
+      );
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        transport,
+      ]);
+      addTearDown(fixture.close);
+
+      final PterodactylBulkResult result = await fixture.service
+          .bulkCreateFromEgg(
+            profileId: fixture.profile.id,
+            names: const <String>['Bootstrap One', 'Bootstrap Two'],
+            plan: _eggPlan(
+              environment: const <String, String>{
+                'REQUIRED_TOKEN': 'operator-value',
+              },
+            ),
+            concurrency: 2,
+          );
+
+      expect(result.isSuccess, isTrue);
+      final List<Map<String, Object?>> payloads = transport.requests
+          .where(
+            (PterodactylTransportRequest request) =>
+                request.method == 'POST' &&
+                request.uri.path == '/api/application/servers',
+          )
+          .map(
+            (PterodactylTransportRequest request) =>
+                jsonDecode(request.body!) as Map<String, Object?>,
+          )
+          .toList(growable: false);
+      expect(payloads, hasLength(2));
+      expect(
+        payloads.map(
+          (Map<String, Object?> payload) =>
+              (payload['allocation']! as Map<String, Object?>)['default'],
+        ),
+        <int>[101, 102],
+      );
+      for (final Map<String, Object?> payload in payloads) {
+        expect(payload['user'], 5);
+        expect(payload['egg'], 2);
+        expect(payload['docker_image'], _eggImage);
+        expect(payload['startup'], _eggStartup);
+        expect(payload['environment'], <String, Object?>{
+          'SERVER_JARFILE': 'server.jar',
+          'REQUIRED_TOKEN': 'operator-value',
+        });
+        expect(payload['limits'], containsPair('memory', 4096));
+        expect(payload['limits'], containsPair('disk', 0));
+        expect(payload['limits'], containsPair('cpu', 0));
+        expect(payload['feature_limits'], <String, Object?>{
+          'databases': 0,
+          'allocations': 0,
+          'backups': 0,
+        });
+        expect(payload['oom_disabled'], isTrue);
+      }
+    },
+  );
+
+  test(
+    'single egg create returns POST response without inventory reload',
+    () async {
+      final _ServiceTransport transport = _eggCreateTransport(
+        allocationCount: 1,
+        createdNames: const <String>['Bootstrap'],
+      );
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        transport,
+      ]);
+      addTearDown(fixture.close);
+
+      final PterodactylApplicationServer server = await fixture.service
+          .createFromEgg(
+            profileId: fixture.profile.id,
+            name: 'Bootstrap',
+            plan: _eggPlan(
+              environment: const <String, String>{
+                'REQUIRED_TOKEN': 'operator-value',
+              },
+            ),
+          );
+
+      expect(server.name, 'Bootstrap');
+      expect(
+        transport.requests
+            .where(
+              (PterodactylTransportRequest request) =>
+                  request.uri.path == '/api/application/servers',
+            )
+            .length,
+        2,
+      );
+    },
+  );
+
+  test('egg create rejects stale catalog inputs before every POST', () async {
+    final List<
+      ({
+        String label,
+        _ServiceTransport transport,
+        PterodactylEggCreatePlan plan,
+      })
+    >
+    cases =
+        <
+          ({
+            String label,
+            _ServiceTransport transport,
+            PterodactylEggCreatePlan plan,
+          })
+        >[
+          (
+            label: 'owner',
+            transport: _eggCreateTransport(ownerId: 6),
+            plan: _eggPlan(),
+          ),
+          (
+            label: 'node',
+            transport: _eggCreateTransport(nodeId: 4),
+            plan: _eggPlan(),
+          ),
+          (
+            label: 'maintenance node',
+            transport: _eggCreateTransport(maintenanceMode: true),
+            plan: _eggPlan(),
+          ),
+          (
+            label: 'egg',
+            transport: _eggCreateTransport(eggId: 3),
+            plan: _eggPlan(),
+          ),
+          (
+            label: 'image',
+            transport: _eggCreateTransport(),
+            plan: _eggPlan(dockerImage: 'invalid:image'),
+          ),
+          (
+            label: 'startup drift',
+            transport: _eggCreateTransport(),
+            plan: _eggPlan(startup: 'changed startup'),
+          ),
+          (
+            label: 'missing startup',
+            transport: _eggCreateTransport(eggStartup: null),
+            plan: _eggPlan(),
+          ),
+          (
+            label: 'unknown environment',
+            transport: _eggCreateTransport(),
+            plan: _eggPlan(
+              environment: const <String, String>{'UNKNOWN': 'value'},
+            ),
+          ),
+          (
+            label: 'missing required variable',
+            transport: _eggCreateTransport(requiredDefault: ''),
+            plan: _eggPlan(),
+          ),
+          (
+            label: 'insufficient allocations',
+            transport: _eggCreateTransport(allocationCount: 1),
+            plan: _eggPlan(),
+          ),
+          (
+            label: 'memory capacity',
+            transport: _eggCreateTransport(
+              nodeMemoryMiB: 4096,
+              allocatedMemoryMiB: 2048,
+            ),
+            plan: _eggPlan(),
+          ),
+        ];
+
+    for (final ({
+          String label,
+          _ServiceTransport transport,
+          PterodactylEggCreatePlan plan,
+        })
+        item
+        in cases) {
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        item.transport,
+      ]);
+      addTearDown(fixture.close);
+      await expectLater(
+        fixture.service.bulkCreateFromEgg(
+          profileId: fixture.profile.id,
+          names: const <String>['One', 'Two'],
+          plan: item.plan,
+        ),
+        throwsStateError,
+        reason: item.label,
+      );
+      expect(
+        item.transport.requests.where(
+          (PterodactylTransportRequest request) => request.method == 'POST',
+        ),
+        isEmpty,
+        reason: item.label,
+      );
+    }
+  });
+
+  test('egg create rejects all invalid names before API inventory', () async {
+    final _ServiceTransport transport = _ServiceTransport(
+      const <_ServiceReply>[],
+    );
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      transport,
+    ]);
+    addTearDown(fixture.close);
+
+    await expectLater(
+      fixture.service.bulkCreateFromEgg(
+        profileId: fixture.profile.id,
+        names: <String>['valid', 'x' * 192],
+        plan: _eggPlan(),
+      ),
+      throwsArgumentError,
+    );
+    expect(transport.requests, isEmpty);
+  });
 
   test('openConsole returns an unstarted owned connection', () async {
     final Directory temporary = Directory.systemTemp.createTempSync(
@@ -843,36 +1534,6 @@ final class _RecordingConnector implements PterodactylConsoleSocketConnector {
   }
 }
 
-PterodactylClientServer _server({required bool isOwner}) =>
-    PterodactylClientServer(
-      identifier: 'abc12345',
-      internalId: 1,
-      uuid: '00000000-0000-0000-0000-000000000001',
-      name: 'Template',
-      nodeName: 'node',
-      description: '',
-      isOwner: isOwner,
-      isNodeUnderMaintenance: false,
-      status: null,
-      sftpHost: 'panel.example.test',
-      sftpPort: 2022,
-      limits: const PterodactylServerLimits(
-        memoryMiB: 1024,
-        swapMiB: 0,
-        diskMiB: 1024,
-        ioWeight: 500,
-        cpuPercent: 100,
-        threads: null,
-        oomDisabled: false,
-      ),
-      featureLimits: const PterodactylFeatureLimits(
-        databases: 0,
-        allocations: 0,
-        backups: 0,
-      ),
-      allocations: const <PterodactylAllocation>[],
-    );
-
 final class _ServiceFixture {
   _ServiceFixture({
     required this.directory,
@@ -1086,6 +1747,211 @@ String _applicationServerResponse({String name = 'Server'}) =>
         'name': name,
       },
     });
+
+const String _eggImage = 'ghcr.io/pterodactyl/yolks:java_21';
+const String _eggStartup = 'java -jar {{SERVER_JARFILE}}';
+
+PterodactylEggCreatePlan _eggPlan({
+  int ownerId = 5,
+  int nodeId = 3,
+  int eggId = 2,
+  String dockerImage = _eggImage,
+  String startup = _eggStartup,
+  Map<String, String> environment = const <String, String>{},
+  int memoryMiB = 4096,
+  int diskMiB = 0,
+  int cpuPercent = 0,
+}) => PterodactylEggCreatePlan(
+  ownerId: ownerId,
+  nodeId: nodeId,
+  eggId: eggId,
+  dockerImage: dockerImage,
+  startup: startup,
+  environment: environment,
+  memoryMiB: memoryMiB,
+  diskMiB: diskMiB,
+  cpuPercent: cpuPercent,
+);
+
+_ServiceTransport _eggCreateTransport({
+  int ownerId = 5,
+  int nodeId = 3,
+  bool maintenanceMode = false,
+  int nodeMemoryMiB = 16384,
+  int allocatedMemoryMiB = 0,
+  int eggId = 2,
+  Object? eggStartup = _eggStartup,
+  String requiredDefault = 'default-token',
+  int allocationCount = 2,
+  List<String> createdNames = const <String>[],
+}) => _ServiceTransport(<_ServiceReply>[
+  _ServiceReply(200, _applicationServerListResponse(empty: true)),
+  _ServiceReply(200, _userListResponse(ownerId: ownerId)),
+  _ServiceReply(
+    200,
+    _nodeListResponse(
+      nodeId: nodeId,
+      maintenanceMode: maintenanceMode,
+      memoryMiB: nodeMemoryMiB,
+      allocatedMemoryMiB: allocatedMemoryMiB,
+    ),
+  ),
+  _ServiceReply(200, _nestListResponse()),
+  _ServiceReply(
+    200,
+    _eggListResponse(
+      eggId: eggId,
+      startup: eggStartup,
+      requiredDefault: requiredDefault,
+    ),
+  ),
+  _ServiceReply(200, _allocationListResponse(allocationCount)),
+  for (final String name in createdNames)
+    _ServiceReply(201, _applicationServerResponse(name: name)),
+]);
+
+String _accountResponse(String username) => jsonEncode(<String, Object?>{
+  'object': 'user',
+  'attributes': <String, Object?>{'username': username},
+});
+
+String _userListResponse({int ownerId = 5}) => jsonEncode(<String, Object?>{
+  'object': 'list',
+  'data': <Object?>[
+    <String, Object?>{
+      'object': 'user',
+      'attributes': <String, Object?>{
+        'id': ownerId,
+        'external_id': null,
+        'uuid': '00000000-0000-0000-0000-000000000005',
+        'username': 'panel-user',
+        'email': 'panel-user@example.test',
+        'first_name': 'Panel',
+        'last_name': 'User',
+        'root_admin': true,
+      },
+    },
+  ],
+  'meta': _pagination(1),
+});
+
+String _nodeListResponse({
+  int nodeId = 3,
+  bool maintenanceMode = false,
+  int memoryMiB = 16384,
+  int allocatedMemoryMiB = 0,
+  int memoryOverallocatePercent = 0,
+  int diskMiB = 1024,
+  int allocatedDiskMiB = 0,
+  int diskOverallocatePercent = 20,
+}) => jsonEncode(<String, Object?>{
+  'object': 'list',
+  'data': <Object?>[
+    <String, Object?>{
+      'object': 'node',
+      'attributes': <String, Object?>{
+        'id': nodeId,
+        'uuid': '00000000-0000-0000-0000-000000000003',
+        'name': 'Node One',
+        'description': null,
+        'fqdn': 'node.example.test',
+        'scheme': 'https',
+        'public': true,
+        'behind_proxy': false,
+        'maintenance_mode': maintenanceMode,
+        'memory': memoryMiB,
+        'memory_overallocate': memoryOverallocatePercent,
+        'disk': diskMiB,
+        'disk_overallocate': diskOverallocatePercent,
+        'allocated_resources': <String, Object?>{
+          'memory': allocatedMemoryMiB,
+          'disk': allocatedDiskMiB,
+        },
+        'daemon_listen': 8080,
+        'daemon_sftp': 2022,
+      },
+    },
+  ],
+  'meta': _pagination(1),
+});
+
+String _nestListResponse({int count = 1}) => jsonEncode(<String, Object?>{
+  'object': 'list',
+  'data': <Object?>[
+    for (int index = 1; index <= count; index++)
+      <String, Object?>{
+        'object': 'nest',
+        'attributes': <String, Object?>{
+          'id': index,
+          'uuid': '00000000-0000-0000-0000-00000000000$index',
+          'name': index == 1 ? 'Minecraft' : 'Voice Servers',
+          'author': 'support@example.test',
+          'description': null,
+        },
+      },
+  ],
+  'meta': _pagination(count),
+});
+
+String _eggListResponse({
+  bool empty = false,
+  int eggId = 2,
+  int nestId = 1,
+  Object? startup = _eggStartup,
+  String requiredDefault = 'default-token',
+}) => jsonEncode(<String, Object?>{
+  'object': 'list',
+  'data': empty
+      ? <Object?>[]
+      : <Object?>[
+          <String, Object?>{
+            'object': 'egg',
+            'attributes': <String, Object?>{
+              'id': eggId,
+              'uuid': '00000000-0000-0000-0000-000000000002',
+              'name': 'Paper',
+              'nest': nestId,
+              'author': 'support@example.test',
+              'description': 'Minecraft Java server',
+              'startup': startup,
+              'docker_images': <String, Object?>{'Java 21': _eggImage},
+              'relationships': <String, Object?>{
+                'variables': <String, Object?>{
+                  'data': <Object?>[
+                    _eggVariableResource(
+                      name: 'Server Jar File',
+                      environmentVariable: 'SERVER_JARFILE',
+                      defaultValue: 'server.jar',
+                    ),
+                    _eggVariableResource(
+                      name: 'Required Token',
+                      environmentVariable: 'REQUIRED_TOKEN',
+                      defaultValue: requiredDefault,
+                    ),
+                  ],
+                },
+              },
+            },
+          },
+        ],
+});
+
+Map<String, Object?> _eggVariableResource({
+  required String name,
+  required String environmentVariable,
+  required String defaultValue,
+}) => <String, Object?>{
+  'object': 'egg_variable',
+  'attributes': <String, Object?>{
+    'name': name,
+    'description': 'Configure $name.',
+    'env_variable': environmentVariable,
+    'default_value': defaultValue,
+    'rules': 'required|string',
+    'user_editable': true,
+    'user_viewable': true,
+  },
+};
 
 String _allocationListResponse(int count) => jsonEncode(<String, Object?>{
   'object': 'list',

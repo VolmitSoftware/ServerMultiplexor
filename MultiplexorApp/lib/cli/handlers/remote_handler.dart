@@ -61,6 +61,8 @@ Future<int> handleRemote(List<String> args) async {
           );
         }
         return 0;
+      case 'catalog':
+        return _printCreationCatalog(_profileId(parsed));
       case 'stats':
         if (parsed.flag('all')) {
           return _printFleetStats(_profileId(parsed));
@@ -221,22 +223,63 @@ Future<int> handleRemote(List<String> args) async {
         final String? name =
             parsed.option('name') ?? parsed.positionals.firstOrNull;
         final String? template = parsed.option('template');
-        if (name == null || name.trim().isEmpty || template == null) {
+        final String? egg = parsed.option('egg');
+        if (name == null ||
+            name.trim().isEmpty ||
+            (template == null) == (egg == null)) {
           stderr.writeln(
-            'Usage: remote create <name> --template <server> [--memory <MiB>] [--disk <MiB>] [--cpu <percent>] [--start]',
+            'Usage: remote create <name> '
+            '(--template <server> | --egg <id|name>) '
+            '[--owner <id|username|email>] [--node <id|name>] '
+            '[--image <label|value>] [--env <KEY=VALUE,...>] '
+            '[--memory <MiB>] [--swap <MiB>] [--disk <MiB>] '
+            '[--io <10-1000>] [--cpu <percent>] [--databases <count>] '
+            '[--allocations <count>] [--backups <count>] [--start]',
           );
           return 2;
         }
-        final PterodactylApplicationServer created = await pterodactylService
-            .createFromTemplate(
-              profileId: _profileId(parsed),
-              template: template,
-              name: name,
-              memoryMiB: _integer(parsed, 'memory'),
-              diskMiB: _integer(parsed, 'disk'),
-              cpuPercent: _integer(parsed, 'cpu'),
-              startOnCompletion: parsed.flag('start'),
-            );
+        _validateCreationOptionValues(parsed);
+        if (parsed.has('concurrency')) {
+          throw ArgumentError('--concurrency applies only to create-many.');
+        }
+        final String profileId = _profileId(parsed);
+        final PterodactylApplicationServer created;
+        if (template != null) {
+          _rejectEggOnlyCreationOptions(parsed);
+          final String? ownerSelector = parsed.option('owner');
+          final int? ownerId = ownerSelector == null
+              ? null
+              : _resolveCreationOwner(
+                  await pterodactylService.creationCatalog(
+                    profileId,
+                    allowPartialEggInventory: true,
+                  ),
+                  ownerSelector,
+                ).id;
+          created = await pterodactylService.createFromTemplate(
+            profileId: profileId,
+            template: template,
+            name: name,
+            memoryMiB: _integerInRange(parsed, 'memory', minimum: 0),
+            diskMiB: _integerInRange(parsed, 'disk', minimum: 0),
+            cpuPercent: _integerInRange(parsed, 'cpu', minimum: 0),
+            ownerId: ownerId,
+            startOnCompletion: parsed.flag('start'),
+          );
+        } else {
+          final PterodactylCreationCatalog catalog = await pterodactylService
+              .creationCatalog(profileId);
+          created = await pterodactylService.createFromEgg(
+            profileId: profileId,
+            name: name,
+            plan: _eggCreatePlan(
+              parsed,
+              catalog,
+              eggSelector: egg!,
+              requiredAllocations: 1,
+            ),
+          );
+        }
         stdout.writeln(
           '[OK] Created ${_safe(created.name)} (${_safe(created.identifier)})',
         );
@@ -245,7 +288,7 @@ Future<int> handleRemote(List<String> args) async {
         return _createMany(parsed);
       default:
         stderr.writeln(
-          'Usage: remote <account|connect|profiles|verify|list|nodes|stats|history|drive|permissions|activity|settings|start|stop|restart|kill|bulk|console|command|create|create-many|rename|reinstall|delete|variable|image|limits|startup>',
+          'Usage: remote <account|connect|profiles|verify|list|nodes|catalog|stats|history|drive|permissions|activity|settings|start|stop|restart|kill|bulk|console|command|create|create-many|rename|reinstall|delete|variable|image|limits|startup>',
         );
         return 2;
     }
@@ -340,21 +383,28 @@ Future<int> _bulk(_RemoteArguments parsed) async {
 
 Future<int> _createMany(_RemoteArguments parsed) async {
   const String usage =
-      'Usage: remote create-many --template <server> '
+      'Usage: remote create-many '
+      '(--template <server> | --egg <id|name>) '
       '(--names <a,b,c> | --prefix <name> --count <n>) '
-      '[--memory <MiB>] [--disk <MiB>] [--cpu <percent>] [--start] '
+      '[--owner <id|username|email>] [--node <id|name>] '
+      '[--image <label|value>] [--env <KEY=VALUE,...>] '
+      '[--memory <MiB>] [--swap <MiB>] [--disk <MiB>] '
+      '[--io <10-1000>] [--cpu <percent>] [--databases <count>] '
+      '[--allocations <count>] [--backups <count>] [--start] '
       '[--concurrency <1-8>]';
   final String? template = parsed.option('template');
+  final String? egg = parsed.option('egg');
   final String? rawNames = parsed.option('names');
   final String? prefix = parsed.option('prefix');
   final int? count = _integerInRange(parsed, 'count', minimum: 1, maximum: 100);
-  if (template == null ||
+  if ((template == null) == (egg == null) ||
       (rawNames == null) == (prefix == null) ||
       (prefix != null && count == null) ||
       (rawNames != null && count != null)) {
     stderr.writeln(usage);
     return 2;
   }
+  _validateCreationOptionValues(parsed);
   final List<String> names = rawNames != null
       ? rawNames.split(',').map((String name) => name.trim()).toList()
       : List<String>.generate(
@@ -362,19 +412,375 @@ Future<int> _createMany(_RemoteArguments parsed) async {
           (int index) => '$prefix${index + 1}',
           growable: false,
         );
-  final PterodactylBulkResult result = await pterodactylService
-      .bulkCreateFromTemplate(
-        profileId: _profileId(parsed),
-        template: template,
-        names: names,
-        memoryMiB: _integer(parsed, 'memory'),
-        diskMiB: _integer(parsed, 'disk'),
-        cpuPercent: _integer(parsed, 'cpu'),
-        startOnCompletion: parsed.flag('start'),
-        concurrency:
-            _integerInRange(parsed, 'concurrency', minimum: 1, maximum: 8) ?? 1,
-      );
+  final String profileId = _profileId(parsed);
+  final int concurrency =
+      _integerInRange(parsed, 'concurrency', minimum: 1, maximum: 8) ?? 1;
+  final PterodactylBulkResult result;
+  if (template != null) {
+    _rejectEggOnlyCreationOptions(parsed);
+    final String? ownerSelector = parsed.option('owner');
+    final int? ownerId = ownerSelector == null
+        ? null
+        : _resolveCreationOwner(
+            await pterodactylService.creationCatalog(
+              profileId,
+              allowPartialEggInventory: true,
+            ),
+            ownerSelector,
+          ).id;
+    result = await pterodactylService.bulkCreateFromTemplate(
+      profileId: profileId,
+      template: template,
+      names: names,
+      memoryMiB: _integerInRange(parsed, 'memory', minimum: 0),
+      diskMiB: _integerInRange(parsed, 'disk', minimum: 0),
+      cpuPercent: _integerInRange(parsed, 'cpu', minimum: 0),
+      ownerId: ownerId,
+      startOnCompletion: parsed.flag('start'),
+      concurrency: concurrency,
+    );
+  } else {
+    final PterodactylCreationCatalog catalog = await pterodactylService
+        .creationCatalog(profileId);
+    result = await pterodactylService.bulkCreateFromEgg(
+      profileId: profileId,
+      names: names,
+      plan: _eggCreatePlan(
+        parsed,
+        catalog,
+        eggSelector: egg!,
+        requiredAllocations: names.length,
+      ),
+      concurrency: concurrency,
+    );
+  }
   return _printBulkResult(result);
+}
+
+Future<int> _printCreationCatalog(String profileId) async {
+  final PterodactylCreationCatalog catalog = await pterodactylService
+      .creationCatalog(profileId);
+  for (final String line in pterodactylCreationCatalogLines(catalog)) {
+    stdout.writeln(line);
+  }
+  return 0;
+}
+
+/// Stable, tab-separated creation inventory used by the headless CLI.
+///
+/// Egg children are emitted as separate rows so scripts and operators can
+/// construct exact `--image` and `--env` arguments without first attempting
+/// a server creation.
+List<String> pterodactylCreationCatalogLines(
+  PterodactylCreationCatalog catalog,
+) {
+  final List<String> lines = <String>[];
+  for (final PterodactylUser user in catalog.users) {
+    lines.add(
+      'owner\t${user.id}\t${_safe(user.username)}\t${_safe(user.email)}'
+      '${catalog.recommendedOwnerId == user.id ? '\trecommended' : ''}',
+    );
+  }
+  for (final PterodactylNode node in catalog.nodes) {
+    lines.add(
+      'node\t${node.id}\t${_safe(node.name)}\t'
+      '${catalog.freeAllocationCount(node.id)} free\t'
+      '${node.maintenanceMode ? 'maintenance' : 'ready'}',
+    );
+  }
+  final Map<int, String> nestNames = <int, String>{
+    for (final PterodactylNest nest in catalog.nests) nest.id: nest.name,
+  };
+  for (final PterodactylEgg egg in catalog.eggs) {
+    final bool hasStartup = egg.startup?.trim().isNotEmpty == true;
+    final bool hasImage = egg.dockerImages.values.any(
+      (String image) => image.trim().isNotEmpty,
+    );
+    final String readiness = !hasStartup
+        ? 'no startup'
+        : !hasImage
+        ? 'no image'
+        : 'ready';
+    lines.add(
+      'egg\t${egg.id}\t${_safe(nestNames[egg.nestId] ?? 'nest ${egg.nestId}')}\t'
+      '${_safe(egg.name)}\t${egg.dockerImages.length} images\t'
+      '${egg.variables.length} variables\t$readiness',
+    );
+    for (final MapEntry<String, String> image in egg.dockerImages.entries) {
+      lines.add('image\t${egg.id}\t${_safe(image.key)}\t${_safe(image.value)}');
+    }
+    for (final PterodactylEggVariable variable in egg.variables) {
+      final bool blankDefault = variable.defaultValue.trim().isEmpty;
+      final String requirement = variable.isRequired
+          ? (blankDefault ? 'required-blank' : 'required-default')
+          : (blankDefault ? 'optional-blank' : 'optional-default');
+      lines.add(
+        'variable\t${egg.id}\t${_safe(variable.environmentVariable)}\t'
+        '$requirement\t${variable.userEditable ? 'editable' : 'fixed'}\t'
+        'default=${blankDefault ? '<blank>' : _safe(variable.defaultValue)}\t'
+        'rules=${_safe(variable.rules)}',
+      );
+    }
+  }
+  for (final PterodactylApplicationServer template in catalog.templates) {
+    lines.add(
+      'template\t${template.id}\t${_safe(template.identifier)}\t'
+      '${_safe(template.name)}',
+    );
+  }
+  return List<String>.unmodifiable(lines);
+}
+
+const Set<String> _creationValueOptions = <String>{
+  'owner',
+  'node',
+  'image',
+  'env',
+  'memory',
+  'swap',
+  'disk',
+  'io',
+  'cpu',
+  'databases',
+  'allocations',
+  'backups',
+  'concurrency',
+};
+
+const Set<String> _eggOnlyCreationOptions = <String>{
+  'node',
+  'image',
+  'env',
+  'swap',
+  'io',
+  'databases',
+  'allocations',
+  'backups',
+};
+
+void _validateCreationOptionValues(_RemoteArguments parsed) {
+  final List<String> missing = _creationValueOptions
+      .where(parsed.flag)
+      .toList(growable: false);
+  if (missing.isNotEmpty) {
+    throw ArgumentError('--${missing.first} requires a value.');
+  }
+}
+
+void _rejectEggOnlyCreationOptions(_RemoteArguments parsed) {
+  final List<String> unsupported = _eggOnlyCreationOptions
+      .where(parsed.has)
+      .toList(growable: false);
+  if (unsupported.isNotEmpty) {
+    throw ArgumentError(
+      '--${unsupported.first} applies only to creation with --egg.',
+    );
+  }
+}
+
+PterodactylEggCreatePlan _eggCreatePlan(
+  _RemoteArguments parsed,
+  PterodactylCreationCatalog catalog, {
+  required String eggSelector,
+  required int requiredAllocations,
+}) {
+  final PterodactylUser owner = _resolveCreationOwner(
+    catalog,
+    parsed.option('owner'),
+  );
+  final PterodactylNode node = _resolveCreationNode(
+    catalog,
+    parsed.option('node'),
+    requiredAllocations: requiredAllocations,
+  );
+  final PterodactylEgg egg = _resolveCreationEgg(catalog, eggSelector);
+  final String startup = egg.startup?.trim() ?? '';
+  if (startup.isEmpty) {
+    throw StateError('The selected egg has no usable startup command.');
+  }
+  final String image = _resolveCreationImage(egg, parsed.option('image'));
+  final Map<String, String> environment = _parseCreationEnvironment(
+    parsed.option('env'),
+    egg,
+  );
+  return PterodactylEggCreatePlan(
+    ownerId: owner.id,
+    nodeId: node.id,
+    eggId: egg.id,
+    dockerImage: image,
+    startup: startup,
+    environment: environment,
+    memoryMiB: _integerInRange(parsed, 'memory', minimum: 0) ?? 4096,
+    swapMiB: _integerInRange(parsed, 'swap', minimum: -1) ?? 0,
+    diskMiB: _integerInRange(parsed, 'disk', minimum: 0) ?? 0,
+    ioWeight: _integerInRange(parsed, 'io', minimum: 10, maximum: 1000) ?? 500,
+    cpuPercent: _integerInRange(parsed, 'cpu', minimum: 0) ?? 0,
+    databaseLimit: _integerInRange(parsed, 'databases', minimum: 0) ?? 0,
+    allocationLimit: _integerInRange(parsed, 'allocations', minimum: 0) ?? 0,
+    backupLimit: _integerInRange(parsed, 'backups', minimum: 0) ?? 0,
+    startOnCompletion: parsed.flag('start'),
+  );
+}
+
+PterodactylUser _resolveCreationOwner(
+  PterodactylCreationCatalog catalog,
+  String? selector,
+) {
+  if (catalog.users.isEmpty) {
+    throw StateError('The Panel has no user who can own the new server.');
+  }
+  if (selector == null) {
+    final int? recommended = catalog.recommendedOwnerId;
+    if (recommended != null) {
+      return catalog.users.firstWhere(
+        (PterodactylUser user) => user.id == recommended,
+      );
+    }
+    if (catalog.users.length == 1) return catalog.users.single;
+    throw StateError(
+      'More than one Panel user exists; choose one with --owner <id|username|email>.',
+    );
+  }
+  final String normalized = selector.trim().toLowerCase();
+  final List<PterodactylUser> matches = catalog.users
+      .where(
+        (PterodactylUser user) =>
+            '${user.id}' == normalized ||
+            user.username.toLowerCase() == normalized ||
+            user.email.toLowerCase() == normalized,
+      )
+      .toList(growable: false);
+  if (matches.length != 1) {
+    throw StateError(
+      matches.isEmpty
+          ? 'No Panel owner matches: $selector'
+          : 'Panel owner selector is ambiguous: $selector',
+    );
+  }
+  return matches.single;
+}
+
+PterodactylNode _resolveCreationNode(
+  PterodactylCreationCatalog catalog,
+  String? selector, {
+  required int requiredAllocations,
+}) {
+  final List<PterodactylNode> candidates = catalog.nodes
+      .where(
+        (PterodactylNode node) =>
+            !node.maintenanceMode &&
+            catalog.freeAllocationCount(node.id) >= requiredAllocations,
+      )
+      .toList(growable: false);
+  if (selector == null) {
+    if (candidates.length == 1) return candidates.single;
+    if (candidates.isEmpty) {
+      throw StateError(
+        'No ready Panel node has $requiredAllocations free allocation(s).',
+      );
+    }
+    throw StateError(
+      'More than one node can host this request; choose one with --node <id|name>.',
+    );
+  }
+  final String normalized = selector.trim().toLowerCase();
+  final List<PterodactylNode> matches = catalog.nodes
+      .where(
+        (PterodactylNode node) =>
+            '${node.id}' == normalized || node.name.toLowerCase() == normalized,
+      )
+      .toList(growable: false);
+  if (matches.length != 1) {
+    throw StateError(
+      matches.isEmpty
+          ? 'No Panel node matches: $selector'
+          : 'Panel node selector is ambiguous: $selector',
+    );
+  }
+  final PterodactylNode node = matches.single;
+  if (node.maintenanceMode) {
+    throw StateError('The selected node is in maintenance mode.');
+  }
+  final int free = catalog.freeAllocationCount(node.id);
+  if (free < requiredAllocations) {
+    throw StateError(
+      'The selected node has $free free allocation(s); '
+      '$requiredAllocations are required.',
+    );
+  }
+  return node;
+}
+
+PterodactylEgg _resolveCreationEgg(
+  PterodactylCreationCatalog catalog,
+  String selector,
+) {
+  final String normalized = selector.trim().toLowerCase();
+  final List<PterodactylEgg> matches = catalog.eggs
+      .where(
+        (PterodactylEgg egg) =>
+            '${egg.id}' == normalized || egg.name.toLowerCase() == normalized,
+      )
+      .toList(growable: false);
+  if (matches.length != 1) {
+    throw StateError(
+      matches.isEmpty
+          ? 'No Panel egg matches: $selector. Run remote catalog.'
+          : 'Egg name is ambiguous; use its numeric ID from remote catalog.',
+    );
+  }
+  return matches.single;
+}
+
+String _resolveCreationImage(PterodactylEgg egg, String? selector) {
+  if (egg.dockerImages.isEmpty) {
+    throw StateError('The selected egg has no allowed Docker image.');
+  }
+  if (selector == null) return egg.dockerImages.values.first;
+  final String normalized = selector.trim().toLowerCase();
+  final List<String> matches = egg.dockerImages.entries
+      .where(
+        (MapEntry<String, String> entry) =>
+            entry.key.toLowerCase() == normalized ||
+            entry.value.toLowerCase() == normalized,
+      )
+      .map((MapEntry<String, String> entry) => entry.value)
+      .toSet()
+      .toList(growable: false);
+  if (matches.length != 1) {
+    throw StateError(
+      matches.isEmpty
+          ? 'That Docker image is not allowed by ${egg.name}.'
+          : 'Docker image label is ambiguous; use its full image value.',
+    );
+  }
+  return matches.single;
+}
+
+Map<String, String> _parseCreationEnvironment(String? raw, PterodactylEgg egg) {
+  if (raw == null || raw.trim().isEmpty) return const <String, String>{};
+  final Set<String> allowed = egg.variables
+      .map((PterodactylEggVariable variable) => variable.environmentVariable)
+      .toSet();
+  final Map<String, String> result = <String, String>{};
+  for (final String assignment in raw.split(',')) {
+    final int separator = assignment.indexOf('=');
+    if (separator < 1) {
+      throw ArgumentError(
+        '--env must contain comma-separated KEY=VALUE pairs.',
+      );
+    }
+    final String key = assignment.substring(0, separator).trim();
+    final String value = assignment.substring(separator + 1).trim();
+    if (!allowed.contains(key)) {
+      throw ArgumentError('The selected egg has no variable named $key.');
+    }
+    if (result.containsKey(key)) {
+      throw ArgumentError('--env assigns $key more than once.');
+    }
+    result[key] = value;
+  }
+  return result;
 }
 
 int _printBulkResult(PterodactylBulkResult result) {
@@ -467,7 +873,8 @@ Future<int> _connect(_RemoteArguments parsed) async {
         'Create an Application API key at ${candidate.origin}/admin/api/new.',
       );
       stdout.writeln(
-        'Grant Servers read/write, Allocations read, and Nodes read.',
+        'Grant Servers read/write plus Users, Nodes, Allocations, Nests, and '
+        'Eggs read access.',
       );
       await _saveMaskedCredential(
         candidate,
@@ -1130,16 +1537,6 @@ String _server(_RemoteArguments parsed) {
   return server;
 }
 
-int? _integer(_RemoteArguments parsed, String name) {
-  final String? raw = parsed.option(name);
-  if (raw == null) return null;
-  final int? value = int.tryParse(raw);
-  if (value == null || value <= 0) {
-    throw ArgumentError('--$name must be a positive integer.');
-  }
-  return value;
-}
-
 int? _nonNegativeInteger(
   _RemoteArguments parsed,
   String name, {
@@ -1342,6 +1739,7 @@ final class _RemoteArguments {
 
   String? option(String name) => options[name];
   bool flag(String name) => flags.contains(name);
+  bool has(String name) => options.containsKey(name) || flags.contains(name);
 }
 
 extension on List<String> {

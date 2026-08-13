@@ -52,6 +52,20 @@ final class _BulkCreateTarget {
   final int? additionalAllocationId;
 }
 
+final class _EggCreateOutcome {
+  const _EggCreateOutcome({required this.item, this.server});
+
+  final PterodactylBulkItemResult item;
+  final PterodactylApplicationServer? server;
+}
+
+final class _EggCreateBatch {
+  const _EggCreateBatch({required this.result, required this.outcomes});
+
+  final PterodactylBulkResult result;
+  final List<_EggCreateOutcome> outcomes;
+}
+
 /// High-level connection boundary used by the CLI and the Remote dashboard.
 ///
 /// Profiles are non-secret files. Bearer values are resolved immediately
@@ -220,10 +234,110 @@ final class PterodactylService {
     _forgetScope(id);
   }
 
-  bool canUseAsTemplate(String profileId, PterodactylClientServer server) =>
-      server.isOwner ||
-      _serverScopes[_scopeKey(_requireProfile(profileId))] ==
-          PterodactylClientServerScope.adminAll;
+  /// Returns creation inputs entirely through Application API authority.
+  /// This remains useful when a new Panel has no servers in Client inventory.
+  Future<PterodactylCreationCatalog> creationCatalog(
+    String profileId, {
+    bool allowPartialEggInventory = false,
+  }) async {
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final String clientUsername = await accountUsername(profileId);
+    final _ClientHandle applicationHandle;
+    try {
+      applicationHandle = await _applicationClientFor(profile);
+    } on PterodactylApiException catch (error) {
+      if (!error.isUnauthorized) rethrow;
+      throw const PterodactylCreationCatalogPermissionException(
+        permission: 'Servers READ',
+      );
+    }
+    try {
+      final List<PterodactylApplicationServer> templates =
+          await _catalogResource(
+            'Servers READ',
+            applicationHandle.client.listAllApplicationServers,
+          );
+      final List<PterodactylUser> users = await _catalogResource(
+        'Users READ',
+        applicationHandle.client.listAllApplicationUsers,
+      );
+      final List<PterodactylNode> nodes = await _catalogResource(
+        'Nodes READ',
+        applicationHandle.client.listAllApplicationNodes,
+      );
+      List<PterodactylNest> nests = const <PterodactylNest>[];
+      final List<PterodactylEgg> eggs = <PterodactylEgg>[];
+      String? eggInventoryUnavailablePermission;
+      try {
+        nests = await _catalogResource(
+          'Nests READ',
+          applicationHandle.client.listAllApplicationNests,
+        );
+        for (final PterodactylNest nest in nests) {
+          eggs.addAll(
+            await _catalogResource(
+              'Eggs READ',
+              () => applicationHandle.client.listAllNestEggs(nest.id),
+            ),
+          );
+        }
+      } on PterodactylCreationCatalogPermissionException catch (error) {
+        if (!allowPartialEggInventory || templates.isEmpty) rethrow;
+        nests = const <PterodactylNest>[];
+        eggs.clear();
+        eggInventoryUnavailablePermission = error.permission;
+      }
+      final Map<int, List<PterodactylAllocation>> freeAllocations =
+          <int, List<PterodactylAllocation>>{};
+      for (final PterodactylNode node in nodes) {
+        final List<PterodactylAllocation> free =
+            (await _catalogResource(
+                  'Allocations READ',
+                  () =>
+                      applicationHandle.client.listAllNodeAllocations(node.id),
+                ))
+                .where((PterodactylAllocation allocation) => allocation.isFree)
+                .toList()
+              ..sort(
+                (PterodactylAllocation a, PterodactylAllocation b) =>
+                    a.port.compareTo(b.port),
+              );
+        freeAllocations[node.id] = free;
+      }
+      return PterodactylCreationCatalog(
+        templates: templates,
+        users: users,
+        nodes: nodes,
+        nests: nests,
+        eggs: eggs,
+        freeAllocationsByNode: freeAllocations,
+        eggInventoryUnavailablePermission: eggInventoryUnavailablePermission,
+        recommendedOwnerId: users
+            .where(
+              (PterodactylUser user) =>
+                  user.username.toLowerCase() == clientUsername.toLowerCase(),
+            )
+            .firstOrNull
+            ?.id,
+      );
+    } finally {
+      applicationHandle.client.close();
+    }
+  }
+
+  static Future<T> _catalogResource<T>(
+    String permission,
+    Future<T> Function() request,
+  ) async {
+    try {
+      return await request();
+    } on PterodactylApiException catch (error) {
+      if (!error.isUnauthorized) rethrow;
+      throw PterodactylCreationCatalogPermissionException(
+        permission: permission,
+      );
+    }
+  }
 
   Future<PterodactylVerification> verify(String id) =>
       verifyProfile(_requireProfile(id));
@@ -297,6 +411,13 @@ final class PterodactylService {
           ..add(PterodactylCapability.configure)
           ..add(PterodactylCapability.delete);
         try {
+          final List<PterodactylApplicationServer> templates =
+              await verifiedApplicationHandle.client
+                  .listApplicationServers(perPage: 1)
+                  .then(
+                    (PterodactylPage<PterodactylApplicationServer> page) =>
+                        page.items,
+                  );
           final List<PterodactylNode> nodes = await verifiedApplicationHandle
               .client
               .listAllApplicationNodes();
@@ -304,14 +425,60 @@ final class PterodactylService {
           if (nodes.isEmpty) {
             warnings.add('Remote creation needs at least one Panel node.');
           } else {
-            // Creation also needs allocation read access. Checking it here
-            // prevents a read-only Servers key from being advertised as
-            // creation-ready merely because it can list server templates.
+            // Every creation path needs an owner and a free allocation.
+            // Nest and egg inventory is only required when no template exists.
+            final List<PterodactylUser> users = await verifiedApplicationHandle
+                .client
+                .listApplicationUsers(perPage: 1)
+                .then((PterodactylPage<PterodactylUser> page) => page.items);
             await verifiedApplicationHandle.client.listNodeAllocations(
               nodes.first.id,
               perPage: 1,
             );
-            capabilities.add(PterodactylCapability.create);
+            if (users.isEmpty) {
+              warnings.add(
+                'Remote creation needs at least one Panel user to own the '
+                'server.',
+              );
+            }
+            bool hasCreationSource = templates.isNotEmpty;
+            if (!hasCreationSource) {
+              final List<PterodactylNest> nests =
+                  await verifiedApplicationHandle.client
+                      .listAllApplicationNests();
+              if (nests.isEmpty) {
+                warnings.add(
+                  'Remote creation needs an existing template or at least '
+                  'one Panel nest and egg.',
+                );
+              }
+              bool hasUsableEgg = false;
+              for (final PterodactylNest nest in nests) {
+                final PterodactylPage<PterodactylEgg> eggs =
+                    await verifiedApplicationHandle.client.listNestEggs(
+                      nest.id,
+                      perPage: 1,
+                    );
+                hasUsableEgg = eggs.items.any(
+                  (PterodactylEgg egg) =>
+                      egg.startup?.trim().isNotEmpty == true &&
+                      egg.dockerImages.values.any(
+                        (String image) => image.trim().isNotEmpty,
+                      ),
+                );
+                if (hasUsableEgg) break;
+              }
+              if (nests.isNotEmpty && !hasUsableEgg) {
+                warnings.add(
+                  'Remote creation needs at least one Panel egg with a '
+                  'startup command and Docker image.',
+                );
+              }
+              hasCreationSource = hasUsableEgg;
+            }
+            if (users.isNotEmpty && hasCreationSource) {
+              capabilities.add(PterodactylCapability.create);
+            }
             if (verifiedApplicationHandle.hasDedicatedApplicationCredential) {
               warnings.add(
                 'Application API read prerequisites are verified; Servers '
@@ -332,7 +499,9 @@ final class PterodactylService {
         } on PterodactylApiException catch (error) {
           if (!error.isUnauthorized) rethrow;
           warnings.add(
-            'Node or allocation inventory is not granted to this API key.',
+            'Creation inventory is not fully granted. Application creation '
+            'needs Users, Nodes, Allocations, Nests, and Eggs READ plus '
+            'Servers WRITE.',
           );
         }
       }
@@ -1079,31 +1248,38 @@ final class PterodactylService {
     int? memoryMiB,
     int? diskMiB,
     int? cpuPercent,
+    int? ownerId,
     bool startOnCompletion = false,
   }) async {
+    final String requestedName = _validateCreateName(name);
     final PterodactylProfile profile = _requireProfile(profileId);
-    final _ClientHandle handle = await _clientFor(profile);
-    _ClientHandle? applicationHandle;
+    final String? clientUsername = ownerId == null
+        ? await accountUsername(profileId)
+        : null;
+    final _ClientHandle applicationHandle = await _applicationClientFor(
+      profile,
+    );
     try {
-      final List<PterodactylClientServer> clientServers = await _listServers(
-        handle.client,
-        profile,
-      );
-      final PterodactylClientServer clientTemplate = _resolveServer(
-        clientServers,
-        template,
-      );
-      if (!canUseAsTemplate(profileId, clientTemplate)) {
-        throw StateError(
-          'That server is shared with this account and cannot safely own a '
-          'clone. Choose a server you own.',
-        );
-      }
-      applicationHandle = await _applicationClientFor(profile);
       final PterodactylApplicationServer applicationTemplate =
-          await applicationHandle.client.getApplicationServer(
-            clientTemplate.internalId,
+          _resolveApplicationServer(
+            await applicationHandle.client.listAllApplicationServers(),
+            template,
           );
+      final int selectedOwnerId = _resolveCreationOwner(
+        await applicationHandle.client.listAllApplicationUsers(),
+        ownerId: ownerId,
+        clientUsername: clientUsername,
+      );
+      final PterodactylNode node = _resolveCreationNode(
+        await applicationHandle.client.listAllApplicationNodes(),
+        applicationTemplate.nodeId,
+      );
+      _validateCreationNode(
+        node: node,
+        memoryMiB: memoryMiB ?? applicationTemplate.limits.memoryMiB,
+        diskMiB: diskMiB ?? applicationTemplate.limits.diskMiB,
+        serverCount: 1,
+      );
       final List<PterodactylAllocation> allocations = await applicationHandle
           .client
           .listAllNodeAllocations(applicationTemplate.nodeId);
@@ -1127,7 +1303,8 @@ final class PterodactylService {
       return await applicationHandle.client.createApplicationServer(
         _templateCreateRequest(
           template: applicationTemplate,
-          name: name,
+          ownerId: selectedOwnerId,
+          name: requestedName,
           defaultAllocationId: free[0].id,
           additionalAllocationId: free.length > 1 ? free[1].id : null,
           memoryMiB: memoryMiB,
@@ -1137,13 +1314,12 @@ final class PterodactylService {
         ),
       );
     } finally {
-      applicationHandle?.client.close();
-      handle.client.close();
+      applicationHandle.client.close();
     }
   }
 
-  /// Creates a fleet from one owned template after reserving distinct free
-  /// allocations for every request in the batch. Local requests can run in
+  /// Creates a fleet from one Application-visible template after reserving
+  /// distinct free allocations for every request in the batch. Requests can run in
   /// parallel without selecting the same allocation; an external allocation
   /// race is reported on the affected item by the Panel.
   Future<PterodactylBulkResult> bulkCreateFromTemplate({
@@ -1153,48 +1329,41 @@ final class PterodactylService {
     int? memoryMiB,
     int? diskMiB,
     int? cpuPercent,
+    int? ownerId,
     bool startOnCompletion = false,
     int concurrency = 1,
   }) async {
     _requireBulkConcurrency(concurrency);
-    final List<String> requestedNames = names
-        .map((String name) => name.trim())
-        .toList(growable: false);
-    if (requestedNames.isEmpty ||
-        requestedNames.any((String name) => name.isEmpty)) {
-      throw ArgumentError('At least one non-empty server name is required.');
-    }
-    if (requestedNames.length > 100) {
-      throw ArgumentError(
-        'Create-many supports at most 100 servers per batch.',
-      );
-    }
-    final Set<String> normalizedNames = requestedNames
-        .map((String name) => name.toLowerCase())
-        .toSet();
-    if (normalizedNames.length != requestedNames.length) {
-      throw ArgumentError('Server names in a create batch must be unique.');
-    }
+    final List<String> requestedNames = _validateBulkCreateNames(names);
 
     final PterodactylProfile profile = _requireProfile(profileId);
-    final _ClientHandle handle = await _clientFor(profile);
-    _ClientHandle? applicationHandle;
+    final String? clientUsername = ownerId == null
+        ? await accountUsername(profileId)
+        : null;
+    final _ClientHandle applicationHandle = await _applicationClientFor(
+      profile,
+    );
     try {
-      final PterodactylClientServer clientTemplate = _resolveServer(
-        await _listServers(handle.client, profile),
-        template,
-      );
-      if (!canUseAsTemplate(profileId, clientTemplate)) {
-        throw StateError(
-          'That server is shared with this account and cannot safely own a '
-          'clone. Choose a server you own.',
-        );
-      }
-      applicationHandle = await _applicationClientFor(profile);
       final PterodactylApplicationServer applicationTemplate =
-          await applicationHandle.client.getApplicationServer(
-            clientTemplate.internalId,
+          _resolveApplicationServer(
+            await applicationHandle.client.listAllApplicationServers(),
+            template,
           );
+      final int selectedOwnerId = _resolveCreationOwner(
+        await applicationHandle.client.listAllApplicationUsers(),
+        ownerId: ownerId,
+        clientUsername: clientUsername,
+      );
+      final PterodactylNode node = _resolveCreationNode(
+        await applicationHandle.client.listAllApplicationNodes(),
+        applicationTemplate.nodeId,
+      );
+      _validateCreationNode(
+        node: node,
+        memoryMiB: memoryMiB ?? applicationTemplate.limits.memoryMiB,
+        diskMiB: diskMiB ?? applicationTemplate.limits.diskMiB,
+        serverCount: requestedNames.length,
+      );
       final List<PterodactylAllocation> free =
           (await applicationHandle.client.listAllNodeAllocations(
                 applicationTemplate.nodeId,
@@ -1234,10 +1403,12 @@ final class PterodactylService {
         concurrency,
         (_BulkCreateTarget target) async {
           try {
-            final PterodactylApplicationServer created =
-                await applicationHandle!.client.createApplicationServer(
+            final PterodactylApplicationServer created = await applicationHandle
+                .client
+                .createApplicationServer(
                   _templateCreateRequest(
                     template: applicationTemplate,
+                    ownerId: selectedOwnerId,
                     name: target.name,
                     defaultAllocationId: target.defaultAllocationId,
                     additionalAllocationId: target.additionalAllocationId,
@@ -1269,13 +1440,310 @@ final class PterodactylService {
         items: items,
       );
     } finally {
-      applicationHandle?.client.close();
-      handle.client.close();
+      applicationHandle.client.close();
     }
+  }
+
+  Future<PterodactylApplicationServer> createFromEgg({
+    required String profileId,
+    required String name,
+    required PterodactylEggCreatePlan plan,
+  }) async {
+    final _EggCreateBatch batch = await _createEggBatch(
+      profileId: profileId,
+      names: <String>[name],
+      plan: plan,
+    );
+    final _EggCreateOutcome outcome = batch.outcomes.single;
+    if (outcome.server == null) {
+      throw StateError(outcome.item.error ?? 'Remote server creation failed.');
+    }
+    return outcome.server!;
+  }
+
+  /// Creates servers directly from a Panel egg, including on an empty Panel.
+  /// Every referenced object and all required egg variables are validated and
+  /// distinct allocations are reserved before the first create request.
+  Future<PterodactylBulkResult> bulkCreateFromEgg({
+    required String profileId,
+    required Iterable<String> names,
+    required PterodactylEggCreatePlan plan,
+    int concurrency = 1,
+  }) async => (await _createEggBatch(
+    profileId: profileId,
+    names: names,
+    plan: plan,
+    concurrency: concurrency,
+  )).result;
+
+  Future<_EggCreateBatch> _createEggBatch({
+    required String profileId,
+    required Iterable<String> names,
+    required PterodactylEggCreatePlan plan,
+    int concurrency = 1,
+  }) async {
+    _requireBulkConcurrency(concurrency);
+    final List<String> requestedNames = _validateBulkCreateNames(names);
+    final _ClientHandle applicationHandle = await _applicationClientFor(
+      _requireProfile(profileId),
+    );
+    try {
+      final List<PterodactylUser> users = await applicationHandle.client
+          .listAllApplicationUsers();
+      if (!users.any((PterodactylUser user) => user.id == plan.ownerId)) {
+        throw StateError('The selected owner is no longer available.');
+      }
+      final List<PterodactylNode> nodes = await applicationHandle.client
+          .listAllApplicationNodes();
+      final PterodactylNode node = _resolveCreationNode(nodes, plan.nodeId);
+      _validateCreationNode(
+        node: node,
+        memoryMiB: plan.memoryMiB,
+        diskMiB: plan.diskMiB,
+        serverCount: requestedNames.length,
+      );
+      final List<PterodactylNest> nests = await applicationHandle.client
+          .listAllApplicationNests();
+      PterodactylEgg? selectedEgg;
+      for (final PterodactylNest nest in nests) {
+        final List<PterodactylEgg> eggs = await applicationHandle.client
+            .listAllNestEggs(nest.id);
+        for (final PterodactylEgg egg in eggs) {
+          if (egg.id == plan.eggId) selectedEgg = egg;
+        }
+      }
+      final PterodactylEgg egg =
+          selectedEgg ??
+          (throw StateError('The selected egg is no longer available.'));
+      final String? eggStartup = egg.startup;
+      if (eggStartup == null || eggStartup.trim().isEmpty) {
+        throw StateError(
+          'The selected egg has no startup command configured on the Panel.',
+        );
+      }
+      if (plan.startup != eggStartup) {
+        throw StateError(
+          'The selected egg startup command changed. Reload the creation '
+          'catalog and try again.',
+        );
+      }
+      if (!egg.dockerImages.values.contains(plan.dockerImage)) {
+        throw StateError(
+          'The selected Docker image is not allowed by the egg.',
+        );
+      }
+      final Set<String> variableNames = egg.variables
+          .map(
+            (PterodactylEggVariable variable) => variable.environmentVariable,
+          )
+          .toSet();
+      final List<String> unknownVariables =
+          plan.environment.keys
+              .where((String key) => !variableNames.contains(key))
+              .toList(growable: false)
+            ..sort();
+      if (unknownVariables.isNotEmpty) {
+        throw StateError(
+          'Unknown egg environment variables: ${unknownVariables.join(', ')}',
+        );
+      }
+      final Map<String, String> environment = <String, String>{
+        for (final PterodactylEggVariable variable in egg.variables)
+          variable.environmentVariable:
+              plan.environment[variable.environmentVariable] ??
+              variable.defaultValue,
+      };
+      final List<String> missing = <String>[
+        for (final PterodactylEggVariable variable in egg.variables)
+          if (variable.isRequired &&
+              (environment[variable.environmentVariable]?.trim().isEmpty ??
+                  true))
+            variable.environmentVariable,
+      ];
+      if (missing.isNotEmpty) {
+        throw StateError(
+          'Required egg variables need values: ${missing.join(', ')}',
+        );
+      }
+      final List<PterodactylAllocation> free =
+          (await applicationHandle.client.listAllNodeAllocations(plan.nodeId))
+              .where((PterodactylAllocation allocation) => allocation.isFree)
+              .toList()
+            ..sort(
+              (PterodactylAllocation a, PterodactylAllocation b) =>
+                  a.port.compareTo(b.port),
+            );
+      if (free.length < requestedNames.length) {
+        throw StateError(
+          'Create-many requires ${requestedNames.length} free allocations, '
+          'but only ${free.length} are available. No servers were created.',
+        );
+      }
+      final List<_BulkCreateTarget> targets = List<_BulkCreateTarget>.generate(
+        requestedNames.length,
+        (int index) => _BulkCreateTarget(
+          name: requestedNames[index],
+          defaultAllocationId: free[index].id,
+          additionalAllocationId: null,
+        ),
+        growable: false,
+      );
+      final List<_EggCreateOutcome> outcomes = await _boundedMap(
+        targets,
+        concurrency,
+        (_BulkCreateTarget target) async {
+          try {
+            final PterodactylApplicationServer created = await applicationHandle
+                .client
+                .createApplicationServer(
+                  _eggCreateRequest(
+                    name: target.name,
+                    plan: plan,
+                    environment: environment,
+                    allocationId: target.defaultAllocationId,
+                  ),
+                );
+            return _EggCreateOutcome(
+              server: created,
+              item: PterodactylBulkItemResult(
+                target: target.name,
+                name: created.name,
+                identifier: created.identifier,
+                succeeded: true,
+              ),
+            );
+          } on Object catch (error) {
+            return _EggCreateOutcome(
+              item: PterodactylBulkItemResult(
+                target: target.name,
+                name: target.name,
+                identifier: null,
+                succeeded: false,
+                error: _bulkErrorText(error),
+              ),
+            );
+          }
+        },
+      );
+      return _EggCreateBatch(
+        outcomes: List<_EggCreateOutcome>.unmodifiable(outcomes),
+        result: PterodactylBulkResult(
+          action: PterodactylBulkAction.create,
+          items: outcomes
+              .map((_EggCreateOutcome outcome) => outcome.item)
+              .toList(growable: false),
+        ),
+      );
+    } finally {
+      applicationHandle.client.close();
+    }
+  }
+
+  static PterodactylCreateServerRequest _eggCreateRequest({
+    required String name,
+    required PterodactylEggCreatePlan plan,
+    required Map<String, String> environment,
+    required int allocationId,
+  }) => PterodactylCreateServerRequest(
+    name: name,
+    description: 'Created by Multiplexor from Panel egg ${plan.eggId}.',
+    ownerId: plan.ownerId,
+    eggId: plan.eggId,
+    dockerImage: plan.dockerImage,
+    startup: plan.startup,
+    environment: environment,
+    limits: PterodactylServerLimits(
+      memoryMiB: plan.memoryMiB,
+      swapMiB: plan.swapMiB,
+      diskMiB: plan.diskMiB,
+      ioWeight: plan.ioWeight,
+      cpuPercent: plan.cpuPercent,
+      threads: null,
+      oomDisabled: true,
+    ),
+    featureLimits: PterodactylFeatureLimits(
+      databases: plan.databaseLimit,
+      allocations: plan.allocationLimit,
+      backups: plan.backupLimit,
+    ),
+    defaultAllocationId: allocationId,
+    startOnCompletion: plan.startOnCompletion,
+    oomDisabled: true,
+  );
+
+  static void _validateCreationNode({
+    required PterodactylNode node,
+    required int memoryMiB,
+    required int diskMiB,
+    required int serverCount,
+  }) {
+    if (node.maintenanceMode) {
+      throw StateError('The selected node is in maintenance mode.');
+    }
+    final int requestedMemory = memoryMiB * serverCount;
+    final int requestedDisk = diskMiB * serverCount;
+    final int? maximumMemory = node.maximumAllocatedMemoryMiB;
+    if (maximumMemory != null &&
+        node.allocatedMemoryMiB + requestedMemory > maximumMemory) {
+      throw StateError(
+        'The selected node does not have enough configured memory capacity '
+        'for $serverCount server(s). No servers were created.',
+      );
+    }
+    final int? maximumDisk = node.maximumAllocatedDiskMiB;
+    if (maximumDisk != null &&
+        node.allocatedDiskMiB + requestedDisk > maximumDisk) {
+      throw StateError(
+        'The selected node does not have enough configured disk capacity '
+        'for $serverCount server(s). No servers were created.',
+      );
+    }
+  }
+
+  static PterodactylNode _resolveCreationNode(
+    List<PterodactylNode> nodes,
+    int nodeId,
+  ) =>
+      nodes.where((PterodactylNode node) => node.id == nodeId).firstOrNull ??
+      (throw StateError('The selected node is no longer available.'));
+
+  static List<String> _validateBulkCreateNames(Iterable<String> names) {
+    final List<String> requestedNames = names
+        .map(_validateCreateName)
+        .toList(growable: false);
+    if (requestedNames.isEmpty) {
+      throw ArgumentError('At least one non-empty server name is required.');
+    }
+    if (requestedNames.length > 100) {
+      throw ArgumentError(
+        'Create-many supports at most 100 servers per batch.',
+      );
+    }
+    if (requestedNames
+            .map((String name) => name.toLowerCase())
+            .toSet()
+            .length !=
+        requestedNames.length) {
+      throw ArgumentError('Server names in a create batch must be unique.');
+    }
+    return requestedNames;
+  }
+
+  static String _validateCreateName(String name) {
+    final String normalized = name.trim();
+    if (normalized.isEmpty || normalized.length > 191) {
+      throw ArgumentError.value(
+        name,
+        'name',
+        'must contain between 1 and 191 characters',
+      );
+    }
+    return normalized;
   }
 
   static PterodactylCreateServerRequest _templateCreateRequest({
     required PterodactylApplicationServer template,
+    required int ownerId,
     required String name,
     required int defaultAllocationId,
     required int? additionalAllocationId,
@@ -1293,7 +1761,7 @@ final class PterodactylService {
     return PterodactylCreateServerRequest(
       name: name,
       description: 'Created by Multiplexor from ${template.name}.',
-      ownerId: template.ownerId,
+      ownerId: ownerId,
       eggId: template.eggId,
       dockerImage: template.image,
       startup: template.startup,
@@ -1608,6 +2076,56 @@ final class PterodactylService {
       );
     }
     return matches.single;
+  }
+
+  static PterodactylApplicationServer _resolveApplicationServer(
+    List<PterodactylApplicationServer> servers,
+    String selector,
+  ) {
+    final String normalized = selector.trim().toLowerCase();
+    final List<PterodactylApplicationServer> matches = servers
+        .where(
+          (PterodactylApplicationServer server) =>
+              server.identifier.toLowerCase() == normalized ||
+              server.uuid.toLowerCase() == normalized ||
+              server.name.toLowerCase() == normalized,
+        )
+        .toList(growable: false);
+    if (matches.length != 1) {
+      throw StateError(
+        matches.isEmpty
+            ? 'No remote server template matches: $selector'
+            : 'Remote server template name is ambiguous: $selector',
+      );
+    }
+    return matches.single;
+  }
+
+  static int _resolveCreationOwner(
+    List<PterodactylUser> users, {
+    required int? ownerId,
+    required String? clientUsername,
+  }) {
+    final List<PterodactylUser> matches = ownerId != null
+        ? users
+              .where((PterodactylUser user) => user.id == ownerId)
+              .toList(growable: false)
+        : users
+              .where(
+                (PterodactylUser user) =>
+                    user.username.toLowerCase() ==
+                    clientUsername?.toLowerCase(),
+              )
+              .toList(growable: false);
+    if (matches.length != 1) {
+      throw StateError(
+        ownerId != null
+            ? 'The selected server owner is no longer available.'
+            : 'No unique Application user matches the connected Client '
+                  'username. Select an owner explicitly.',
+      );
+    }
+    return matches.single.id;
   }
 
   Future<_ClientHandle> _clientFor(

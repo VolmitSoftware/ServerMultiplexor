@@ -78,6 +78,7 @@ void main() {
       final String output = lines.join('\n');
       expect(output, contains('remote account add'));
       expect(output, contains('remote history <server>'));
+      expect(output, contains('remote catalog'));
       expect(output, contains('remote drive install'));
       expect(output, contains('remote drive trust'));
       expect(output, contains('remote drive start'));
@@ -87,11 +88,13 @@ void main() {
       expect(output, isNot(contains('files authorize')));
       expect(output, contains('remote reinstall <server>'));
       expect(output, contains('remote delete <server>'));
+      expect(output, contains('--egg <id|name>'));
       expect(
         output,
         contains('remote bulk <start|stop|restart|kill|reinstall|delete>'),
       );
-      expect(output, contains('remote create-many --template <server>'));
+      expect(output, contains('remote create-many (--template <server>'));
+      expect(output, contains('--databases <count>'));
       expect(output, contains('--state <running|offline>'));
       expect(output, contains('--concurrency <1-8>'));
       expect(output, contains('remote variable <server>'));

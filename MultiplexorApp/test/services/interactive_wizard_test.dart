@@ -2,7 +2,10 @@ import 'package:multiplexor/services/interactive_wizard.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_credential.dart';
 import 'package:multiplexor/services/monitor/monitor_keymap.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_models.dart';
+import 'package:multiplexor/services/pterodactyl/pterodactyl_errors.dart';
+import 'package:multiplexor/services/pterodactyl/pterodactyl_profile.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_service.dart';
+import 'package:multiplexor/utils/user_prompt.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -204,6 +207,289 @@ void main() {
       );
     });
   });
+
+  group('Remote create workspace policy', () {
+    test('zero-server panels offer egg creation instead of dead-ending', () {
+      expect(
+        remoteCreateSources(hasPanelEggs: true, hasTemplates: false),
+        <RemoteCreateSource>[
+          RemoteCreateSource.panelEgg,
+          RemoteCreateSource.done,
+        ],
+      );
+    });
+
+    test('a truly empty catalog has no synthetic credential-repair source', () {
+      expect(
+        remoteCreateSources(hasPanelEggs: false, hasTemplates: false),
+        <RemoteCreateSource>[RemoteCreateSource.done],
+      );
+    });
+
+    test('partial egg inventory proceeds with clone without key repair', () {
+      final PterodactylCreationCatalog catalog = _catalog(
+        templates: <PterodactylApplicationServer>[_template()],
+        eggInventoryUnavailablePermission: 'Eggs READ',
+      );
+
+      expect(remoteCreateUsableEggs(catalog), isEmpty);
+      expect(
+        remoteCreateSources(
+          hasPanelEggs: remoteCreateUsableEggs(catalog).isNotEmpty,
+          hasTemplates: catalog.templates.isNotEmpty,
+        ),
+        <RemoteCreateSource>[
+          RemoteCreateSource.cloneExisting,
+          RemoteCreateSource.done,
+        ],
+      );
+      expect(
+        remoteCreatePartialEggInventoryNote(catalog),
+        'Panel egg creation is unavailable (missing Eggs READ); '
+        'continuing with clone existing.',
+      );
+      expect(remoteCreationCatalogErrorNeedsCredentialRepair(catalog), isFalse);
+    });
+
+    test('existing panels offer both egg and clone sources', () {
+      expect(
+        remoteCreateSources(hasPanelEggs: true, hasTemplates: true),
+        <RemoteCreateSource>[
+          RemoteCreateSource.panelEgg,
+          RemoteCreateSource.cloneExisting,
+          RemoteCreateSource.done,
+        ],
+      );
+    });
+
+    test('an empty panel with one configured egg remains creation-ready', () {
+      final PterodactylEgg egg = _egg();
+      final PterodactylCreationCatalog catalog = _catalog(
+        eggs: <PterodactylEgg>[egg],
+      );
+
+      expect(catalog.templates, isEmpty);
+      expect(remoteCreateUsableEggs(catalog), <PterodactylEgg>[egg]);
+      expect(
+        remoteCreateSources(
+          hasPanelEggs: remoteCreateUsableEggs(catalog).isNotEmpty,
+          hasTemplates: catalog.templates.isNotEmpty,
+        ),
+        <RemoteCreateSource>[
+          RemoteCreateSource.panelEgg,
+          RemoteCreateSource.done,
+        ],
+      );
+    });
+
+    test('required blank variables are prompted even when not editable', () {
+      const PterodactylEggVariable requiredBlank = PterodactylEggVariable(
+        name: 'Minecraft version',
+        environmentVariable: 'MC_VERSION',
+        defaultValue: '',
+        rules: 'required|string',
+        userEditable: false,
+        userViewable: false,
+      );
+      const PterodactylEggVariable requiredDefault = PterodactylEggVariable(
+        name: 'Jar file',
+        environmentVariable: 'SERVER_JARFILE',
+        defaultValue: 'server.jar',
+        rules: 'required|string',
+        userEditable: false,
+        userViewable: true,
+      );
+      const PterodactylEggVariable editableOptional = PterodactylEggVariable(
+        name: 'Message',
+        environmentVariable: 'MESSAGE',
+        defaultValue: '',
+        rules: 'nullable|string',
+        userEditable: true,
+        userViewable: true,
+      );
+      const PterodactylEggVariable hiddenOptional = PterodactylEggVariable(
+        name: 'Hidden',
+        environmentVariable: 'HIDDEN',
+        defaultValue: '',
+        rules: 'nullable|string',
+        userEditable: false,
+        userViewable: false,
+      );
+      final PterodactylEgg egg = _egg(
+        variables: const <PterodactylEggVariable>[
+          requiredBlank,
+          requiredDefault,
+          editableOptional,
+          hiddenOptional,
+        ],
+      );
+
+      expect(remoteCreatePromptVariables(egg), <PterodactylEggVariable>[
+        requiredBlank,
+        editableOptional,
+      ]);
+    });
+
+    test('node eligibility excludes maintenance and under-allocated nodes', () {
+      final PterodactylNode ready = _node(1, 'Ready');
+      final PterodactylNode maintenance = _node(
+        2,
+        'Maintenance',
+        maintenance: true,
+      );
+      final PterodactylNode short = _node(3, 'Short');
+      final PterodactylCreationCatalog catalog = _catalog(
+        nodes: <PterodactylNode>[ready, maintenance, short],
+        freeAllocationsByNode: <int, List<PterodactylAllocation>>{
+          1: <PterodactylAllocation>[_allocation(1), _allocation(2)],
+          2: <PterodactylAllocation>[_allocation(3), _allocation(4)],
+          3: <PterodactylAllocation>[_allocation(5)],
+        },
+      );
+
+      expect(remoteCreateEligibleNodes(catalog, 2), <PterodactylNode>[ready]);
+    });
+
+    test('connected panel owner is preselected when present', () {
+      final List<PterodactylUser> users = <PterodactylUser>[
+        _user(4, 'other'),
+        _user(9, 'connected'),
+      ];
+      expect(remoteCreateOwnerInitialIndex(users, 9), 1);
+      expect(remoteCreateOwnerInitialIndex(users, 99), 0);
+    });
+
+    test('name patterns are exact for single and multi-create', () {
+      expect(remoteCreateNames(pattern: 'Survival {n}', count: 3), <String>[
+        'Survival 1',
+        'Survival 2',
+        'Survival 3',
+      ]);
+      expect(remoteCreateNames(pattern: 'Proxy', count: 2), <String>[
+        'Proxy 1',
+        'Proxy 2',
+      ]);
+      expect(remoteCreateNames(pattern: 'Lobby', count: 1), <String>['Lobby']);
+    });
+
+    test('name planning rejects empty names and unsafe batch sizes', () {
+      expect(
+        () => remoteCreateNames(pattern: '  ', count: 1),
+        throwsArgumentError,
+      );
+      expect(
+        () => remoteCreateNames(pattern: 'Server', count: 0),
+        throwsRangeError,
+      );
+      expect(
+        () => remoteCreateNames(pattern: 'Server', count: 101),
+        throwsRangeError,
+      );
+    });
+
+    test('final creation confirmation is default-No', () {
+      expect(remoteCreateFinalConfirmationDefault, isFalse);
+    });
+
+    test('Escape unwinds one creation source step', () async {
+      expect(
+        await remoteCreateStepOrBack(() async {
+          throw const PromptBackNavigation();
+        }),
+        isFalse,
+      );
+      expect(await remoteCreateStepOrBack(() async {}), isTrue);
+    });
+
+    test('create-many result rows retain service order and positions', () {
+      final PterodactylBulkResult result = PterodactylBulkResult(
+        action: PterodactylBulkAction.create,
+        items: const <PterodactylBulkItemResult>[
+          PterodactylBulkItemResult(
+            target: 'Lobby 1',
+            name: 'Lobby 1',
+            identifier: 'first',
+            succeeded: true,
+          ),
+          PterodactylBulkItemResult(
+            target: 'Lobby 2',
+            name: 'Lobby 2',
+            identifier: null,
+            succeeded: false,
+            error: 'allocation unavailable',
+          ),
+          PterodactylBulkItemResult(
+            target: 'Lobby 3',
+            name: 'Lobby 3',
+            identifier: 'third',
+            succeeded: true,
+          ),
+        ],
+      );
+
+      final List<RemoteCreateResultRow> rows = remoteCreateResultRows(result);
+      expect(rows.map((RemoteCreateResultRow row) => row.item.target), <String>[
+        'Lobby 1',
+        'Lobby 2',
+        'Lobby 3',
+      ]);
+      expect(rows.map((RemoteCreateResultRow row) => row.position), <int>[
+        1,
+        2,
+        3,
+      ]);
+      expect(rows.every((RemoteCreateResultRow row) => row.total == 3), isTrue);
+    });
+
+    test('typed catalog ACL failures enter credential repair policy', () {
+      expect(
+        remoteCreationCatalogErrorNeedsCredentialRepair(
+          const PterodactylCreationCatalogPermissionException(
+            permission: 'Eggs READ',
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        remoteCreationCatalogErrorNeedsCredentialRepair(
+          PterodactylApiException(
+            statusCode: 403,
+            method: 'GET',
+            uri: Uri.parse('https://panel.example.test/api/application/nests'),
+            message: 'Forbidden',
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        remoteCreationCatalogErrorNeedsCredentialRepair(StateError('broken')),
+        isFalse,
+      );
+    });
+
+    test('catalog access does not require creation readiness', () {
+      final PterodactylProfile profile = PterodactylProfile(
+        id: 'panel',
+        name: 'Panel',
+        panelUri: Uri.parse('https://panel.example.test'),
+      );
+      final PterodactylVerification inventoryOnly = PterodactylVerification(
+        profile: profile,
+        serverCount: 0,
+        nodeCount: 0,
+        capabilities: const <PterodactylCapability>{
+          PterodactylCapability.view,
+          PterodactylCapability.configure,
+        },
+        warnings: const <String>['Panel needs at least one node.'],
+      );
+      expect(
+        inventoryOnly.capabilities.contains(PterodactylCapability.create),
+        isFalse,
+      );
+      expect(remoteCreationCatalogAccessAvailable(inventoryOnly), isTrue);
+    });
+  });
 }
 
 List<String> _ids(Iterable<PterodactylFleetSample> samples) => samples
@@ -258,4 +544,111 @@ PterodactylFleetSample _sample(
           networkTxBytes: 0,
           uptime: Duration.zero,
         ),
+);
+
+PterodactylCreationCatalog _catalog({
+  List<PterodactylApplicationServer> templates =
+      const <PterodactylApplicationServer>[],
+  List<PterodactylEgg> eggs = const <PterodactylEgg>[],
+  List<PterodactylNode> nodes = const <PterodactylNode>[],
+  Map<int, List<PterodactylAllocation>> freeAllocationsByNode =
+      const <int, List<PterodactylAllocation>>{},
+  String? eggInventoryUnavailablePermission,
+}) => PterodactylCreationCatalog(
+  templates: templates,
+  users: const <PterodactylUser>[],
+  nodes: nodes,
+  nests: const <PterodactylNest>[
+    PterodactylNest(
+      id: 10,
+      uuid: '00000000-0000-0000-0000-000000000010',
+      name: 'Minecraft',
+      author: 'support@example.test',
+    ),
+  ],
+  eggs: eggs,
+  freeAllocationsByNode: freeAllocationsByNode,
+  eggInventoryUnavailablePermission: eggInventoryUnavailablePermission,
+);
+
+PterodactylApplicationServer _template() => PterodactylApplicationServer(
+  id: 1,
+  uuid: '00000000-0000-0000-0000-000000000001',
+  identifier: 'template',
+  name: 'Template',
+  description: '',
+  status: null,
+  ownerId: 1,
+  nodeId: 1,
+  allocationId: 1,
+  nestId: 10,
+  eggId: 20,
+  limits: const PterodactylServerLimits(
+    memoryMiB: 4096,
+    swapMiB: 0,
+    diskMiB: 0,
+    ioWeight: 500,
+    cpuPercent: 0,
+    threads: null,
+    oomDisabled: false,
+  ),
+  featureLimits: const PterodactylFeatureLimits(
+    databases: 0,
+    allocations: 0,
+    backups: 0,
+  ),
+  image: 'ghcr.io/pterodactyl/yolks:java_21',
+  startup: 'java -jar server.jar',
+  skipScripts: false,
+  environment: const <String, String>{},
+);
+
+PterodactylEgg _egg({
+  List<PterodactylEggVariable> variables = const <PterodactylEggVariable>[],
+}) => PterodactylEgg(
+  id: 20,
+  uuid: '00000000-0000-0000-0000-000000000020',
+  name: 'Paper',
+  nestId: 10,
+  author: 'support@example.test',
+  startup: 'java -jar {{SERVER_JARFILE}}',
+  dockerImages: const <String, String>{
+    'Java 21': 'ghcr.io/pterodactyl/yolks:java_21',
+  },
+  variables: variables,
+);
+
+PterodactylUser _user(int id, String username) => PterodactylUser(
+  id: id,
+  uuid: '00000000-0000-0000-0000-${id.toString().padLeft(12, '0')}',
+  username: username,
+  email: '$username@example.test',
+  firstName: username,
+  lastName: 'User',
+  isRootAdmin: false,
+);
+
+PterodactylNode _node(int id, String name, {bool maintenance = false}) =>
+    PterodactylNode(
+      id: id,
+      uuid: '00000000-0000-0000-0000-${id.toString().padLeft(12, '0')}',
+      name: name,
+      fqdn: 'node$id.example.test',
+      scheme: 'https',
+      public: true,
+      behindProxy: false,
+      maintenanceMode: maintenance,
+      memoryMiB: 16384,
+      diskMiB: 100000,
+      allocatedMemoryMiB: 0,
+      allocatedDiskMiB: 0,
+      daemonPort: 8080,
+      sftpPort: 2022,
+    );
+
+PterodactylAllocation _allocation(int id) => PterodactylAllocation(
+  id: id,
+  ip: '127.0.0.1',
+  port: 25564 + id,
+  isAssigned: false,
 );

@@ -714,6 +714,8 @@ final class PterodactylNode {
     required this.maintenanceMode,
     required this.memoryMiB,
     required this.diskMiB,
+    this.memoryOverallocatePercent = 0,
+    this.diskOverallocatePercent = 0,
     required this.allocatedMemoryMiB,
     required this.allocatedDiskMiB,
     required this.daemonPort,
@@ -735,6 +737,8 @@ final class PterodactylNode {
       maintenanceMode: _optionalBool(json, 'maintenance_mode'),
       memoryMiB: _requiredInt(json, 'memory'),
       diskMiB: _requiredInt(json, 'disk'),
+      memoryOverallocatePercent: _nullableInt(json, 'memory_overallocate') ?? 0,
+      diskOverallocatePercent: _nullableInt(json, 'disk_overallocate') ?? 0,
       allocatedMemoryMiB: _requiredInt(allocated, 'memory'),
       allocatedDiskMiB: _requiredInt(allocated, 'disk'),
       daemonPort: _requiredInt(json, 'daemon_listen'),
@@ -753,10 +757,24 @@ final class PterodactylNode {
   final bool maintenanceMode;
   final int memoryMiB;
   final int diskMiB;
+  final int memoryOverallocatePercent;
+  final int diskOverallocatePercent;
   final int allocatedMemoryMiB;
   final int allocatedDiskMiB;
   final int daemonPort;
   final int sftpPort;
+
+  /// Null mirrors the Panel's `-1` setting, which disables memory capacity
+  /// checks for automatic placement.
+  int? get maximumAllocatedMemoryMiB => memoryOverallocatePercent == -1
+      ? null
+      : memoryMiB * (100 + memoryOverallocatePercent) ~/ 100;
+
+  /// Null mirrors the Panel's `-1` setting, which disables disk capacity
+  /// checks for automatic placement.
+  int? get maximumAllocatedDiskMiB => diskOverallocatePercent == -1
+      ? null
+      : diskMiB * (100 + diskOverallocatePercent) ~/ 100;
 }
 
 final class PterodactylUser {
@@ -829,10 +847,12 @@ final class PterodactylEgg {
     required this.author,
     required this.startup,
     required Map<String, String> dockerImages,
+    List<PterodactylEggVariable> variables = const <PterodactylEggVariable>[],
     this.description,
   }) : dockerImages = UnmodifiableMapView<String, String>(
          Map<String, String>.from(dockerImages),
-       );
+       ),
+       variables = List<PterodactylEggVariable>.unmodifiable(variables);
 
   factory PterodactylEgg.fromJson(JsonObject json) {
     final Object? imagesValue = json['docker_images'];
@@ -844,6 +864,11 @@ final class PterodactylEgg {
         }
       }
     }
+    final JsonObject relationships = _optionalObject(json, 'relationships');
+    final List<PterodactylEggVariable> variables = _relationshipItems(
+      relationships,
+      'variables',
+    ).map(PterodactylEggVariable.fromJson).toList(growable: false);
     return PterodactylEgg(
       id: _requiredInt(json, 'id'),
       uuid: _requiredString(json, 'uuid'),
@@ -851,8 +876,9 @@ final class PterodactylEgg {
       nestId: _requiredInt(json, 'nest'),
       author: _requiredString(json, 'author'),
       description: _nullableString(json, 'description'),
-      startup: _requiredString(json, 'startup'),
+      startup: _nullableString(json, 'startup'),
       dockerImages: images,
+      variables: variables,
     );
   }
 
@@ -862,8 +888,143 @@ final class PterodactylEgg {
   final int nestId;
   final String author;
   final String? description;
-  final String startup;
+
+  /// Null means the egg cannot be used for server creation until an
+  /// administrator configures a startup command on the Panel.
+  final String? startup;
   final Map<String, String> dockerImages;
+  final List<PterodactylEggVariable> variables;
+}
+
+final class PterodactylEggVariable {
+  const PterodactylEggVariable({
+    required this.name,
+    required this.environmentVariable,
+    required this.defaultValue,
+    required this.rules,
+    required this.userEditable,
+    required this.userViewable,
+    this.description,
+  });
+
+  factory PterodactylEggVariable.fromJson(JsonObject json) {
+    return PterodactylEggVariable(
+      name: _requiredString(json, 'name'),
+      description: _nullableString(json, 'description'),
+      environmentVariable: _requiredString(json, 'env_variable'),
+      defaultValue: _nullableString(json, 'default_value') ?? '',
+      rules: _requiredString(json, 'rules'),
+      userEditable: _optionalBool(json, 'user_editable'),
+      userViewable: _optionalBool(json, 'user_viewable'),
+    );
+  }
+
+  final String name;
+  final String? description;
+  final String environmentVariable;
+  final String defaultValue;
+  final String rules;
+  final bool userEditable;
+  final bool userViewable;
+
+  bool get isRequired => rules.split('|').contains('required');
+}
+
+final class PterodactylCreationCatalog {
+  PterodactylCreationCatalog({
+    required List<PterodactylApplicationServer> templates,
+    required List<PterodactylUser> users,
+    required List<PterodactylNode> nodes,
+    required List<PterodactylNest> nests,
+    required List<PterodactylEgg> eggs,
+    required Map<int, List<PterodactylAllocation>> freeAllocationsByNode,
+    this.recommendedOwnerId,
+    this.eggInventoryUnavailablePermission,
+  }) : templates = List<PterodactylApplicationServer>.unmodifiable(templates),
+       users = List<PterodactylUser>.unmodifiable(users),
+       nodes = List<PterodactylNode>.unmodifiable(nodes),
+       nests = List<PterodactylNest>.unmodifiable(nests),
+       eggs = List<PterodactylEgg>.unmodifiable(eggs),
+       freeAllocationsByNode =
+           UnmodifiableMapView<int, List<PterodactylAllocation>>(<
+             int,
+             List<PterodactylAllocation>
+           >{
+             for (final MapEntry<int, List<PterodactylAllocation>> entry
+                 in freeAllocationsByNode.entries)
+               entry.key: List<PterodactylAllocation>.unmodifiable(entry.value),
+           });
+
+  final List<PterodactylApplicationServer> templates;
+  final List<PterodactylUser> users;
+  final List<PterodactylNode> nodes;
+  final List<PterodactylNest> nests;
+  final List<PterodactylEgg> eggs;
+  final Map<int, List<PterodactylAllocation>> freeAllocationsByNode;
+  final int? recommendedOwnerId;
+
+  /// The missing Application READ permission when an explicitly partial
+  /// clone-capable catalog could not load nest/egg inventory.
+  final String? eggInventoryUnavailablePermission;
+
+  int freeAllocationCount(int nodeId) =>
+      freeAllocationsByNode[nodeId]?.length ?? 0;
+}
+
+final class PterodactylEggCreatePlan {
+  PterodactylEggCreatePlan({
+    required this.ownerId,
+    required this.nodeId,
+    required this.eggId,
+    required this.dockerImage,
+    required this.startup,
+    required Map<String, String> environment,
+    this.memoryMiB = 4096,
+    this.swapMiB = 0,
+    this.diskMiB = 0,
+    this.ioWeight = 500,
+    this.cpuPercent = 0,
+    this.databaseLimit = 0,
+    this.allocationLimit = 0,
+    this.backupLimit = 0,
+    this.startOnCompletion = false,
+  }) : environment = UnmodifiableMapView<String, String>(
+         Map<String, String>.from(environment),
+       ) {
+    if (ownerId < 1 || nodeId < 1 || eggId < 1) {
+      throw ArgumentError('Owner, node, and egg IDs must be positive.');
+    }
+    if (dockerImage.trim().isEmpty || startup.trim().isEmpty) {
+      throw ArgumentError('Docker image and startup command are required.');
+    }
+    if (memoryMiB < 0 ||
+        swapMiB < -1 ||
+        diskMiB < 0 ||
+        ioWeight < 10 ||
+        ioWeight > 1000 ||
+        cpuPercent < 0 ||
+        databaseLimit < 0 ||
+        allocationLimit < 0 ||
+        backupLimit < 0) {
+      throw ArgumentError('Creation resource limits are invalid.');
+    }
+  }
+
+  final int ownerId;
+  final int nodeId;
+  final int eggId;
+  final String dockerImage;
+  final String startup;
+  final Map<String, String> environment;
+  final int memoryMiB;
+  final int swapMiB;
+  final int diskMiB;
+  final int ioWeight;
+  final int cpuPercent;
+  final int databaseLimit;
+  final int allocationLimit;
+  final int backupLimit;
+  final bool startOnCompletion;
 }
 
 final class PterodactylServerDeployment {
