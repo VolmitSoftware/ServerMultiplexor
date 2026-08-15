@@ -120,5 +120,6 @@ final class _KeygenRunner implements PterodactylSmbProcessRunner {
     String executable,
     List<String> arguments, {
     Map<String, String>? environment,
+    bool detached = false,
   }) => throw UnimplementedError();
 }

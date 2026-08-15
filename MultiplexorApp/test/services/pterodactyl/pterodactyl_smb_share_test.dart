@@ -6,6 +6,18 @@ import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_share.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('local SMB URL uses loopback so network changes do not break it', () {
+    final PterodactylSmbShareManager manager = PterodactylSmbShareManager(
+      runner: _ShareRunner(),
+      operatingSystem: PterodactylSmbOperatingSystem.macos,
+    );
+
+    expect(
+      manager.connectionUrl('Multiplexor Drive'),
+      'smb://localhost/Multiplexor%20Drive',
+    );
+  });
+
   test('macOS share is authenticated, writable, and SMB-encrypted', () async {
     final _ShareRunner runner = _ShareRunner();
     final PterodactylSmbShareManager manager = PterodactylSmbShareManager(
@@ -103,5 +115,6 @@ final class _ShareRunner implements PterodactylSmbProcessRunner {
     String executable,
     List<String> arguments, {
     Map<String, String>? environment,
+    bool detached = false,
   }) => throw UnimplementedError();
 }

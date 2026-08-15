@@ -196,10 +196,15 @@ Future<void> handleInstanceReset(Map<String, dynamic> args) async {
 Future<void> handleInstanceCreate(Map<String, dynamic> args) async {
   final name = _arg(args, 'name');
   if (name == null) {
-    stderr.writeln('Usage: instance create <name>');
+    stderr.writeln('Usage: instance create <name> [--isolated]');
     exit(2);
   }
-  await _runAndExit(<String>['instance', 'create', name]);
+  await _runAndExit(<String>[
+    'instance',
+    'create',
+    name,
+    if (args['isolated'] == true) '--isolated',
+  ]);
 }
 
 Future<void> handleInstanceClone(Map<String, dynamic> args) async {

@@ -122,6 +122,259 @@ void main() {
   });
 
   test(
+    'reconnects after an authenticated socket drops and keeps commands live',
+    () async {
+      final _FakeConnector connector = _FakeConnector();
+      int credentialLoads = 0;
+      final PterodactylConsoleSession session = PterodactylConsoleSession(
+        profile: _profile,
+        serverIdentifier: 'abc123',
+        connector: connector,
+        reconnectInitialDelay: const Duration(milliseconds: 10),
+        reconnectMaximumDelay: const Duration(milliseconds: 20),
+        loadCredentials: (String _) async {
+          credentialLoads++;
+          return _credentials('token-$credentialLoads');
+        },
+      );
+      final List<PterodactylConsoleConnectionState> states =
+          <PterodactylConsoleConnectionState>[];
+      final StreamSubscription<PterodactylConsoleEvent> subscription = session
+          .events
+          .listen((PterodactylConsoleEvent event) {
+            if (event is PterodactylConsoleConnectionEvent) {
+              states.add(event.state);
+            }
+          });
+      bool done = false;
+      session.done.then((_) => done = true);
+      addTearDown(() async {
+        await subscription.cancel();
+        await session.close();
+      });
+
+      final Future<void> connected = session.connect();
+      await _pump();
+      final _FakeSocket original = connector.socket;
+      original.add(<String, Object?>{'event': 'auth success'});
+      await connected;
+      await _pump();
+
+      connector.failuresRemaining = 1;
+      await original.close();
+      await expectLater(session.sendCommand('list'), throwsStateError);
+      await _waitUntil(() => connector.sockets.length == 2);
+      expect(done, isFalse);
+      expect(states, contains(PterodactylConsoleConnectionState.disconnected));
+      expect(states, contains(PterodactylConsoleConnectionState.reconnecting));
+      expect(credentialLoads, 3);
+      expect(connector.attempts, 3);
+
+      final _FakeSocket replacement = connector.socket;
+      expect(_eventNames(replacement.sent), <String>['auth']);
+      replacement.add(<String, Object?>{'event': 'auth success'});
+      await _waitUntil(
+        () =>
+            states
+                .where(
+                  (PterodactylConsoleConnectionState state) =>
+                      state == PterodactylConsoleConnectionState.connected,
+                )
+                .length ==
+            2,
+      );
+      await session.sendCommand('say after restart');
+
+      expect(
+        replacement.sent.any(
+          (String frame) =>
+              (jsonDecode(frame) as Map<String, Object?>)['event'] ==
+              'send command',
+        ),
+        isTrue,
+      );
+      expect(original.listenerCanceledBeforeClose, isFalse);
+    },
+  );
+
+  test('recovers when a socket errors without first completing', () async {
+    final _FakeConnector connector = _FakeConnector();
+    final PterodactylConsoleSession session = PterodactylConsoleSession(
+      profile: _profile,
+      serverIdentifier: 'abc123',
+      connector: connector,
+      reconnectInitialDelay: const Duration(milliseconds: 1),
+      reconnectMaximumDelay: const Duration(milliseconds: 2),
+      loadCredentials: (String _) async => _credentials('token'),
+    );
+    addTearDown(session.close);
+
+    final Future<void> connected = session.connect();
+    await _pump();
+    final _FakeSocket original = connector.socket;
+    original.add(<String, Object?>{'event': 'auth success'});
+    await connected;
+
+    original.addError(StateError('fixture transport failure'));
+    await _waitUntil(() => connector.sockets.length == 2);
+    final _FakeSocket replacement = connector.socket;
+    replacement.add(<String, Object?>{'event': 'auth success'});
+    await _pump();
+    await session.sendCommand('say recovered');
+
+    expect(original.closed, isTrue);
+    expect(_eventNames(replacement.sent), contains('send command'));
+  });
+
+  test('recovers when an outbound command exposes a dead transport', () async {
+    final _FakeConnector connector = _FakeConnector();
+    final PterodactylConsoleSession session = PterodactylConsoleSession(
+      profile: _profile,
+      serverIdentifier: 'abc123',
+      connector: connector,
+      reconnectInitialDelay: const Duration(milliseconds: 1),
+      reconnectMaximumDelay: const Duration(milliseconds: 2),
+      loadCredentials: (String _) async => _credentials('token'),
+    );
+    addTearDown(session.close);
+
+    final Future<void> connected = session.connect();
+    await _pump();
+    final _FakeSocket original = connector.socket;
+    original.add(<String, Object?>{'event': 'auth success'});
+    await connected;
+    await _pump();
+
+    original.sendFailures = 1;
+    await expectLater(session.sendCommand('list'), throwsStateError);
+    await _waitUntil(() => connector.sockets.length == 2);
+    final _FakeSocket replacement = connector.socket;
+    replacement.add(<String, Object?>{'event': 'auth success'});
+    await _pump();
+    await session.sendCommand('list');
+
+    expect(original.closed, isTrue);
+    expect(_eventNames(replacement.sent), contains('send command'));
+  });
+
+  test('close cancels a pending reconnect backoff immediately', () async {
+    final _FakeConnector connector = _FakeConnector();
+    final PterodactylConsoleSession session = PterodactylConsoleSession(
+      profile: _profile,
+      serverIdentifier: 'abc123',
+      connector: connector,
+      reconnectInitialDelay: const Duration(days: 1),
+      reconnectMaximumDelay: const Duration(days: 1),
+      loadCredentials: (String _) async => _credentials('token'),
+    );
+    final Completer<void> reconnecting = Completer<void>();
+    final StreamSubscription<PterodactylConsoleEvent> subscription = session
+        .events
+        .listen((PterodactylConsoleEvent event) {
+          if (event case PterodactylConsoleConnectionEvent(
+            state: PterodactylConsoleConnectionState.reconnecting,
+          )) {
+            if (!reconnecting.isCompleted) reconnecting.complete();
+          }
+        });
+    addTearDown(subscription.cancel);
+
+    final Future<void> connected = session.connect();
+    await _pump();
+    final _FakeSocket original = connector.socket;
+    original.add(<String, Object?>{'event': 'auth success'});
+    await connected;
+    await original.close();
+    await reconnecting.future.timeout(const Duration(milliseconds: 250));
+
+    await session.close().timeout(const Duration(milliseconds: 250));
+    await session.done.timeout(const Duration(milliseconds: 250));
+    await _pump();
+
+    expect(connector.sockets, hasLength(1));
+  });
+
+  test('serializes token refresh with a simultaneous socket loss', () async {
+    final _FakeConnector connector = _FakeConnector();
+    final Completer<void> refreshStarted = Completer<void>();
+    final Completer<PterodactylWebsocketCredentials> refreshCredentials =
+        Completer<PterodactylWebsocketCredentials>();
+    int credentialLoads = 0;
+    final PterodactylConsoleSession session = PterodactylConsoleSession(
+      profile: _profile,
+      serverIdentifier: 'abc123',
+      connector: connector,
+      reconnectInitialDelay: const Duration(milliseconds: 1),
+      reconnectMaximumDelay: const Duration(milliseconds: 2),
+      loadCredentials: (String _) {
+        credentialLoads++;
+        if (credentialLoads == 2) {
+          refreshStarted.complete();
+          return refreshCredentials.future;
+        }
+        return Future<PterodactylWebsocketCredentials>.value(
+          _credentials('token-$credentialLoads'),
+        );
+      },
+    );
+    addTearDown(session.close);
+
+    final Future<void> connected = session.connect();
+    await _pump();
+    final _FakeSocket original = connector.socket;
+    original.add(<String, Object?>{'event': 'auth success'});
+    await connected;
+
+    original.add(<String, Object?>{'event': 'token expiring'});
+    await refreshStarted.future.timeout(const Duration(milliseconds: 250));
+    await original.close();
+    refreshCredentials.complete(_credentials('token-2'));
+    await _waitUntil(() => connector.sockets.length == 2);
+
+    final _FakeSocket replacement = connector.socket;
+    replacement.add(<String, Object?>{'event': 'auth success'});
+    await _pump();
+    await session.sendCommand('say serialized');
+
+    expect(credentialLoads, 3);
+    expect(connector.attempts, 2);
+    expect(original.closed, isTrue);
+    expect(_eventNames(replacement.sent), contains('send command'));
+  });
+
+  test(
+    'reconnects when auth succeeds immediately before transport loss',
+    () async {
+      final _FakeConnector connector = _FakeConnector();
+      final PterodactylConsoleSession session = PterodactylConsoleSession(
+        profile: _profile,
+        serverIdentifier: 'abc123',
+        connector: connector,
+        reconnectInitialDelay: const Duration(milliseconds: 1),
+        reconnectMaximumDelay: const Duration(milliseconds: 2),
+        loadCredentials: (String _) async => _credentials('token'),
+      );
+      addTearDown(session.close);
+
+      final Future<void> connected = session.connect();
+      await _pump();
+      final _FakeSocket original = connector.socket;
+      original.add(<String, Object?>{'event': 'auth success'});
+      final Future<void> originalClosed = original.close();
+      await connected;
+      await originalClosed;
+      await _waitUntil(() => connector.sockets.length == 2);
+
+      final _FakeSocket replacement = connector.socket;
+      replacement.add(<String, Object?>{'event': 'auth success'});
+      await _pump();
+      await session.sendCommand('say still attached');
+
+      expect(_eventNames(replacement.sent), contains('send command'));
+    },
+  );
+
+  test(
     'retires the previous socket when endpoint refresh auth fails',
     () async {
       final _FakeConnector connector = _FakeConnector();
@@ -153,9 +406,11 @@ void main() {
       final _FakeSocket replacement = connector.socket;
       expect(replacement, isNot(same(original)));
       await replacement.close();
+      await session.close();
       await session.done;
 
       expect(original.closed, isTrue);
+      expect(original.listenerCanceledBeforeClose, isFalse);
       expect(replacement.closed, isTrue);
     },
   );
@@ -188,8 +443,20 @@ Future<void> _pump() async {
   await Future<void>.delayed(Duration.zero);
 }
 
+Future<void> _waitUntil(bool Function() predicate) async {
+  final DateTime deadline = DateTime.now().add(const Duration(seconds: 1));
+  while (!predicate()) {
+    if (DateTime.now().isAfter(deadline)) {
+      throw TimeoutException('Timed out waiting for console test state.');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+  }
+}
+
 final class _FakeConnector implements PterodactylConsoleSocketConnector {
   final List<_FakeSocket> sockets = <_FakeSocket>[];
+  int attempts = 0;
+  int failuresRemaining = 0;
   Uri? uri;
   String? origin;
 
@@ -200,6 +467,11 @@ final class _FakeConnector implements PterodactylConsoleSocketConnector {
     Uri socketUri, {
     required String origin,
   }) async {
+    attempts++;
+    if (failuresRemaining > 0) {
+      failuresRemaining--;
+      throw StateError('fixture connect failure');
+    }
     uri = socketUri;
     this.origin = origin;
     final _FakeSocket socket = _FakeSocket();
@@ -221,6 +493,7 @@ final class _FakeSocket implements PterodactylConsoleSocket {
   bool listenerCompleted = false;
   bool closeEntered = false;
   int closeCalls = 0;
+  int sendFailures = 0;
 
   @override
   int? get closeCode => null;
@@ -233,8 +506,16 @@ final class _FakeSocket implements PterodactylConsoleSocket {
 
   void add(Map<String, Object?> event) => controller.add(jsonEncode(event));
 
+  void addError(Object error) => controller.addError(error);
+
   @override
-  Future<void> sendText(String text) async => sent.add(text);
+  Future<void> sendText(String text) async {
+    if (sendFailures > 0) {
+      sendFailures--;
+      throw StateError('fixture send failure');
+    }
+    sent.add(text);
+  }
 
   @override
   Future<void> close([int? code, String? reason]) async {

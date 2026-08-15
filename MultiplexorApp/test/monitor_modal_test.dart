@@ -133,12 +133,14 @@ void main() {
   });
 
   group('InstanceModalAction', () {
-    test('names every instance action the old menu offered', () {
+    test('names every Local and Remote instance action', () {
       expect(InstanceModalAction.values, <InstanceModalAction>[
         InstanceModalAction.start,
         InstanceModalAction.stop,
         InstanceModalAction.restart,
         InstanceModalAction.console,
+        InstanceModalAction.pullToLocal,
+        InstanceModalAction.pushToRemote,
         InstanceModalAction.settings,
         InstanceModalAction.history,
         InstanceModalAction.reinstall,
@@ -238,10 +240,10 @@ void main() {
 
     test('centers the instance card horizontally and vertically', () {
       final MonitorFrame frame = instanceOverlay();
-      // 46 wide over 100 columns, 9 rows over 30 lines.
+      // 46 wide over 100 columns, 10 rows over 30 lines.
       expect(plainRows(frame)[10].substring(27, 73), startsWith('┌─ alpha '));
-      expect(plainRows(frame)[18].substring(27, 73), startsWith('└'));
-      expect(plainRows(frame)[18][72], '┘');
+      expect(plainRows(frame)[19].substring(27, 73), startsWith('└'));
+      expect(plainRows(frame)[19][72], '┘');
     });
 
     test('leaves the base rows above and below the card untouched', () {
@@ -256,7 +258,7 @@ void main() {
         columns: 100,
         lines: 30,
       );
-      for (final int index in <int>[0, 5, 9, 19, 25, 29]) {
+      for (final int index in <int>[0, 5, 9, 20, 25, 29]) {
         expect(frame.rows[index], base.rows[index], reason: 'row $index');
       }
     });
@@ -264,7 +266,7 @@ void main() {
     test('keeps the base text left of the card on every card row', () {
       final MonitorFrame base = baseFrame();
       final MonitorFrame frame = instanceOverlay();
-      for (int index = 10; index <= 18; index++) {
+      for (int index = 10; index <= 19; index++) {
         expect(
           plainRows(frame)[index].substring(0, 27),
           Ansi.strip(base.rows[index]).substring(0, 27),
@@ -275,7 +277,7 @@ void main() {
 
     test('blanks the base text right of the card on every card row', () {
       final MonitorFrame frame = instanceOverlay();
-      for (int index = 10; index <= 18; index++) {
+      for (int index = 10; index <= 19; index++) {
         expect(
           plainRows(frame)[index].substring(73),
           ' ' * 27,
@@ -286,8 +288,8 @@ void main() {
 
     test('draws the esc hint on the row just inside the bottom border', () {
       final MonitorFrame frame = instanceOverlay();
-      expect(plainRows(frame)[17], contains('esc closes'));
-      expect(rowWith(frame, 'esc closes'), 17);
+      expect(plainRows(frame)[18], contains('esc closes'));
+      expect(rowWith(frame, 'esc closes'), 18);
     });
 
     test('badges the instance card with the sampled state', () {
@@ -358,6 +360,33 @@ void main() {
       );
     });
 
+    test('hit-tests Local push and Remote pull as complete buttons', () {
+      final MonitorFrame local = instanceOverlay(state: RuntimeState.stopped);
+      final MonitorHitbox push = boxFor(local, 'im:pushToRemote')!;
+      expect(
+        hitTest(local.hitboxes, row: push.row, col: push.colStart),
+        'im:pushToRemote',
+      );
+      expect(
+        hitTest(local.hitboxes, row: push.row, col: push.colEnd - 1),
+        'im:pushToRemote',
+      );
+
+      final MonitorFrame remote = instanceOverlay(
+        remote: true,
+        state: RuntimeState.stopped,
+      );
+      final MonitorHitbox pull = boxFor(remote, 'im:pullToLocal')!;
+      expect(
+        hitTest(remote.hitboxes, row: pull.row, col: pull.colStart),
+        'im:pullToLocal',
+      );
+      expect(
+        hitTest(remote.hitboxes, row: pull.row, col: pull.colEnd - 1),
+        'im:pullToLocal',
+      );
+    });
+
     test('offsets button spans by the card left edge and its border', () {
       final MonitorFrame frame = instanceOverlay();
       final MonitorHitbox stop = boxFor(frame, 'im:stop')!;
@@ -394,14 +423,14 @@ void main() {
       final List<MonitorHitbox> cardBoxes = frame.hitboxes
           .where((MonitorHitbox box) => box.id == modalCardHitId)
           .toList();
-      expect(cardBoxes.length, 9);
+      expect(cardBoxes.length, 10);
       for (final MonitorHitbox box in cardBoxes) {
         expect(box.kind, MonitorHitKind.modalScrim);
         expect(box.colStart, 27);
         expect(box.colEnd, 73);
       }
       expect(cardBoxes.map((MonitorHitbox box) => box.row).toSet(), <int>{
-        for (int index = 10; index <= 18; index++) index,
+        for (int index = 10; index <= 19; index++) index,
       });
     });
 
@@ -413,7 +442,7 @@ void main() {
       expect(hitTest(frame.hitboxes, row: 11, col: 28), modalCardHitId);
       // The gap between the two chips, and the bottom border.
       expect(hitTest(frame.hitboxes, row: 11, col: 39), modalCardHitId);
-      expect(hitTest(frame.hitboxes, row: 18, col: 72), modalCardHitId);
+      expect(hitTest(frame.hitboxes, row: 19, col: 72), modalCardHitId);
     });
 
     test('hit-tests just past the card edges as the scrim', () {
@@ -421,7 +450,7 @@ void main() {
       expect(hitTest(frame.hitboxes, row: 10, col: 26), modalScrimHitId);
       expect(hitTest(frame.hitboxes, row: 10, col: 73), modalScrimHitId);
       expect(hitTest(frame.hitboxes, row: 9, col: 40), modalScrimHitId);
-      expect(hitTest(frame.hitboxes, row: 19, col: 40), modalScrimHitId);
+      expect(hitTest(frame.hitboxes, row: 20, col: 40), modalScrimHitId);
     });
   });
 
@@ -475,12 +504,14 @@ void main() {
         for (final String label in <String>[
           'SETTINGS',
           'HISTORY',
+          'PULL TO LOCAL',
           'OPEN FOLDER',
           'REINSTALL',
           'DELETE',
         ]) {
           expect(text, contains('[ $label ]'));
         }
+        expect(buttonIds(frame), isNot(contains('im:pullToLocal')));
       },
     );
 
@@ -495,11 +526,44 @@ void main() {
         containsAll(<String>[
           'im:settings',
           'im:history',
+          'im:pullToLocal',
           'im:folder',
           'im:reinstall',
           'im:delete',
         ]),
       );
+    });
+
+    test('withholds Remote pull while stopped operations are blocked', () {
+      final MonitorFrame frame = instanceOverlay(
+        remote: true,
+        state: RuntimeState.stopped,
+        operationBlockReason: 'server installation is incomplete',
+      );
+
+      expect(buttonIds(frame), isNot(contains('im:pullToLocal')));
+      expect(plainRows(frame).join('\n'), contains('[ PULL TO LOCAL ]'));
+    });
+
+    test('withholds Remote pull from every sampled live state', () {
+      for (final RuntimeState state in <RuntimeState>[
+        RuntimeState.running,
+        RuntimeState.starting,
+        RuntimeState.stopping,
+        RuntimeState.restarting,
+      ]) {
+        final MonitorFrame frame = instanceOverlay(remote: true, state: state);
+        expect(
+          buttonIds(frame),
+          isNot(contains('im:pullToLocal')),
+          reason: state.name,
+        );
+        expect(
+          plainRows(frame).join('\n'),
+          contains('[ PULL TO LOCAL ]'),
+          reason: state.name,
+        );
+      }
     });
 
     test('offers stop, restart and console while the instance runs', () {
@@ -508,27 +572,32 @@ void main() {
       expect(ids, isNot(contains('im:start')));
     });
 
-    test('withholds update, factory reset and delete while it runs', () {
+    test('withholds push, update, factory reset and delete while it runs', () {
       final Set<String> ids = buttonIds(instanceOverlay());
+      expect(ids, isNot(contains('im:pushToRemote')));
       expect(ids, isNot(contains('im:update')));
       expect(ids, isNot(contains('im:factoryReset')));
       expect(ids, isNot(contains('im:delete')));
     });
 
-    test('offers start, update, factory reset and delete when stopped', () {
-      final Set<String> ids = buttonIds(
-        instanceOverlay(state: RuntimeState.stopped),
-      );
-      expect(
-        ids,
-        containsAll(<String>[
-          'im:start',
-          'im:update',
-          'im:factoryReset',
-          'im:delete',
-        ]),
-      );
-    });
+    test(
+      'offers push, start, update, factory reset and delete when stopped',
+      () {
+        final Set<String> ids = buttonIds(
+          instanceOverlay(state: RuntimeState.stopped),
+        );
+        expect(
+          ids,
+          containsAll(<String>[
+            'im:start',
+            'im:pushToRemote',
+            'im:update',
+            'im:factoryReset',
+            'im:delete',
+          ]),
+        );
+      },
+    );
 
     test('withholds restart and console when stopped', () {
       final Set<String> ids = buttonIds(
@@ -721,7 +790,7 @@ void main() {
       final MonitorFrame frame = instanceOverlay(columns: 50);
       // 50 - 8 = 42 wide, centered at column 4.
       expect(plainRows(frame)[10].substring(4, 46), startsWith('┌─ alpha '));
-      expect(plainRows(frame)[18][45], '┘');
+      expect(plainRows(frame)[19][45], '┘');
       for (final String row in frame.rows) {
         expect(Ansi.visibleLength(row), 50);
       }
@@ -762,6 +831,7 @@ void main() {
       expect(buttonIds(frame), <String>{
         'im:start',
         'im:setPort',
+        'im:pushToRemote',
         'im:makeActive',
         'im:motd',
         'im:lock',
@@ -776,6 +846,7 @@ void main() {
         '[ RESTART ]',
         '[ CONSOLE ]',
         '[ SET PORT ]',
+        '[ PUSH TO REMOTE ]',
         '[ MAKE ACTIVE ]',
         '[ MOTD ]',
         '[ LOCK ]',
@@ -801,6 +872,23 @@ void main() {
         'wm:stopAll',
         'wm:wipe',
       });
+    });
+
+    test('keeps transfer actions usable in a 24-column modal', () {
+      final MonitorFrame local = instanceOverlay(
+        state: RuntimeState.stopped,
+        columns: 24,
+      );
+      expect(buttonIds(local), contains('im:pushToRemote'));
+      expect(plainRows(local).join('\n'), contains('[ PUSH TO REMOTE ]'));
+
+      final MonitorFrame remote = instanceOverlay(
+        remote: true,
+        state: RuntimeState.stopped,
+        columns: 24,
+      );
+      expect(buttonIds(remote), contains('im:pullToLocal'));
+      expect(plainRows(remote).join('\n'), contains('[ PULL TO LOCAL ]'));
     });
 
     test('drops button rows from the bottom when the frame is short', () {

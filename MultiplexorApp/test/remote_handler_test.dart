@@ -1,5 +1,10 @@
+import 'dart:io';
+
 import 'package:multiplexor/cli/handlers/remote_handler.dart';
+import 'package:multiplexor/services/pterodactyl/pterodactyl_create_push.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_models.dart';
+import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_models.dart';
+import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_models.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -86,6 +91,214 @@ void main() {
       expect(imageLine, isNot(contains('\tJava\t21\t')));
       expect(imageLine, endsWith('\timage value'));
     });
+  });
+
+  group('remote transfer preflight output', () {
+    test('shows a stable file-diff summary before push confirmation', () {
+      final PterodactylTransferPlan plan = PterodactylTransferPlan(
+        direction: PterodactylTransferDirection.push,
+        mode: PterodactylTransferMode.mirror,
+        localInstanceName: 'survival-local',
+        profileId: 'production',
+        serverIdentifier: 'abc12345',
+        remoteServerName: 'Survival',
+        targetExists: true,
+        targetWasRunning: true,
+        sourceFingerprint: 'source-fingerprint',
+        confirmationToken: 'mirror:production:abc12345:source-fingerprint',
+        createdAt: DateTime.utc(2026, 8, 14),
+        changes: const <PterodactylTransferChange>[
+          PterodactylTransferChange(
+            path: 'world/level.dat',
+            kind: PterodactylTransferChangeKind.update,
+            sourceSize: 80,
+            targetSize: 72,
+          ),
+          PterodactylTransferChange(
+            path: 'plugins/new.jar',
+            kind: PterodactylTransferChangeKind.add,
+            sourceSize: 20,
+          ),
+          PterodactylTransferChange(
+            path: 'old-config.yml',
+            kind: PterodactylTransferChangeKind.delete,
+            targetSize: 10,
+          ),
+        ],
+      );
+
+      expect(pterodactylTransferPlanLines(plan), <String>[
+        'direction:    push',
+        'mode:         mirror',
+        'local:        survival-local',
+        'remote:       production/abc12345',
+        'add:          1',
+        'update:       1',
+        'delete:       1',
+        'transfer:     100 bytes',
+        'was running:  true',
+      ]);
+    });
+
+    test('names the proposed target before create-and-push', () {
+      final PterodactylTransferPlan plan = PterodactylTransferPlan(
+        direction: PterodactylTransferDirection.push,
+        mode: PterodactylTransferMode.update,
+        localInstanceName: 'local',
+        profileId: 'production',
+        serverIdentifier: '',
+        remoteServerName: 'New Server',
+        targetExists: false,
+        targetWasRunning: false,
+        sourceFingerprint: 'fingerprint',
+        confirmationToken: 'push-new:token',
+        createdAt: DateTime.utc(2026, 8, 14),
+        changes: const <PterodactylTransferChange>[],
+      );
+
+      expect(
+        pterodactylTransferPlanLines(plan),
+        contains('remote:       production/New Server'),
+      );
+    });
+
+    test('rejects a create-and-push token from another configuration', () {
+      final JsonObject configurationA = <String, Object?>{
+        'source_kind': 'egg',
+        'source_id': 20,
+        'owner_id': 4,
+        'node_id': 8,
+        'docker_image': 'java:21',
+        'startup': 'java -jar server.jar',
+        'environment': <String, String>{'SERVER_JARFILE': 'server.jar'},
+        'limits': <String, Object?>{'memory': 4096, 'disk': 0},
+        'feature_limits': <String, Object?>{'backups': 1},
+      };
+      final JsonObject configurationB = <String, Object?>{
+        ...configurationA,
+        'limits': <String, Object?>{'memory': 8192, 'disk': 0},
+      };
+
+      final String tokenA = pterodactylCreatePushConfirmationToken(
+        transferConfirmationToken: 'transfer-token',
+        canonicalCreation: configurationA,
+        startAfterTransfer: false,
+        persistNewLink: true,
+      );
+      final String tokenB = pterodactylCreatePushConfirmationToken(
+        transferConfirmationToken: 'transfer-token',
+        canonicalCreation: configurationB,
+        startAfterTransfer: false,
+        persistNewLink: true,
+      );
+
+      expect(tokenA, isNot(tokenB));
+    });
+
+    test('binds final start and durable-link decisions into confirmation', () {
+      final JsonObject configuration = <String, Object?>{
+        'source_kind': 'template',
+        'source_uuid': 'template-uuid',
+      };
+      final String stopped = pterodactylCreatePushConfirmationToken(
+        transferConfirmationToken: 'transfer-token',
+        canonicalCreation: configuration,
+        startAfterTransfer: false,
+        persistNewLink: false,
+      );
+
+      expect(
+        pterodactylCreatePushConfirmationToken(
+          transferConfirmationToken: 'transfer-token',
+          canonicalCreation: configuration,
+          startAfterTransfer: true,
+          persistNewLink: false,
+        ),
+        isNot(stopped),
+      );
+      expect(
+        pterodactylCreatePushConfirmationToken(
+          transferConfirmationToken: 'transfer-token',
+          canonicalCreation: configuration,
+          startAfterTransfer: false,
+          persistNewLink: true,
+        ),
+        isNot(stopped),
+      );
+    });
+
+    test('redacts every resolved environment value from preview output', () {
+      final String summary = pterodactylResolvedEnvironmentSummary(
+        const <String, String>{
+          'TOKEN': 'super-secret-token',
+          'DATABASE_PASSWORD': 'hunter2',
+        },
+      );
+
+      expect(summary, 'DATABASE_PASSWORD=<redacted>, TOKEN=<redacted>');
+      expect(summary, isNot(contains('super-secret-token')));
+      expect(summary, isNot(contains('hunter2')));
+    });
+  });
+
+  group('remote transfer Drive preparation', () {
+    test('account-only preparation supports an empty Panel', () {
+      final PterodactylTransferDrivePreparation preparation =
+          pterodactylTransferDrivePreparation(
+            settings: null,
+            profileId: 'production',
+            accountOnly: true,
+          );
+
+      expect(preparation.needsAccount, isTrue);
+      expect(preparation.inspectTarget, isFalse);
+    });
+
+    test('full preparation reuses an enabled Drive account', () {
+      final String temporaryRoot = Directory.systemTemp.path;
+      final PterodactylSmbSettings settings = PterodactylSmbSettings(
+        shareName: 'Multiplexor Drive',
+        mountRoot: '$temporaryRoot/multiplexor-drive-test',
+        knownHostsFile: '$temporaryRoot/multiplexor-known-hosts-test',
+        accounts: <PterodactylSftpAccount>[
+          PterodactylSftpAccount(
+            profileId: 'production',
+            panelUsername: 'operator',
+          ),
+        ],
+      );
+
+      final PterodactylTransferDrivePreparation preparation =
+          pterodactylTransferDrivePreparation(
+            settings: settings,
+            profileId: 'production',
+            accountOnly: false,
+          );
+
+      expect(preparation.needsAccount, isFalse);
+      expect(preparation.inspectTarget, isTrue);
+    });
+  });
+
+  test('explicit Push postconditions fail closed after data commit', () {
+    expect(
+      pterodactylMissingTransferPostconditions(
+        requirePersistedLink: true,
+        linkPersisted: false,
+        requireRunning: true,
+        remoteRestarted: false,
+      ),
+      <String>['durable Remote link', 'requested running state'],
+    );
+    expect(
+      pterodactylMissingTransferPostconditions(
+        requirePersistedLink: false,
+        linkPersisted: false,
+        requireRunning: false,
+        remoteRestarted: false,
+      ),
+      isEmpty,
+    );
   });
 }
 

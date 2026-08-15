@@ -325,6 +325,42 @@ final class PterodactylService {
     }
   }
 
+  /// Finds every Application server carrying [externalId].
+  ///
+  /// Create & Push recovery deliberately receives all exact matches so its
+  /// coordinator can reject ambiguous Panel state rather than choosing one.
+  Future<List<PterodactylApplicationServer>>
+  findApplicationServersByExternalId({
+    required String profileId,
+    required String externalId,
+  }) async {
+    final String normalizedExternalId = externalId.trim();
+    if (normalizedExternalId.isEmpty) {
+      throw ArgumentError.value(externalId, 'externalId', 'must not be empty');
+    }
+    final _ClientHandle applicationHandle = await _applicationClientFor(
+      _requireProfile(profileId),
+    );
+    try {
+      final List<PterodactylApplicationServer> matches =
+          (await applicationHandle.client.listAllApplicationServers())
+              .where(
+                (PterodactylApplicationServer server) =>
+                    server.externalId == normalizedExternalId,
+              )
+              .toList(growable: false)
+            ..sort(
+              (
+                PterodactylApplicationServer left,
+                PterodactylApplicationServer right,
+              ) => left.id.compareTo(right.id),
+            );
+      return List<PterodactylApplicationServer>.unmodifiable(matches);
+    } finally {
+      applicationHandle.client.close();
+    }
+  }
+
   static Future<T> _catalogResource<T>(
     String permission,
     Future<T> Function() request,
@@ -1318,6 +1354,71 @@ final class PterodactylService {
     }
   }
 
+  /// Creates from an already resolved template plan without re-deriving any
+  /// server setting after operator confirmation.
+  ///
+  /// The free allocation is deliberately selected at execution time, while
+  /// the template identity, owner, node, image, startup, environment, limits,
+  /// feature limits, and initial power behavior come from [plan] exactly.
+  Future<PterodactylApplicationServer> createFromTemplatePlan({
+    required String profileId,
+    required PterodactylTemplateCreatePlan plan,
+  }) async {
+    final String requestedName = _validateCreateName(plan.name);
+    if (requestedName != plan.name) {
+      throw ArgumentError.value(
+        plan.name,
+        'plan.name',
+        'must already be normalized',
+      );
+    }
+    final _ClientHandle applicationHandle = await _applicationClientFor(
+      _requireProfile(profileId),
+    );
+    try {
+      _resolveApplicationServer(
+        await applicationHandle.client.listAllApplicationServers(),
+        plan.templateUuid,
+      );
+      _resolveCreationOwner(
+        await applicationHandle.client.listAllApplicationUsers(),
+        ownerId: plan.ownerId,
+        clientUsername: null,
+      );
+      final PterodactylNode node = _resolveCreationNode(
+        await applicationHandle.client.listAllApplicationNodes(),
+        plan.nodeId,
+      );
+      _validateCreationNode(
+        node: node,
+        memoryMiB: plan.limits.memoryMiB,
+        diskMiB: plan.limits.diskMiB,
+        serverCount: 1,
+      );
+      final List<PterodactylAllocation> free =
+          (await applicationHandle.client.listAllNodeAllocations(plan.nodeId))
+              .where((PterodactylAllocation allocation) => allocation.isFree)
+              .toList()
+            ..sort(
+              (PterodactylAllocation a, PterodactylAllocation b) =>
+                  a.port.compareTo(b.port),
+            );
+      if (free.isEmpty) {
+        throw StateError(
+          'A free allocation is required to create a remote instance.',
+        );
+      }
+      return await applicationHandle.client.createApplicationServer(
+        plan.toRequest(
+          defaultAllocationId: free[0].id,
+          additionalAllocationId: free.length > 1 ? free[1].id : null,
+        ),
+      );
+    } finally {
+      applicationHandle.client.close();
+    }
+  }
+
   /// Creates a fleet from one Application-visible template after reserving
   /// distinct free allocations for every request in the batch. Requests can run in
   /// parallel without selecting the same allocation; an external allocation
@@ -1484,6 +1585,11 @@ final class PterodactylService {
   }) async {
     _requireBulkConcurrency(concurrency);
     final List<String> requestedNames = _validateBulkCreateNames(names);
+    if (plan.externalId != null && requestedNames.length != 1) {
+      throw ArgumentError(
+        'A Panel external ID can only be used for one server creation.',
+      );
+    }
     final _ClientHandle applicationHandle = await _applicationClientFor(
       _requireProfile(profileId),
     );
@@ -1515,6 +1621,13 @@ final class PterodactylService {
       final PterodactylEgg egg =
           selectedEgg ??
           (throw StateError('The selected egg is no longer available.'));
+      if (plan.eggUuid case final String expectedUuid
+          when expectedUuid != egg.uuid) {
+        throw StateError(
+          'The selected egg identity changed. Reload the creation catalog '
+          'and try again.',
+        );
+      }
       final String? eggStartup = egg.startup;
       if (eggStartup == null || eggStartup.trim().isEmpty) {
         throw StateError(
@@ -1546,6 +1659,20 @@ final class PterodactylService {
         throw StateError(
           'Unknown egg environment variables: ${unknownVariables.join(', ')}',
         );
+      }
+      if (plan.eggUuid != null) {
+        final List<String> addedVariables =
+            variableNames
+                .where((String key) => !plan.environment.containsKey(key))
+                .toList(growable: false)
+              ..sort();
+        if (addedVariables.isNotEmpty) {
+          throw StateError(
+            'Egg environment variables changed after planning: '
+            '${addedVariables.join(', ')}. Reload the creation catalog and '
+            'try again.',
+          );
+        }
       }
       final Map<String, String> environment = <String, String>{
         for (final PterodactylEggVariable variable in egg.variables)
@@ -1647,6 +1774,7 @@ final class PterodactylService {
   }) => PterodactylCreateServerRequest(
     name: name,
     description: 'Created by Multiplexor from Panel egg ${plan.eggId}.',
+    externalId: plan.externalId,
     ownerId: plan.ownerId,
     eggId: plan.eggId,
     dockerImage: plan.dockerImage,

@@ -70,6 +70,43 @@ class NativeCommandService {
     }
   }
 
+  /// Creates the isolated blank instance used by Remote Pull while attaching
+  /// a caller-owned marker during allocation. This intentionally bypasses the
+  /// public command parser so the ownership token never becomes CLI surface.
+  Future<CapturedResult> createIsolatedTransferInstance(
+    String name, {
+    required String creationToken,
+  }) async {
+    final _NativeIoBuffer io = _NativeIoBuffer(stream: false);
+    try {
+      _instanceCreateBlank(
+        _activeConsumer,
+        name,
+        isolated: true,
+        creationToken: creationToken,
+        io: io,
+      );
+      return io.result(0);
+    } on _NativeCommandException catch (error) {
+      io.error('[ERROR] ${error.message}');
+      return io.result(error.exitCode);
+    } catch (error, stackTrace) {
+      io.error('[ERROR] $error');
+      if (context.verbose) io.error('$stackTrace');
+      return io.result(1);
+    }
+  }
+
+  /// Removes only a failed transfer allocation carrying the exact caller
+  /// token. Existing or replaced filesystem entities are never removed.
+  bool cleanupPartialTransferInstance(
+    String name, {
+    required String creationToken,
+  }) => _deleteOwnedPartialInstance(
+    _instanceDir(_activeConsumer, name),
+    creationToken,
+  );
+
   Future<int> _dispatch(List<String> args, _NativeIoBuffer io) async {
     if (isCliHelpRequest(args)) {
       return _printHelpForArgs(args, io);
@@ -186,10 +223,21 @@ class NativeCommandService {
         io.write(current);
         return 0;
       case 'create':
-        final name = _requireValue(rest, 'Usage: instance create <name>');
-        _instanceCreateBlank(profile, name, io: io);
+        final name = _requireValue(
+          rest,
+          'Usage: instance create <name> [--isolated]',
+        );
+        final Map<String, String> options = _parseOptions(rest.sublist(1));
+        if (options.keys.any((String key) => key != 'isolated')) {
+          throw _NativeCommandException(
+            'Usage: instance create <name> [--isolated]',
+            2,
+          );
+        }
+        final bool isolated = options['isolated'] == 'true';
+        _instanceCreateBlank(profile, name, isolated: isolated, io: io);
         io.write(
-          '[OK] Instance created: $name (port ${_instanceGetServerPort(profile, name)})',
+          '[OK] Instance created: $name (port ${_instanceGetServerPort(profile, name)}${isolated ? ', isolated' : ''})',
         );
         return 0;
       case 'clone':
@@ -924,6 +972,7 @@ class NativeCommandService {
 
     String resolvedJarPath;
     String? mcLabel;
+    bool explicitInstaller = false;
     if (jarOverride != null && jarOverride.isNotEmpty) {
       final file = File(jarOverride);
       if (!file.existsSync()) {
@@ -933,6 +982,8 @@ class NativeCommandService {
       try {
         resolvedJarPath = file.resolveSymbolicLinksSync();
       } catch (_) {}
+      explicitInstaller = _looksLikeInstallerJar(resolvedJarPath);
+      resolvedJarPath = await _importManagedLaunchJar(profile, resolvedJarPath);
     } else {
       final requestedMc = options['mc'];
       final mc = requestedMc?.trim().isNotEmpty == true
@@ -960,7 +1011,7 @@ class NativeCommandService {
 
     final installerBased =
         (type == 'forge' || type == 'neoforge') &&
-        _looksLikeInstallerJar(resolvedJarPath);
+        (explicitInstaller || _looksLikeInstallerJar(resolvedJarPath));
     if (installerBased) {
       throw _NativeCommandException(
         'instance update only supports jar-launch updates; $resolvedJarPath looks like an installer. Recreate the instance from the installer instead.',
@@ -1271,11 +1322,12 @@ class NativeCommandService {
     _ensureConsumerOwnsServerType(profile, type, command: 'server create');
 
     if (jar != null && jar.isNotEmpty) {
-      _serverCreateFromJar(
+      await _serverCreateFromJar(
         profile,
         name,
         type: type,
         jarPath: jar,
+        importJar: true,
         isolated: isolated,
         io: io,
       );
@@ -1313,7 +1365,7 @@ class NativeCommandService {
       );
     }
 
-    _serverCreateFromJar(
+    await _serverCreateFromJar(
       profile,
       name,
       type: type,
@@ -1383,7 +1435,7 @@ class NativeCommandService {
             io,
           );
         }
-        _serverCreateFromJar(
+        await _serverCreateFromJar(
           profile,
           name,
           type: type,
@@ -5900,14 +5952,15 @@ class NativeCommandService {
     return _RuntimeTargetArgs(instance: instance, noConsole: noConsole);
   }
 
-  void _serverCreateFromJar(
+  Future<void> _serverCreateFromJar(
     ConsumerProfile profile,
     String name, {
     required String type,
     required String jarPath,
+    bool importJar = false,
     bool isolated = false,
     _NativeIoBuffer? io,
-  }) {
+  }) async {
     if (name.trim().isEmpty) {
       throw _NativeCommandException('Server name required', 2);
     }
@@ -5920,13 +5973,19 @@ class NativeCommandService {
     try {
       resolvedJarPath = jarFile.resolveSymbolicLinksSync();
     } catch (_) {}
+    final bool sourceLooksLikeInstaller = _looksLikeInstallerJar(
+      resolvedJarPath,
+    );
+    if (importJar) {
+      resolvedJarPath = await _importManagedLaunchJar(profile, resolvedJarPath);
+    }
 
     _instanceCreateBlank(profile, name, isolated: isolated, io: io);
 
     final normalizedType = type.toLowerCase().trim();
     final installerBased =
         (normalizedType == 'forge' || normalizedType == 'neoforge') &&
-        _looksLikeInstallerJar(resolvedJarPath);
+        (sourceLooksLikeInstaller || _looksLikeInstallerJar(resolvedJarPath));
     if (installerBased) {
       _serverCreateFromInstaller(
         profile,
@@ -5953,6 +6012,130 @@ class NativeCommandService {
       },
     );
     _instanceApplyStyledMotd(profile, name, force: true);
+  }
+
+  Future<String> _importManagedLaunchJar(
+    ConsumerProfile profile,
+    String sourcePath,
+  ) async {
+    final String canonicalSource;
+    try {
+      canonicalSource = File(sourcePath).resolveSymbolicLinksSync();
+    } on FileSystemException {
+      throw _NativeCommandException(
+        'Custom launch jar cannot be resolved: $sourcePath',
+        2,
+      );
+    }
+    if (!canonicalSource.toLowerCase().endsWith('.jar') ||
+        FileSystemEntity.typeSync(canonicalSource, followLinks: false) !=
+            FileSystemEntityType.file) {
+      throw _NativeCommandException(
+        'Custom launch jar must be a regular .jar file: $sourcePath',
+        2,
+      );
+    }
+
+    final String buildsPath = p.join(_consumerRoot(profile), 'builds');
+    if (FileSystemEntity.typeSync(buildsPath, followLinks: false) !=
+        FileSystemEntityType.directory) {
+      throw _NativeCommandException(
+        'Consumer builds storage is not a real directory: $buildsPath',
+        1,
+      );
+    }
+    final String customPath = p.join(buildsPath, 'custom');
+    final FileSystemEntityType customType = FileSystemEntity.typeSync(
+      customPath,
+      followLinks: false,
+    );
+    if (customType == FileSystemEntityType.notFound) {
+      Directory(customPath).createSync();
+    } else if (customType != FileSystemEntityType.directory) {
+      throw _NativeCommandException(
+        'Custom build storage is not a real directory: $customPath',
+        1,
+      );
+    }
+
+    final String digest = await _sha256FileStreamed(File(canonicalSource));
+    final String destinationPath = p.join(customPath, '$digest.jar');
+    final File destination = File(destinationPath);
+    final FileSystemEntityType destinationType = FileSystemEntity.typeSync(
+      destinationPath,
+      followLinks: false,
+    );
+    if (destinationType == FileSystemEntityType.file) {
+      if (await _sha256FileStreamed(destination) != digest) {
+        throw _NativeCommandException(
+          'Managed custom jar failed its content-address verification.',
+          1,
+        );
+      }
+      return destinationPath;
+    }
+    if (destinationType != FileSystemEntityType.notFound) {
+      throw _NativeCommandException(
+        'Managed custom jar destination is not a regular file.',
+        1,
+      );
+    }
+
+    final String temporaryPath = p.join(
+      customPath,
+      '.$digest.${_newPinSalt()}.part',
+    );
+    final File temporary = File(temporaryPath);
+    try {
+      temporary.createSync(exclusive: true);
+      final IOSink output = temporary.openWrite(mode: FileMode.writeOnly);
+      await File(canonicalSource).openRead().pipe(output);
+      if (await _sha256FileStreamed(temporary) != digest) {
+        throw _NativeCommandException(
+          'Managed custom jar copy verification failed.',
+          1,
+        );
+      }
+      final FileSystemEntityType currentDestination = FileSystemEntity.typeSync(
+        destinationPath,
+        followLinks: false,
+      );
+      if (currentDestination == FileSystemEntityType.file) {
+        if (await _sha256FileStreamed(destination) != digest) {
+          throw _NativeCommandException(
+            'Managed custom jar destination changed during import.',
+            1,
+          );
+        }
+        return destinationPath;
+      }
+      if (currentDestination != FileSystemEntityType.notFound) {
+        throw _NativeCommandException(
+          'Managed custom jar destination changed during import.',
+          1,
+        );
+      }
+      await temporary.rename(destinationPath);
+      if (FileSystemEntity.typeSync(destinationPath, followLinks: false) !=
+              FileSystemEntityType.file ||
+          await _sha256FileStreamed(destination) != digest) {
+        throw _NativeCommandException(
+          'Managed custom jar failed final verification.',
+          1,
+        );
+      }
+      return destinationPath;
+    } finally {
+      if (FileSystemEntity.typeSync(temporaryPath, followLinks: false) ==
+          FileSystemEntityType.file) {
+        temporary.deleteSync();
+      }
+    }
+  }
+
+  Future<String> _sha256FileStreamed(File file) async {
+    final Digest digest = await sha256.bind(file.openRead()).first;
+    return digest.toString();
   }
 
   bool _looksLikeInstallerJar(String path) {
@@ -8851,9 +9034,14 @@ class NativeCommandService {
     ConsumerProfile profile,
     String name, {
     bool isolated = false,
+    String? creationToken,
     _NativeIoBuffer? io,
   }) {
-    if (name.trim().isEmpty) {
+    if (name.trim().isEmpty ||
+        p.basename(name) != name ||
+        p.windows.basename(name) != name ||
+        name == '.' ||
+        name == '..') {
       throw _NativeCommandException('Instance name required', 2);
     }
 
@@ -8862,34 +9050,86 @@ class NativeCommandService {
       instancePath,
       followLinks: false,
     );
-    if (existingType == FileSystemEntityType.directory) {
-      throw _NativeCommandException('Instance already exists: $name', 2);
-    }
     if (existingType != FileSystemEntityType.notFound) {
+      throw _NativeCommandException(
+        'Instance path already exists and was not changed: $name',
+        2,
+      );
+    }
+    final String ownerToken = creationToken ?? _newPinSalt();
+    if (!RegExp(r'^[0-9a-f]{32,128}$').hasMatch(ownerToken)) {
+      throw _NativeCommandException('Invalid instance creation token', 2);
+    }
+    final Directory dir = Directory(instancePath)..createSync();
+    final File owner = File(p.join(dir.path, _instanceCreationOwnerFile));
+    try {
+      owner.createSync(exclusive: true);
+      final RandomAccessFile ownerHandle = owner.openSync(
+        mode: FileMode.writeOnly,
+      );
+      try {
+        ownerHandle.writeStringSync('$ownerToken\n');
+        ownerHandle.flushSync();
+      } finally {
+        ownerHandle.closeSync();
+      }
+
+      final String dropinSubdir = _isPluginConsumer(profile)
+          ? 'plugins'
+          : 'mods';
+      Directory(p.join(dir.path, dropinSubdir)).createSync();
+      Directory(p.join(dir.path, 'logs')).createSync();
+
+      final File properties = File(p.join(dir.path, 'server.properties'));
+      properties.writeAsStringSync('server-port=25565\n');
+
+      File(p.join(dir.path, 'eula.txt')).writeAsStringSync('eula=true\n');
+      _instanceApplyStyledMotd(profile, name, force: true);
+
+      // Isolated instances skip every shared-state hook: no Iris pack symlink,
+      // no shared ops merge. Per-instance config still localizes (it's not
+      // shared across instances).
+      if (!isolated && _isPluginConsumer(profile)) {
+        _irisPacksLinkInstance(profile, name);
+      }
+      _configLinkInstance(profile, name);
+      _instanceEnsureRestartScript(profile, name);
+      if (!isolated) {
+        _instanceEnsureSharedPluginOps(profile, name, io: io);
+      } else {
+        _writeServerSource(
+          dir.path,
+          fields: const <String, String>{'isolated': 'true'},
+        );
+      }
+      owner.deleteSync();
+    } catch (_) {
+      _deleteOwnedPartialInstance(instancePath, ownerToken);
+      rethrow;
+    }
+  }
+
+  static const String _instanceCreationOwnerFile = '.multiplexor-create-owner';
+
+  bool _deleteOwnedPartialInstance(String instancePath, String ownerToken) {
+    if (FileSystemEntity.typeSync(instancePath, followLinks: false) !=
+        FileSystemEntityType.directory) {
+      return false;
+    }
+    final String markerPath = p.join(instancePath, _instanceCreationOwnerFile);
+    if (FileSystemEntity.typeSync(markerPath, followLinks: false) !=
+        FileSystemEntityType.file) {
+      return false;
+    }
+    try {
+      if (File(markerPath).readAsStringSync().trim() != ownerToken) {
+        return false;
+      }
       _deletePathEntity(instancePath, recursive: true);
-    }
-    final dir = Directory(instancePath);
-
-    final String dropinSubdir = _isPluginConsumer(profile) ? 'plugins' : 'mods';
-    Directory(p.join(dir.path, dropinSubdir)).createSync(recursive: true);
-    Directory(p.join(dir.path, 'logs')).createSync(recursive: true);
-
-    final properties = File(p.join(dir.path, 'server.properties'));
-    properties.writeAsStringSync('server-port=25565\n');
-
-    File(p.join(dir.path, 'eula.txt')).writeAsStringSync('eula=true\n');
-    _instanceApplyStyledMotd(profile, name, force: true);
-
-    // Isolated instances skip every shared-state hook: no Iris pack symlink,
-    // no shared ops merge. Per-instance config still localizes (it's not
-    // shared across instances).
-    if (!isolated && _isPluginConsumer(profile)) {
-      _irisPacksLinkInstance(profile, name);
-    }
-    _configLinkInstance(profile, name);
-    _instanceEnsureRestartScript(profile, name);
-    if (!isolated) {
-      _instanceEnsureSharedPluginOps(profile, name, io: io);
+      return FileSystemEntity.typeSync(instancePath, followLinks: false) ==
+          FileSystemEntityType.notFound;
+    } on FileSystemException {
+      return false;
     }
   }
 

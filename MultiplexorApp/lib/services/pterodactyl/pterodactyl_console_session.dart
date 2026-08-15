@@ -111,26 +111,50 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
     required PterodactylConsoleCredentialLoader loadCredentials,
     PterodactylConsoleSocketConnector connector =
         const DartIoPterodactylConsoleSocketConnector(),
+    Duration reconnectInitialDelay = const Duration(milliseconds: 250),
+    Duration reconnectMaximumDelay = const Duration(seconds: 5),
   }) : serverIdentifier = _validateIdentifier(serverIdentifier),
        _loadCredentials = loadCredentials,
-       _connector = connector;
+       _connector = connector,
+       _reconnectInitialDelay = _validateReconnectDelay(
+         reconnectInitialDelay,
+         'reconnectInitialDelay',
+       ),
+       _reconnectMaximumDelay = _validateReconnectDelay(
+         reconnectMaximumDelay,
+         'reconnectMaximumDelay',
+       ) {
+    if (_reconnectMaximumDelay < _reconnectInitialDelay) {
+      throw ArgumentError.value(
+        reconnectMaximumDelay,
+        'reconnectMaximumDelay',
+        'must be at least reconnectInitialDelay',
+      );
+    }
+  }
 
   final PterodactylProfile profile;
   final String serverIdentifier;
   final PterodactylConsoleCredentialLoader _loadCredentials;
   final PterodactylConsoleSocketConnector _connector;
+  final Duration _reconnectInitialDelay;
+  final Duration _reconnectMaximumDelay;
   final StreamController<PterodactylConsoleEvent> _events =
       StreamController<PterodactylConsoleEvent>.broadcast(sync: true);
   final Completer<void> _done = Completer<void>();
 
   PterodactylConsoleSocket? _socket;
-  StreamSubscription<Object?>? _messages;
   Uri? _socketUri;
   Future<void>? _refreshing;
+  Future<void>? _reconnecting;
+  Timer? _reconnectTimer;
+  Completer<void>? _reconnectDelay;
   Completer<void>? _authentication;
   int _generation = 0;
   bool _started = false;
   bool _closed = false;
+  bool _hasConnected = false;
+  bool _authenticated = false;
 
   @override
   Stream<PterodactylConsoleEvent> get events => _events.stream;
@@ -166,14 +190,25 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
   }
 
   @override
-  Future<void> requestLogs() => _send(PterodactylConsoleFrames.requestLogs());
+  Future<void> requestLogs() => _send(
+    PterodactylConsoleFrames.requestLogs(),
+    requireAuthenticated: true,
+    recoverTransportFailure: true,
+  );
 
   @override
-  Future<void> requestStats() => _send(PterodactylConsoleFrames.requestStats());
+  Future<void> requestStats() => _send(
+    PterodactylConsoleFrames.requestStats(),
+    requireAuthenticated: true,
+    recoverTransportFailure: true,
+  );
 
   @override
-  Future<void> sendCommand(String command) =>
-      _send(PterodactylConsoleFrames.sendCommand(command));
+  Future<void> sendCommand(String command) => _send(
+    PterodactylConsoleFrames.sendCommand(command),
+    requireAuthenticated: true,
+    recoverTransportFailure: true,
+  );
 
   Future<void> _open(PterodactylWebsocketCredentials credentials) async {
     _requireSecureSocketUri(credentials.socketUri);
@@ -187,22 +222,26 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
     }
 
     final int generation = ++_generation;
+    _authenticated = false;
     _authentication = Completer<void>();
     _socket = next;
     _socketUri = credentials.socketUri;
-    _messages = next.messages.listen(
+    next.messages.listen(
       (Object? message) => _handleMessage(generation, message),
-      onError: (Object _) => _handleSocketError(generation),
+      onError: (Object _) => _handleSocketError(generation, next),
       onDone: () => _handleSocketDone(generation, next),
       cancelOnError: false,
     );
     try {
       await _send(PterodactylConsoleFrames.authenticate(credentials.token));
     } catch (_) {
-      await _messages?.cancel();
-      _messages = null;
-      _socket = null;
-      await next.close(WebSocketStatus.goingAway, 'Authentication failed');
+      if (generation == _generation) {
+        _generation++;
+        _socket = null;
+      }
+      unawaited(
+        _closeSocket(next, WebSocketStatus.goingAway, 'Authentication failed'),
+      );
       // The send failure itself is propagated to the caller. Clearing this
       // completer avoids creating a second, unobserved asynchronous error
       // before connect() has begun waiting for the authentication response.
@@ -227,6 +266,8 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
     _emit(event);
     switch (event) {
       case PterodactylConsoleAuthenticated():
+        _hasConnected = true;
+        _authenticated = true;
         final Completer<void>? authentication = _authentication;
         if (authentication != null && !authentication.isCompleted) {
           authentication.complete();
@@ -238,9 +279,9 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
         }
         unawaited(_requestInitialData());
       case PterodactylConsoleTokenExpiring():
-        _refreshAuthentication(expired: false);
+        _refreshAuthentication();
       case PterodactylConsoleTokenExpired():
-        _refreshAuthentication(expired: true);
+        _refreshAuthentication();
       default:
         break;
     }
@@ -252,20 +293,20 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
       await requestStats();
     } catch (_) {
       _emit(
-        const PterodactylConsoleConnectionEvent(
-          PterodactylConsoleConnectionState.error,
-          message: 'Unable to request remote console history and statistics.',
+        const PterodactylConsoleProtocolWarning(
+          'Unable to request remote console history and statistics.',
         ),
       );
     }
   }
 
-  void _refreshAuthentication({required bool expired}) {
+  void _refreshAuthentication() {
+    // A reconnect already fetched a fresh one-use token. Ignore lifecycle
+    // notifications delivered during that authentication handshake so token
+    // refresh and transport recovery can never install competing sockets.
+    if (_reconnecting != null) return;
     final Future<void>? current = _refreshing;
     if (current != null) {
-      if (expired) {
-        unawaited(current.catchError((Object _) => close()));
-      }
       return;
     }
     _emit(
@@ -273,6 +314,7 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
         PterodactylConsoleConnectionState.refreshing,
       ),
     );
+    _authenticated = false;
     final Future<void> operation = _performRefresh();
     _refreshing = operation;
     unawaited(
@@ -284,10 +326,18 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
                 message: 'Unable to refresh remote console authentication.',
               ),
             );
-            await close();
+            if (_closed || !_hasConnected) {
+              await close();
+              return;
+            }
+            _retireActiveSocket('Authentication refresh failed');
+            _startReconnect();
           })
           .whenComplete(() {
             if (identical(_refreshing, operation)) _refreshing = null;
+            if (!_closed && _hasConnected && _socket == null) {
+              _startReconnect();
+            }
           }),
     );
   }
@@ -297,7 +347,6 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
       serverIdentifier,
     );
     final PterodactylConsoleSocket? previous = _socket;
-    final StreamSubscription<Object?>? previousMessages = _messages;
     if (credentials.socketUri == _socketUri) {
       _authentication = Completer<void>();
       await _send(PterodactylConsoleFrames.authenticate(credentials.token));
@@ -311,8 +360,15 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
         // previous listener and socket must therefore be retired whether the
         // replacement authenticates or fails; otherwise they are unreachable
         // from close() and remain alive until the peer happens to disconnect.
-        await previousMessages?.cancel();
-        await previous?.close(WebSocketStatus.goingAway, 'Endpoint refreshed');
+        if (previous != null) {
+          unawaited(
+            _closeSocket(
+              previous,
+              WebSocketStatus.goingAway,
+              'Endpoint refreshed',
+            ),
+          );
+        }
       }
     }
   }
@@ -331,41 +387,191 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
     }
   }
 
-  void _handleSocketError(int generation) {
+  void _handleSocketError(int generation, PterodactylConsoleSocket socket) {
     if (_closed || generation != _generation) return;
-    _emit(
-      const PterodactylConsoleConnectionEvent(
-        PterodactylConsoleConnectionState.error,
-        message: 'The remote console socket reported an error.',
-      ),
+    _handleSocketLoss(
+      generation,
+      socket,
+      message: 'The remote console socket reported an error.',
+      closeSocket: true,
     );
-    _failAuthentication();
   }
 
   void _handleSocketDone(int generation, PterodactylConsoleSocket socket) {
     if (_closed || generation != _generation) return;
-    _socket = null;
-    _messages = null;
     final String? reason = socket.closeReason;
+    _handleSocketLoss(
+      generation,
+      socket,
+      message: reason == null || reason.isEmpty
+          ? 'Remote console disconnected.'
+          : PterodactylConsoleSanitizer.text(reason),
+      closeSocket: false,
+    );
+  }
+
+  void _handleSocketLoss(
+    int generation,
+    PterodactylConsoleSocket socket, {
+    required String message,
+    required bool closeSocket,
+  }) {
+    if (_closed || generation != _generation) return;
+    _generation++;
+    _socket = null;
+    _authenticated = false;
     _emit(
       PterodactylConsoleConnectionEvent(
         PterodactylConsoleConnectionState.disconnected,
-        message: reason == null || reason.isEmpty
-            ? 'Remote console disconnected.'
-            : PterodactylConsoleSanitizer.text(reason),
+        message: message,
       ),
     );
     _failAuthentication();
-    _finish();
+    if (closeSocket) {
+      unawaited(
+        _closeSocket(socket, WebSocketStatus.goingAway, 'Transport error'),
+      );
+    }
+    if (_hasConnected && _refreshing == null) {
+      _startReconnect();
+    } else if (!_hasConnected) {
+      _finish();
+    }
   }
 
-  Future<void> _send(String frame) async {
+  void _startReconnect() {
+    if (_closed || !_hasConnected || _reconnecting != null) return;
+    final Future<void> operation = _reconnect();
+    _reconnecting = operation;
+    unawaited(_completeReconnect(operation));
+  }
+
+  Future<void> _completeReconnect(Future<void> operation) async {
+    try {
+      await operation;
+    } finally {
+      if (identical(_reconnecting, operation)) {
+        _reconnecting = null;
+      }
+      // A replacement can authenticate and close again before its reconnect
+      // operation has unwound. Re-check after releasing the single-flight
+      // guard so that narrow race cannot leave a dead console session behind.
+      if (!_closed && _hasConnected && _socket == null) {
+        _startReconnect();
+      }
+    }
+  }
+
+  Future<void> _reconnect() async {
+    Duration delay = _reconnectInitialDelay;
+    while (!_closed && _socket == null) {
+      _emit(
+        const PterodactylConsoleConnectionEvent(
+          PterodactylConsoleConnectionState.reconnecting,
+          message: 'Reconnecting remote console.',
+        ),
+      );
+      if (!await _waitForReconnectDelay(delay) || _socket != null) return;
+      try {
+        final PterodactylWebsocketCredentials credentials =
+            await _loadCredentials(serverIdentifier);
+        if (_closed || _socket != null) return;
+        await _open(credentials);
+        await _waitForAuthentication();
+        return;
+      } catch (_) {
+        if (_closed) return;
+        _retireActiveSocket('Reconnect attempt failed');
+        delay = _nextReconnectDelay(delay);
+      }
+    }
+  }
+
+  Future<bool> _waitForReconnectDelay(Duration delay) async {
+    if (_closed) return false;
+    final Completer<void> wakeup = Completer<void>();
+    _reconnectDelay = wakeup;
+    _reconnectTimer = Timer(delay, wakeup.complete);
+    await wakeup.future;
+    if (identical(_reconnectDelay, wakeup)) {
+      _reconnectDelay = null;
+      _reconnectTimer = null;
+    }
+    return !_closed;
+  }
+
+  void _cancelReconnectDelay() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    final Completer<void>? wakeup = _reconnectDelay;
+    _reconnectDelay = null;
+    if (wakeup != null && !wakeup.isCompleted) wakeup.complete();
+  }
+
+  Duration _nextReconnectDelay(Duration current) {
+    final int currentMilliseconds = current.inMilliseconds;
+    final int maximumMilliseconds = _reconnectMaximumDelay.inMilliseconds;
+    if (currentMilliseconds >= maximumMilliseconds) {
+      return _reconnectMaximumDelay;
+    }
+    final int doubled = currentMilliseconds * 2;
+    return Duration(
+      milliseconds: doubled > maximumMilliseconds
+          ? maximumMilliseconds
+          : doubled,
+    );
+  }
+
+  void _retireActiveSocket(String reason) {
+    final PterodactylConsoleSocket? socket = _socket;
+    if (socket == null) return;
+    _generation++;
+    _socket = null;
+    _authenticated = false;
+    _failAuthentication();
+    unawaited(_closeSocket(socket, WebSocketStatus.goingAway, reason));
+  }
+
+  Future<void> _closeSocket(
+    PterodactylConsoleSocket socket,
+    int code,
+    String reason,
+  ) async {
+    try {
+      await socket.close(code, reason);
+    } catch (_) {
+      // The socket is already unusable. Generation checks keep any late
+      // callbacks inert, so cleanup failure must not stop reconnect/teardown.
+    }
+  }
+
+  Future<void> _send(
+    String frame, {
+    bool requireAuthenticated = false,
+    bool recoverTransportFailure = false,
+  }) async {
     if (_closed) throw StateError('The console session is closed.');
     final PterodactylConsoleSocket? socket = _socket;
-    if (socket == null) {
+    if (socket == null || (requireAuthenticated && !_authenticated)) {
       throw StateError('The console session is not connected.');
     }
-    await socket.sendText(frame);
+    final int generation = _generation;
+    try {
+      await socket.sendText(frame);
+    } catch (_) {
+      if (recoverTransportFailure &&
+          !_closed &&
+          generation == _generation &&
+          identical(socket, _socket)) {
+        _handleSocketLoss(
+          generation,
+          socket,
+          message: 'The remote console transport rejected an outbound frame.',
+          closeSocket: true,
+        );
+      }
+      rethrow;
+    }
   }
 
   void _emit(PterodactylConsoleEvent event) {
@@ -376,10 +582,11 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _cancelReconnectDelay();
     _failAuthentication();
     _generation++;
+    _authenticated = false;
     final PterodactylConsoleSocket? socket = _socket;
-    _messages = null;
     _socket = null;
     try {
       // WebSocket.close owns its underlying receive subscription. Cancelling
@@ -417,6 +624,13 @@ final class PterodactylConsoleSession implements PterodactylConsoleConnection {
       throw const FormatException('Invalid Pterodactyl server identifier.');
     }
     return result;
+  }
+
+  static Duration _validateReconnectDelay(Duration value, String name) {
+    if (value <= Duration.zero) {
+      throw ArgumentError.value(value, name, 'must be greater than zero');
+    }
+    return value;
   }
 }
 

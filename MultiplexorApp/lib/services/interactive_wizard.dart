@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
+import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
 import '../utils/terminal/theme.dart';
 import '../utils/user_prompt.dart';
@@ -20,6 +21,7 @@ import 'passthrough_service.dart';
 import 'pterodactyl/pterodactyl_console_protocol.dart';
 import 'pterodactyl/pterodactyl_console_session.dart';
 import 'pterodactyl/pterodactyl_console_terminal.dart';
+import 'pterodactyl/pterodactyl_create_push.dart';
 import 'pterodactyl/pterodactyl_credential.dart';
 import 'pterodactyl/pterodactyl_errors.dart';
 import 'pterodactyl/pterodactyl_models.dart';
@@ -28,6 +30,8 @@ import 'pterodactyl/pterodactyl_profile.dart';
 import 'pterodactyl/pterodactyl_service.dart';
 import 'pterodactyl/pterodactyl_smb_models.dart';
 import 'pterodactyl/pterodactyl_smb_service.dart';
+import 'pterodactyl/pterodactyl_transfer_models.dart';
+import 'pterodactyl/pterodactyl_transfer_service.dart';
 import 'runtime_state.dart';
 
 /// The side effect a Remote quick key is allowed to perform after a fresh
@@ -51,6 +55,201 @@ enum RemoteBulkTargetScope { all, selected, running, stopped }
 
 /// Configuration source offered by Remote server creation.
 enum RemoteCreateSource { panelEgg, cloneExisting, done }
+
+/// Destination choices shown by the Local-to-Remote transfer form.
+enum RemoteTransferDestination { linked, existing, createNew, done }
+
+/// Builds the transfer destination menu without presenting dead-end choices.
+List<RemoteTransferDestination> remoteTransferDestinations({
+  required bool hasLink,
+  required bool hasProfiles,
+}) => <RemoteTransferDestination>[
+  if (hasLink) RemoteTransferDestination.linked,
+  if (hasProfiles) RemoteTransferDestination.existing,
+  if (hasProfiles) RemoteTransferDestination.createNew,
+  RemoteTransferDestination.done,
+];
+
+/// Suggests a path-safe Local instance name for a pulled Remote server.
+String remotePullDefaultLocalName({
+  required String remoteName,
+  required String serverIdentifier,
+}) {
+  String clean(String value) => value
+      .trim()
+      .replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '-')
+      .replaceAll(RegExp(r'-+'), '-')
+      .replaceAll(RegExp(r'^[._-]+|[._-]+$'), '');
+
+  final String cleanedName = clean(remoteName);
+  final String cleanedIdentifier = clean(serverIdentifier);
+  final String base = cleanedName.isNotEmpty
+      ? cleanedName
+      : cleanedIdentifier.isNotEmpty
+      ? cleanedIdentifier
+      : 'remote';
+  return base.toLowerCase().endsWith('-local') ? base : '$base-local';
+}
+
+bool remoteTransferRequiresTypedConfirmation(PterodactylTransferMode mode) =>
+    mode == PterodactylTransferMode.mirror;
+
+bool remoteTransferConfirmationMatches({
+  required String expected,
+  required String typed,
+}) => typed == expected;
+
+String remoteMirrorConfirmationPhrase(String serverIdentifier) =>
+    'MIRROR ${serverIdentifier.trim()}';
+
+bool remoteTransferRelinkDefault({required bool hasExistingLink}) =>
+    !hasExistingLink;
+
+/// Sanitized preflight warnings shown before a transfer is approved.
+List<String> remoteTransferPlanWarnings(PterodactylTransferPlan plan) =>
+    List<String>.unmodifiable(plan.warnings.map(_safeRemoteText));
+
+String? remoteTransferRuntimeResultMessage({
+  required bool remoteStarted,
+  required bool newTarget,
+}) {
+  if (!remoteStarted) return null;
+  return newTarget
+      ? 'The new Remote target was started after validation.'
+      : 'The Remote target was restored to its previous running state.';
+}
+
+enum RemoteCreatePushClaimAction { create, resume, completed }
+
+RemoteCreatePushClaimAction remoteCreatePushClaimAction({
+  required bool shouldCreate,
+  required bool alreadyCompleted,
+}) {
+  if (shouldCreate && alreadyCompleted) {
+    throw StateError('A completed Create & Push intent cannot create again.');
+  }
+  if (alreadyCompleted) return RemoteCreatePushClaimAction.completed;
+  return shouldCreate
+      ? RemoteCreatePushClaimAction.create
+      : RemoteCreatePushClaimAction.resume;
+}
+
+/// Routes a durable postcondition failure to the repair-only engine path.
+/// A create or completed claim can never legitimately need this repair.
+bool remoteCreatePushUsesPostconditionRepair({
+  required RemoteCreatePushClaimAction action,
+  required bool needsPostconditionRepair,
+}) {
+  if (!needsPostconditionRepair) return false;
+  if (action != RemoteCreatePushClaimAction.resume) {
+    throw StateError(
+      'Only a resumable Create & Push intent can repair postconditions.',
+    );
+  }
+  return true;
+}
+
+/// Panel egg metadata does not reliably identify confidential values, so the
+/// wizard masks every environment override rather than risking terminal or
+/// scrollback disclosure.
+bool remoteCreateVariableUsesSecretInput(PterodactylEggVariable _) => true;
+
+List<MapEntry<String, String>> remoteCreatePushPreviewDetails({
+  required PterodactylCreatePushPlan creation,
+  required PterodactylTransferPlan transferPlan,
+  required PterodactylRemoteLink? existingLink,
+  required bool startAfterTransfer,
+  required bool persistNewLink,
+  required String intentId,
+  required String confirmationToken,
+}) {
+  final List<String> environmentNames = creation.environment.keys.toList(
+    growable: false,
+  )..sort();
+  final String redactedEnvironment = environmentNames.isEmpty
+      ? '<none>'
+      : environmentNames
+            .map<String>((String name) => '${_safeRemoteText(name)}=<redacted>')
+            .join(', ');
+  final String linkAction;
+  if (existingLink == null) {
+    linkAction = persistNewLink
+        ? 'save new Remote server · Local is unlinked'
+        : 'leave Local unlinked · new server is one-time';
+  } else {
+    final String savedTarget =
+        '${_safeRemoteText(existingLink.profileId)}/'
+        '${_safeRemoteText(existingLink.serverIdentifier)}';
+    linkAction = persistNewLink
+        ? 'replace $savedTarget with new Remote server'
+        : 'preserve $savedTarget · new server is one-time';
+  }
+  final List<MapEntry<String, String>> details = <MapEntry<String, String>>[
+    MapEntry<String, String>(
+      'create from',
+      '${creation.sourceKind} · ${_safeRemoteText(creation.sourceName)}',
+    ),
+    MapEntry<String, String>(
+      creation.sourceKind == 'template' ? 'template UUID' : 'egg UUID',
+      _safeRemoteText(creation.sourceIdentity),
+    ),
+    MapEntry<String, String>('egg ID', '${creation.sourceEggId}'),
+    MapEntry<String, String>('server name', _safeRemoteText(creation.name)),
+    MapEntry<String, String>(
+      'external ID',
+      _safeRemoteText(creation.externalId ?? '<pending>'),
+    ),
+    MapEntry<String, String>(
+      'owner',
+      '${creation.ownerId} · ${_safeRemoteText(creation.ownerName)}',
+    ),
+    MapEntry<String, String>(
+      'node',
+      '${creation.nodeId} · ${_safeRemoteText(creation.nodeName)}',
+    ),
+    MapEntry<String, String>('image', _safeRemoteText(creation.dockerImage)),
+    MapEntry<String, String>('startup', _safeRemoteText(creation.startup)),
+    MapEntry<String, String>('environment', redactedEnvironment),
+    MapEntry<String, String>(
+      'resources',
+      'memory=${creation.memoryMiB} MiB · swap=${creation.swapMiB} MiB · '
+          'disk=${creation.diskMiB} MiB · io=${creation.ioWeight} · '
+          'cpu=${creation.cpuPercent}% · '
+          'threads=${_safeRemoteText(creation.threads ?? '<none>')}',
+    ),
+    MapEntry<String, String>(
+      'features',
+      'databases=${creation.databaseLimit ?? 'unlimited'} · '
+          'allocations=${creation.allocationLimit ?? 'unlimited'} · '
+          'backups=${creation.backupLimit ?? 'unlimited'}',
+    ),
+    MapEntry<String, String>(
+      'create flags',
+      'oom_disabled=${creation.oomDisabled} · '
+          'skip_scripts=${creation.skipScripts} · '
+          'start_on_completion=false',
+    ),
+    MapEntry<String, String>(
+      'final state',
+      startAfterTransfer ? 'running after validation' : 'stopped',
+    ),
+    MapEntry<String, String>('link action', linkAction),
+    MapEntry<String, String>(
+      'transfer fingerprint',
+      _safeRemoteText(transferPlan.sourceFingerprint),
+    ),
+    MapEntry<String, String>(
+      'transfer token',
+      _safeRemoteText(transferPlan.confirmationToken),
+    ),
+    MapEntry<String, String>('intent', _safeRemoteText(intentId)),
+    MapEntry<String, String>(
+      'confirmation token',
+      _safeRemoteText(confirmationToken),
+    ),
+  ];
+  return List<MapEntry<String, String>>.unmodifiable(details);
+}
 
 const bool remoteCreateFinalConfirmationDefault = false;
 
@@ -209,6 +408,28 @@ final class _RemoteEggPlanSelection {
   final PterodactylNest nest;
   final PterodactylEgg egg;
   final String imageLabel;
+}
+
+sealed class _RemotePushCreateSelection {
+  const _RemotePushCreateSelection();
+}
+
+final class _RemotePushTemplateSelection extends _RemotePushCreateSelection {
+  const _RemotePushTemplateSelection({
+    required this.template,
+    required this.owner,
+    required this.node,
+  });
+
+  final PterodactylApplicationServer template;
+  final PterodactylUser owner;
+  final PterodactylNode node;
+}
+
+final class _RemotePushEggSelection extends _RemotePushCreateSelection {
+  const _RemotePushEggSelection(this.selection);
+
+  final _RemoteEggPlanSelection selection;
 }
 
 enum _RemoteAccountAction {
@@ -377,6 +598,7 @@ class InteractiveWizard {
     required this.passthrough,
     required this.pterodactyl,
     required this.pterodactylSmb,
+    required this.transfer,
     this.requestedConsumer,
   });
 
@@ -384,6 +606,7 @@ class InteractiveWizard {
   final PassthroughService passthrough;
   final PterodactylService pterodactyl;
   final PterodactylSmbService pterodactylSmb;
+  final PterodactylTransferService transfer;
   final ConsumerProfile? requestedConsumer;
   ConsumerProfile? _consumerOverride;
   MonitorView _monitorView = MonitorView.local;
@@ -779,6 +1002,11 @@ class InteractiveWizard {
         await _quickRestart(name);
       case InstanceModalAction.console:
         await _quickConsole(name);
+      case InstanceModalAction.pushToRemote:
+        await _pushLocalToRemote(name);
+      case InstanceModalAction.pullToLocal:
+        Ui.note('That action is Remote-only.');
+        await Ui.pause();
       case InstanceModalAction.settings:
       case InstanceModalAction.history:
       case InstanceModalAction.reinstall:
@@ -957,6 +1185,11 @@ class InteractiveWizard {
         await _remotePower(identifier, PterodactylPowerSignal.restart);
       case InstanceModalAction.console:
         await _remoteConsole(identifier);
+      case InstanceModalAction.pullToLocal:
+        await _pullRemoteToLocal(identifier);
+      case InstanceModalAction.pushToRemote:
+        Ui.note('That action is Local-only.');
+        await Ui.pause();
       case InstanceModalAction.settings:
         await _remoteSettings(identifier);
       case InstanceModalAction.history:
@@ -1034,6 +1267,863 @@ class InteractiveWizard {
       'Attaching to $identifier. Press Esc, Ctrl-C, or enter :exit to detach.',
     );
     await PterodactylConsoleTerminal(connection: connection).run();
+  }
+
+  Future<void> _pullRemoteToLocal(String identifier) async {
+    final PterodactylProfile profile = _requireRemoteProfile();
+    final PterodactylClientServerAccess access = await Ui.spin(
+      'Checking remote server',
+      () => pterodactyl.serverAccess(profile.id, identifier),
+    );
+    final String localName = await Ui.input(
+      'Local instance name',
+      defaultValue: remotePullDefaultLocalName(
+        remoteName: access.server.name,
+        serverIdentifier: access.server.identifier,
+      ),
+      validator: _isValidInstanceName,
+      validationMessage: 'Use letters, numbers, ., _, or - with no spaces.',
+    );
+    if (!await _prepareDirectTransferFiles(
+      profileId: profile.id,
+      serverIdentifier: access.server.identifier,
+    )) {
+      return;
+    }
+    final PterodactylTransferPlan plan = await Ui.spin(
+      'Comparing Remote with Local',
+      () => transfer.planPull(
+        profileId: profile.id,
+        serverIdentifier: access.server.identifier,
+        localInstanceName: localName,
+      ),
+    );
+    _showTransferPlan(plan, profileName: profile.name);
+    final bool confirmed = await Ui.confirm(
+      'Create this stopped Local instance?',
+      defaultValue: false,
+    );
+    if (!confirmed) return;
+
+    final PterodactylTransferResult result = await Ui.spin(
+      'Pulling Remote server to Local',
+      () => transfer.pull(
+        profileId: profile.id,
+        serverIdentifier: access.server.identifier,
+        localInstanceName: localName,
+        expectedPlanToken: plan.confirmationToken,
+      ),
+    );
+    await _finishTransfer(result);
+  }
+
+  Future<void> _pushLocalToRemote(String localName) async {
+    while (true) {
+      final PterodactylRemoteLink? link = await transfer.linkForLocalInstance(
+        localName,
+      );
+      final List<PterodactylProfile> profiles = pterodactyl.listProfiles();
+      final List<RemoteTransferDestination> destinations =
+          remoteTransferDestinations(
+            hasLink: link != null,
+            hasProfiles: profiles.isNotEmpty,
+          );
+
+      if (destinations.length == 1) {
+        Ui.warn(
+          '$localName has no linked Remote and no Remote account exists.',
+        );
+        final bool connect = await Ui.confirm(
+          'Open the Remote connection manager?',
+          defaultValue: true,
+        );
+        if (connect) {
+          await _connectPterodactyl();
+          continue;
+        }
+        return;
+      }
+
+      final int selected = await Ui.choose('Push $localName to', <String>[
+        for (final RemoteTransferDestination destination in destinations)
+          switch (destination) {
+            RemoteTransferDestination.linked =>
+              'Linked · ${_safeRemoteText(link!.serverName)} (${link.serverIdentifier})',
+            RemoteTransferDestination.existing =>
+              'Choose any existing Remote server',
+            RemoteTransferDestination.createNew =>
+              'Create a stopped Remote server, then push',
+            RemoteTransferDestination.done => 'Back to dashboard',
+          },
+      ]);
+      final RemoteTransferDestination destination = destinations[selected];
+      if (destination == RemoteTransferDestination.done) return;
+
+      try {
+        switch (destination) {
+          case RemoteTransferDestination.linked:
+            if (!await _prepareDirectTransferFiles(
+              profileId: link!.profileId,
+              serverIdentifier: link.serverIdentifier,
+            )) {
+              return;
+            }
+            final PterodactylTransferMode mode =
+                await _chooseRemoteTransferMode();
+            await _pushLocalToExisting(
+              localName: localName,
+              mode: mode,
+              relink: false,
+            );
+            return;
+          case RemoteTransferDestination.existing:
+            final PterodactylProfile profile = await _chooseTransferProfile();
+            final PterodactylClientServer? server = await _chooseTransferServer(
+              profile,
+            );
+            if (server == null) return;
+            if (!await _prepareDirectTransferFiles(
+              profileId: profile.id,
+              serverIdentifier: server.identifier,
+            )) {
+              return;
+            }
+            final PterodactylTransferMode mode =
+                await _chooseRemoteTransferMode();
+            final bool relink = await Ui.confirm(
+              'Use ${_safeRemoteText(server.name)} as the linked target for future pushes?',
+              defaultValue: remoteTransferRelinkDefault(
+                hasExistingLink: link != null,
+              ),
+            );
+            await _pushLocalToExisting(
+              localName: localName,
+              mode: mode,
+              profile: profile,
+              server: server,
+              relink: relink,
+            );
+            return;
+          case RemoteTransferDestination.createNew:
+            final PterodactylProfile profile = await _chooseTransferProfile();
+            await _createRemoteAndPush(localName, profile, existingLink: link);
+            return;
+          case RemoteTransferDestination.done:
+            return;
+        }
+      } on PromptBackNavigation {
+        // Escape unwinds the target form back to this destination card.
+      }
+    }
+  }
+
+  Future<PterodactylProfile> _chooseTransferProfile() async {
+    final List<PterodactylProfile> profiles = pterodactyl.listProfiles();
+    if (profiles.isEmpty) {
+      throw StateError('No Remote account is configured.');
+    }
+    if (profiles.length == 1) return profiles.single;
+    final String? activeId = pterodactyl.activeProfile()?.id;
+    int initialIndex = profiles.indexWhere(
+      (PterodactylProfile profile) => profile.id == activeId,
+    );
+    if (initialIndex < 0) initialIndex = 0;
+    final int selected = await Ui.choose('Remote account', <String>[
+      for (final PterodactylProfile profile in profiles)
+        '${_safeRemoteText(profile.name)} · ${_safeRemoteText(profile.origin.toString())}',
+    ], initialIndex: initialIndex);
+    return profiles[selected];
+  }
+
+  Future<PterodactylClientServer?> _chooseTransferServer(
+    PterodactylProfile profile,
+  ) async {
+    final List<PterodactylClientServer> servers =
+        List<PterodactylClientServer>.of(
+          await Ui.spin(
+            'Loading remote servers',
+            () => pterodactyl.listServers(profile.id),
+          ),
+        );
+    servers.sort(
+      (PterodactylClientServer left, PterodactylClientServer right) =>
+          left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+    );
+    if (servers.isEmpty) {
+      Ui.note('${_safeRemoteText(profile.name)} has no existing server.');
+      await Ui.pause();
+      return null;
+    }
+    final int selected = await Ui.choose('Existing Remote server', <String>[
+      for (final PterodactylClientServer server in servers)
+        '${_safeRemoteText(server.name)} (${server.identifier})',
+    ]);
+    return servers[selected];
+  }
+
+  Future<PterodactylTransferMode> _chooseRemoteTransferMode() async {
+    final int selected = await Ui.choose('Transfer mode', <String>[
+      'Update · copy changed/new files, preserve Remote-only files',
+      'Mirror · exact Local copy, delete Remote-only files',
+      'Back to destination',
+    ]);
+    return switch (selected) {
+      0 => PterodactylTransferMode.update,
+      1 => PterodactylTransferMode.mirror,
+      _ => throw const PromptBackNavigation(),
+    };
+  }
+
+  Future<void> _pushLocalToExisting({
+    required String localName,
+    required PterodactylTransferMode mode,
+    PterodactylProfile? profile,
+    PterodactylClientServer? server,
+    required bool relink,
+  }) async {
+    final PterodactylTransferPlan plan = await Ui.spin(
+      'Comparing Local with Remote',
+      () => transfer.planPush(
+        localInstanceName: localName,
+        profileId: profile?.id,
+        serverIdentifier: server?.identifier,
+        mode: mode,
+      ),
+    );
+    _showTransferPlan(
+      plan,
+      profileName: profile?.name ?? _remoteProfileName(plan.profileId),
+    );
+    if (!await _confirmTransferPlan(plan)) return;
+
+    final PterodactylTransferResult result = await Ui.spin(
+      'Pushing Local instance to Remote',
+      () => transfer.push(
+        localInstanceName: localName,
+        profileId: profile?.id,
+        serverIdentifier: server?.identifier,
+        mode: mode,
+        expectedPlanToken: plan.confirmationToken,
+        relink: relink,
+        restorePreviousRunningState: true,
+      ),
+    );
+    await _finishTransfer(result);
+  }
+
+  Future<void> _createRemoteAndPush(
+    String localName,
+    PterodactylProfile profile, {
+    required PterodactylRemoteLink? existingLink,
+  }) async {
+    final PterodactylVerification verification =
+        await _ensureApplicationCredential(profile);
+    if (!remoteCreationCatalogAccessAvailable(verification)) {
+      Ui.warn('Remote creation inventory is unavailable for this connection.');
+      _showRemoteCreationPermissionHelp();
+      await Ui.pause();
+      return;
+    }
+    final PterodactylCreationCatalog? loaded = await _loadRemoteCreationCatalog(
+      profile,
+    );
+    if (loaded == null) return;
+    final PterodactylCreationCatalog catalog = loaded;
+    final _RemotePushCreateSelection? selection =
+        await _chooseRemotePushCreateSelection(catalog);
+    if (selection == null) return;
+    final String remoteName = await Ui.input(
+      'New Remote server name',
+      defaultValue: localName,
+      validator: (String value) => value.trim().isNotEmpty,
+      validationMessage: 'Server name cannot be empty.',
+    );
+    final bool startAfterPush = await Ui.confirm(
+      'Start the new server only after the push succeeds?',
+      defaultValue: false,
+    );
+    final bool relink =
+        existingLink == null ||
+        await Ui.confirm(
+          'Replace the saved link to ${_safeRemoteText(existingLink.serverName)} with this new server?',
+          defaultValue: false,
+        );
+    final PterodactylTransferPlan plan = await Ui.spin(
+      'Planning create and push',
+      () => transfer.planNewPush(
+        localInstanceName: localName,
+        profileId: profile.id,
+        proposedServerName: remoteName,
+      ),
+    );
+    final PterodactylCreatePushPlan unresolvedCreation =
+        _remotePushCreationPlan(selection: selection, name: remoteName);
+    final String intentId = pterodactylCreatePushIntentId(
+      transferPlan: plan,
+      canonicalCreation: unresolvedCreation.canonicalJson,
+      startAfterTransfer: startAfterPush,
+      persistNewLink: relink,
+    );
+    final PterodactylCreatePushPlan creation = unresolvedCreation
+        .withExternalId(intentId);
+    final String confirmationToken = pterodactylCreatePushConfirmationToken(
+      transferConfirmationToken: plan.confirmationToken,
+      canonicalCreation: creation.canonicalJson,
+      startAfterTransfer: startAfterPush,
+      persistNewLink: relink,
+    );
+    _showTransferPlan(
+      plan,
+      profileName: profile.name,
+      title: 'CREATE & PUSH',
+      details: remoteCreatePushPreviewDetails(
+        creation: creation,
+        transferPlan: plan,
+        existingLink: existingLink,
+        startAfterTransfer: startAfterPush,
+        persistNewLink: relink,
+        intentId: intentId,
+        confirmationToken: confirmationToken,
+      ),
+    );
+    if (!await Ui.confirm(
+      'Create this stopped server and push the Local instance?',
+      defaultValue: false,
+    )) {
+      return;
+    }
+
+    final PterodactylCreatePushIntentCoordinator coordinator =
+        PterodactylCreatePushIntentCoordinator(
+          metadataDirectoryPath: passthrough.context.metadataDir,
+          service: pterodactyl,
+        );
+    late final PterodactylCreatePushIntentClaim claim;
+    try {
+      claim = await Ui.spin(
+        'Opening durable Create & Push intent',
+        () => coordinator.claim(
+          id: intentId,
+          confirmationToken: confirmationToken,
+          transferPlan: plan,
+          creation: creation,
+          startAfterTransfer: startAfterPush,
+          persistNewLink: relink,
+        ),
+      );
+    } on Object catch (error) {
+      Ui.error('Create & Push intent refused: ${_safeRemoteText('$error')}');
+      await Ui.pause();
+      return;
+    }
+
+    try {
+      Ui.keyValue('recovery journal', claim.path);
+      final RemoteCreatePushClaimAction action = remoteCreatePushClaimAction(
+        shouldCreate: claim.shouldCreate,
+        alreadyCompleted: claim.alreadyCompleted,
+      );
+      if (action == RemoteCreatePushClaimAction.completed) {
+        Ui.success('This exact Create & Push intent already completed.');
+        if (claim.server case final PterodactylApplicationServer server) {
+          Ui.keyValue(
+            'Remote server',
+            '${_safeRemoteText(server.name)} (${server.identifier})',
+          );
+        }
+        Ui.note('No server was created and no files were transferred again.');
+        await Ui.pause();
+        return;
+      }
+
+      if (remoteCreatePushUsesPostconditionRepair(
+        action: action,
+        needsPostconditionRepair: claim.needsPostconditionRepair,
+      )) {
+        final PterodactylApplicationServer? resumed = claim.server;
+        if (resumed == null) {
+          throw StateError(
+            'A repairable Create & Push intent has no Remote server.',
+          );
+        }
+        Ui.info(
+          'Repairing completion for ${_safeRemoteText(resumed.name)} '
+          '(${resumed.identifier}); no files will be uploaded again.',
+        );
+        late final PterodactylTransferResult result;
+        try {
+          result = await Ui.spin(
+            'Repairing Create & Push completion',
+            () => transfer.repairNewPushPostconditions(
+              plan: plan,
+              createdServerIdentifier: resumed.identifier,
+              relink: relink,
+              startAfter: startAfterPush,
+            ),
+          );
+          claim.complete(
+            created: resumed,
+            result: result,
+            filesTransferred: false,
+          );
+        } on Object catch (error) {
+          Ui.error(
+            'Create & Push completion repair paused: '
+            '${_safeRemoteText('$error')}',
+          );
+          Ui.warn(
+            'No files were uploaded. Retry this exact form to continue '
+            'repairing the saved link or requested running state.',
+          );
+          Ui.keyValue('recovery journal', claim.path);
+          await Ui.pause();
+          return;
+        }
+        await _finishTransfer(result, newTarget: true);
+        return;
+      }
+
+      try {
+        await _prepareTransferAccount(profile.id);
+      } on Object catch (error) {
+        Ui.warn(
+          'Remote file account preparation failed: '
+          '${_safeRemoteText('$error')}',
+        );
+        await Ui.pause();
+        return;
+      }
+
+      late final PterodactylApplicationServer created;
+      if (action == RemoteCreatePushClaimAction.create) {
+        try {
+          claim.record(state: 'creating');
+          created = await Ui.spin(
+            'Creating stopped Remote server',
+            () => creation.create(service: pterodactyl, profileId: profile.id),
+          );
+          claim.record(state: 'created', created: created);
+        } on Object catch (error) {
+          claim.record(state: 'create-unknown', failure: '$error');
+          Ui.error(
+            'Remote creation status is ambiguous: ${_safeRemoteText('$error')}',
+          );
+          Ui.warn(
+            'Do not create another server manually. Retry this exact form; '
+            'Multiplexor will reconcile Panel external ID $intentId first.',
+          );
+          Ui.keyValue('recovery journal', claim.path);
+          await Ui.pause();
+          return;
+        }
+      } else {
+        final PterodactylApplicationServer? resumed = claim.server;
+        if (resumed == null) {
+          throw StateError('A resumable Create & Push intent has no server.');
+        }
+        created = resumed;
+        Ui.info(
+          'Resuming ${_safeRemoteText(created.name)} '
+          '(${created.identifier}); no new server was created.',
+        );
+      }
+
+      try {
+        claim.record(state: 'waiting-for-install', created: created);
+        await Ui.spin(
+          'Waiting for the stopped Remote server',
+          () => transfer.waitForNewTargetReady(
+            profileId: profile.id,
+            serverIdentifier: created.identifier,
+          ),
+        );
+      } on Object catch (error) {
+        claim.record(
+          state: 'transfer-failed',
+          created: created,
+          failure: '$error',
+        );
+        _showCreatePushRetry(created, claim.path, error);
+        await Ui.pause();
+        return;
+      }
+      if (!await _prepareDirectTransferFiles(
+        profileId: profile.id,
+        serverIdentifier: created.identifier,
+        pauseOnFailure: false,
+      )) {
+        claim.record(
+          state: 'transfer-failed',
+          created: created,
+          failure: 'Direct Remote file access was not prepared.',
+        );
+        Ui.warn(
+          '${_safeRemoteText(created.name)} (${created.identifier}) remains '
+          'stopped until direct file access is prepared.',
+        );
+        await Ui.pause();
+        return;
+      }
+
+      late final PterodactylTransferResult result;
+      try {
+        claim.record(state: 'transferring', created: created);
+        result = await Ui.spin(
+          'Uploading Local instance before first start',
+          () => transfer.pushNew(
+            plan: plan,
+            createdServerIdentifier: created.identifier,
+            relink: relink,
+            startAfter: startAfterPush,
+          ),
+        );
+      } on Object catch (error) {
+        claim.record(
+          state: 'transfer-failed',
+          created: created,
+          failure: '$error',
+        );
+        _showCreatePushRetry(created, claim.path, error);
+        await Ui.pause();
+        return;
+      }
+      claim.complete(created: created, result: result);
+      await _finishTransfer(result, newTarget: true);
+    } finally {
+      claim.close();
+    }
+  }
+
+  void _showCreatePushRetry(
+    PterodactylApplicationServer created,
+    String journalPath,
+    Object error,
+  ) {
+    Ui.error('Create & Push paused: ${_safeRemoteText('$error')}');
+    Ui.warn(
+      '${_safeRemoteText(created.name)} (${created.identifier}) remains '
+      'stopped for a safe retry.',
+    );
+    Ui.keyValue('recovery journal', journalPath);
+  }
+
+  Future<_RemotePushCreateSelection?> _chooseRemotePushCreateSelection(
+    PterodactylCreationCatalog catalog,
+  ) async {
+    final String? partialEggNote = remoteCreatePartialEggInventoryNote(catalog);
+    if (partialEggNote != null) Ui.note(partialEggNote);
+    final List<PterodactylEgg> usableEggs = remoteCreateUsableEggs(catalog);
+    final List<RemoteCreateSource> sources = remoteCreateSources(
+      hasPanelEggs: usableEggs.isNotEmpty,
+      hasTemplates: catalog.templates.isNotEmpty,
+    );
+    if (sources.length == 1) {
+      Ui.warn('No creation-ready Panel egg or existing template is available.');
+      await Ui.pause();
+      return null;
+    }
+
+    RemoteCreateSource source = sources.first;
+    if (sources.length > 2) {
+      final int selected =
+          await Ui.choose('Create Remote target from', <String>[
+            'Panel egg · works without an existing server',
+            'Clone an existing server configuration',
+            'Back to destination',
+          ]);
+      source = sources[selected];
+    }
+    switch (source) {
+      case RemoteCreateSource.panelEgg:
+        final _RemoteEggChoice? choice = await _chooseRemoteEgg(
+          catalog,
+          usableEggs,
+        );
+        if (choice == null) return null;
+        final _RemoteEggPlanSelection? selection =
+            await _buildRemoteEggCreatePlan(
+              catalog: catalog,
+              choice: choice,
+              serverCount: 1,
+              promptForStart: false,
+            );
+        return selection == null ? null : _RemotePushEggSelection(selection);
+      case RemoteCreateSource.cloneExisting:
+        final int selected =
+            await Ui.choose('Clone remote configuration from', <String>[
+              for (final PterodactylApplicationServer template
+                  in catalog.templates)
+                '${_safeRemoteText(template.name)} (${template.identifier})',
+            ]);
+        final PterodactylApplicationServer template =
+            catalog.templates[selected];
+        final PterodactylUser? owner = await _chooseRemoteCreationOwner(
+          catalog,
+        );
+        if (owner == null) return null;
+        final List<PterodactylNode> matchingNodes = catalog.nodes
+            .where((PterodactylNode node) => node.id == template.nodeId)
+            .toList(growable: false);
+        if (matchingNodes.isEmpty ||
+            !remoteCreateEligibleNodes(
+              catalog,
+              1,
+            ).any((PterodactylNode node) => node.id == template.nodeId)) {
+          Ui.warn(
+            'The template node is unavailable, under maintenance, or has no '
+            'free allocation.',
+          );
+          await Ui.pause();
+          return null;
+        }
+        return _RemotePushTemplateSelection(
+          template: template,
+          owner: owner,
+          node: matchingNodes.single,
+        );
+      case RemoteCreateSource.done:
+        throw const PromptBackNavigation();
+    }
+  }
+
+  PterodactylCreatePushPlan _remotePushCreationPlan({
+    required String name,
+    required _RemotePushCreateSelection selection,
+  }) => switch (selection) {
+    _RemotePushTemplateSelection(
+      template: final PterodactylApplicationServer template,
+      owner: final PterodactylUser owner,
+      node: final PterodactylNode node,
+    ) =>
+      PterodactylCreatePushPlan.template(
+        plan: PterodactylTemplateCreatePlan.fromTemplate(
+          template: template,
+          name: name,
+          ownerId: owner.id,
+          startOnCompletion: false,
+        ),
+        ownerName: owner.username,
+        nodeName: node.name,
+      ),
+    _RemotePushEggSelection(selection: final _RemoteEggPlanSelection egg) =>
+      PterodactylCreatePushPlan.egg(
+        name: name,
+        source: egg.egg,
+        plan: egg.plan,
+        ownerName: egg.owner.username,
+        nodeName: egg.node.name,
+      ),
+  };
+
+  void _showTransferPlan(
+    PterodactylTransferPlan plan, {
+    String? profileName,
+    String? title,
+    List<MapEntry<String, String>> details = const <MapEntry<String, String>>[],
+  }) {
+    Ui.clearScreen();
+    Ui.appHeader(
+      title ??
+          (plan.direction == PterodactylTransferDirection.pull
+              ? 'PULL TO LOCAL'
+              : 'PUSH TO REMOTE'),
+      <String>[
+        profileName ?? plan.profileId,
+        plan.mode.name,
+        plan.targetWasRunning ? 'Remote currently running' : 'Remote stopped',
+      ],
+    );
+    if (plan.direction == PterodactylTransferDirection.pull) {
+      Ui.keyValue(
+        'source',
+        '${_safeRemoteText(plan.remoteServerName)} (${plan.serverIdentifier})',
+      );
+      Ui.keyValue('destination', 'Local ${plan.localInstanceName} · stopped');
+    } else {
+      Ui.keyValue('source', 'Local ${plan.localInstanceName} · stopped');
+      Ui.keyValue(
+        'destination',
+        '${_safeRemoteText(plan.remoteServerName)} (${plan.serverIdentifier})',
+      );
+    }
+    for (final MapEntry<String, String> detail in details) {
+      Ui.keyValue(detail.key, detail.value);
+    }
+    Ui.keyValue(
+      'changes',
+      '${plan.addCount} add · ${plan.updateCount} update · ${plan.deleteCount} delete',
+    );
+    Ui.keyValue('transfer', formatBytes(plan.transferBytes));
+    if (plan.direction == PterodactylTransferDirection.push) {
+      Ui.keyValue(
+        'Remote state',
+        !plan.targetExists
+            ? 'create stopped, upload, validate before first start'
+            : plan.targetWasRunning
+            ? 'stop, backup, push, restore running state'
+            : 'backup and remain stopped',
+      );
+    }
+    if (plan.mode == PterodactylTransferMode.mirror) {
+      Ui.warn('Mirror deletes every Remote-only file listed below.');
+    }
+    for (final String warning in remoteTransferPlanWarnings(plan)) {
+      Ui.warn(warning);
+    }
+    final int previewCount = plan.changes.length > 8 ? 8 : plan.changes.length;
+    for (int index = 0; index < previewCount; index++) {
+      final PterodactylTransferChange change = plan.changes[index];
+      Ui.info(
+        '${change.kind.name.toUpperCase().padRight(6)} ${_safeRemoteText(change.path)}',
+      );
+    }
+    if (plan.changes.length > previewCount) {
+      Ui.note('${plan.changes.length - previewCount} more changes');
+    }
+    if (plan.isNoop) Ui.note('No file changes are required.');
+  }
+
+  Future<bool> _confirmTransferPlan(PterodactylTransferPlan plan) async {
+    if (!remoteTransferRequiresTypedConfirmation(plan.mode)) {
+      return Ui.confirm('Push these changes?', defaultValue: false);
+    }
+    Ui.warn('This is the destructive exact-mirror mode.');
+    final String phrase = remoteMirrorConfirmationPhrase(plan.serverIdentifier);
+    final String typed = await Ui.input('Type "$phrase" to mirror');
+    if (!remoteTransferConfirmationMatches(expected: phrase, typed: typed)) {
+      Ui.warn('Confirmation did not match. Nothing was changed.');
+      await Ui.pause();
+      return false;
+    }
+    return true;
+  }
+
+  String _remoteProfileName(String profileId) {
+    for (final PterodactylProfile profile in pterodactyl.listProfiles()) {
+      if (profile.id == profileId) return profile.name;
+    }
+    return profileId;
+  }
+
+  Future<void> _finishTransfer(
+    PterodactylTransferResult result, {
+    bool newTarget = false,
+  }) async {
+    Ui.blank();
+    final PterodactylTransferPlan plan = result.plan;
+    Ui.success(
+      plan.direction == PterodactylTransferDirection.pull
+          ? 'Pulled ${_safeRemoteText(plan.remoteServerName)} to ${plan.localInstanceName}'
+          : 'Pushed ${plan.localInstanceName} to ${_safeRemoteText(plan.remoteServerName)}',
+    );
+    Ui.keyValue(
+      result.linkPersisted ? 'linked target' : 'one-time target',
+      '${result.link.profileId}/${result.link.serverIdentifier}',
+    );
+    if (!result.linkPersisted) {
+      Ui.note('The Local instance link was not changed.');
+    }
+    if (result.backupPath != null) {
+      Ui.keyValue('backup', result.backupPath!);
+    }
+    if (result.recoveryManifestPath != null) {
+      Ui.keyValue('recovery', result.recoveryManifestPath!);
+    }
+    final String? runtimeMessage = remoteTransferRuntimeResultMessage(
+      remoteStarted: result.remoteRestarted,
+      newTarget: newTarget,
+    );
+    if (runtimeMessage != null) {
+      Ui.info(runtimeMessage);
+    }
+    for (final String warning in result.warnings) {
+      Ui.warn(_safeRemoteText(warning));
+    }
+    await Ui.pause();
+  }
+
+  Future<void> _prepareTransferAccount(String profileId) async {
+    final String normalized = PterodactylProfile.normalizeId(profileId);
+    final PterodactylSftpAccount? account =
+        pterodactylSmb.settings?.accounts[normalized];
+    if (account == null || !account.enabled) {
+      await Ui.spin('Preparing Multiplexor Drive account', () {
+        return pterodactylSmb.installDrive(profileIds: <String>[normalized]);
+      });
+    }
+  }
+
+  /// Prepares only the selected server's direct transfer backend. It never
+  /// starts, diagnoses, or mounts the aggregate browsing Drive; enrolling a
+  /// missing account may pause that Drive while its shared settings change.
+  Future<bool> _prepareDirectTransferFiles({
+    required String profileId,
+    required String serverIdentifier,
+    bool pauseOnFailure = true,
+  }) async {
+    final String normalizedProfile = PterodactylProfile.normalizeId(profileId);
+    try {
+      await _prepareTransferAccount(normalizedProfile);
+      final bool trusted = await Ui.spin(
+        'Checking selected Remote host key',
+        () => pterodactylSmb.isServerHostKeyTrusted(
+          profileId: normalizedProfile,
+          serverIdentifier: serverIdentifier,
+        ),
+      );
+      if (!trusted) {
+        final List<PterodactylSshHostKeyCandidate> candidates = await Ui.spin(
+          'Scanning selected Wings SSH host keys',
+          () => pterodactylSmb.scanServerHostKeys(
+            profileId: normalizedProfile,
+            serverIdentifier: serverIdentifier,
+          ),
+        );
+        if (candidates.isEmpty) {
+          Ui.warn('No SSH host key was returned for the selected server.');
+          if (pauseOnFailure) await Ui.pause();
+          return false;
+        }
+        Ui.appHeader('SELECTED WINGS SSH HOST KEYS', <String>[
+          '$serverIdentifier · ${candidates.length} fingerprints',
+        ]);
+        for (final PterodactylSshHostKeyCandidate candidate in candidates) {
+          Ui.keyValue(
+            '${_safeRemoteText(candidate.endpoint)} ${_safeRemoteText(candidate.keyType)}',
+            _safeRemoteText(candidate.fingerprint),
+          );
+        }
+        Ui.warn(
+          'Compare these fingerprints with this Wings host before trusting '
+          'them.',
+        );
+        if (!await Ui.confirm(
+          'Trust exactly these SSH host keys for this server?',
+          defaultValue: false,
+        )) {
+          Ui.note('Transfer cancelled; no SSH trust settings were changed.');
+          if (pauseOnFailure) await Ui.pause();
+          return false;
+        }
+        await pterodactylSmb.trustHostKeys(candidates);
+        Ui.success('Selected Wings SSH host keys trusted');
+      }
+      await Ui.spin(
+        'Verifying direct Remote file access',
+        () => pterodactylSmb.verifyDirectServerFilesReady(
+          profileId: normalizedProfile,
+          serverIdentifier: serverIdentifier,
+        ),
+      );
+      return true;
+    } on Object catch (error) {
+      Ui.warn(
+        'Direct Remote file access is not ready: '
+        '${_safeRemoteText('$error')}',
+      );
+      if (pauseOnFailure) await Ui.pause();
+      return false;
+    }
   }
 
   Future<void> _remoteOpenFolder(String identifier) async {
@@ -2399,11 +3489,9 @@ class InteractiveWizard {
     return _RemoteEggChoice(nest: nest, egg: eggs[eggIndex]);
   }
 
-  Future<_RemoteEggPlanSelection?> _buildRemoteEggCreatePlan({
-    required PterodactylCreationCatalog catalog,
-    required _RemoteEggChoice choice,
-    required int serverCount,
-  }) async {
+  Future<PterodactylUser?> _chooseRemoteCreationOwner(
+    PterodactylCreationCatalog catalog,
+  ) async {
     if (catalog.users.isEmpty) {
       Ui.warn('No panel user is available to own the new server(s).');
       Ui.note(
@@ -2426,7 +3514,20 @@ class InteractiveWizard {
         catalog.recommendedOwnerId,
       ),
     );
-    final PterodactylUser owner = catalog.users[ownerIndex];
+    return catalog.users[ownerIndex];
+  }
+
+  Future<_RemoteEggPlanSelection?> _buildRemoteEggCreatePlan({
+    required PterodactylCreationCatalog catalog,
+    required _RemoteEggChoice choice,
+    required int serverCount,
+    bool promptForStart = true,
+  }) async {
+    final PterodactylUser? selectedOwner = await _chooseRemoteCreationOwner(
+      catalog,
+    );
+    if (selectedOwner == null) return null;
+    final PterodactylUser owner = selectedOwner;
     final List<PterodactylNode> nodes = remoteCreateEligibleNodes(
       catalog,
       serverCount,
@@ -2465,20 +3566,8 @@ class InteractiveWizard {
     for (final PterodactylEggVariable variable in remoteCreatePromptVariables(
       choice.egg,
     )) {
-      final bool valueRequired =
-          variable.isRequired && variable.defaultValue.trim().isEmpty;
-      final String value = await Ui.input(
-        '${variable.name} (${variable.environmentVariable})'
-        '${valueRequired ? ' · required' : ''}',
-        defaultValue: variable.defaultValue.isEmpty
-            ? null
-            : variable.defaultValue,
-        validator: valueRequired
-            ? (String input) => input.trim().isNotEmpty
-            : null,
-        validationMessage: '${variable.environmentVariable} is required',
-      );
-      environment[variable.environmentVariable] = value;
+      environment[variable.environmentVariable] =
+          await _promptRemoteEggVariable(variable);
     }
     final int memoryMiB = await _promptRemoteResourceLimit(
       'Memory limit MiB (0 = unlimited)',
@@ -2492,18 +3581,21 @@ class InteractiveWizard {
       'CPU limit percent (0 = unlimited)',
       0,
     );
-    final bool startOnCompletion = await Ui.confirm(
-      serverCount == 1
-          ? 'Start the server after creation?'
-          : 'Start each server after creation?',
-      defaultValue: false,
-    );
+    final bool startOnCompletion = promptForStart
+        ? await Ui.confirm(
+            serverCount == 1
+                ? 'Start the server after creation?'
+                : 'Start each server after creation?',
+            defaultValue: false,
+          )
+        : false;
     final String startup = choice.egg.startup!;
     return _RemoteEggPlanSelection(
       plan: PterodactylEggCreatePlan(
         ownerId: owner.id,
         nodeId: node.id,
         eggId: choice.egg.id,
+        eggUuid: choice.egg.uuid,
         dockerImage: image.value,
         startup: startup,
         environment: environment,
@@ -2518,6 +3610,24 @@ class InteractiveWizard {
       egg: choice.egg,
       imageLabel: image.key,
     );
+  }
+
+  Future<String> _promptRemoteEggVariable(
+    PterodactylEggVariable variable,
+  ) async {
+    final bool valueRequired =
+        variable.isRequired && variable.defaultValue.trim().isEmpty;
+    final String label =
+        '${variable.name} (${variable.environmentVariable})'
+        '${valueRequired ? ' · required' : ''}';
+    while (true) {
+      final String value = await Ui.secret(
+        '$label${variable.defaultValue.isEmpty ? '' : ' · blank keeps configured default'}',
+      );
+      final String resolved = value.isEmpty ? variable.defaultValue : value;
+      if (!valueRequired || resolved.trim().isNotEmpty) return resolved;
+      Ui.warn('${variable.environmentVariable} is required');
+    }
   }
 
   Future<int> _promptRemoteResourceLimit(

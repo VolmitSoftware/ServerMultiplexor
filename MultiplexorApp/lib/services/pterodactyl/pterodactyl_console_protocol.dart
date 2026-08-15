@@ -149,6 +149,7 @@ sealed class PterodactylConsoleEvent {
 enum PterodactylConsoleConnectionState {
   connecting,
   connected,
+  reconnecting,
   refreshing,
   disconnected,
   error,

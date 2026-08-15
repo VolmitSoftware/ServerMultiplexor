@@ -1,14 +1,477 @@
 import 'package:multiplexor/services/interactive_wizard.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_credential.dart';
+import 'package:multiplexor/services/pterodactyl/pterodactyl_create_push.dart';
 import 'package:multiplexor/services/monitor/monitor_keymap.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_models.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_errors.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_profile.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_service.dart';
+import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_models.dart';
 import 'package:multiplexor/utils/user_prompt.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('Remote transfer destination policy', () {
+    test('offers linked, existing, and new targets when available', () {
+      expect(
+        remoteTransferDestinations(hasLink: true, hasProfiles: true),
+        <RemoteTransferDestination>[
+          RemoteTransferDestination.linked,
+          RemoteTransferDestination.existing,
+          RemoteTransferDestination.createNew,
+          RemoteTransferDestination.done,
+        ],
+      );
+    });
+
+    test('does not offer dead-end target choices', () {
+      expect(
+        remoteTransferDestinations(hasLink: false, hasProfiles: false),
+        <RemoteTransferDestination>[RemoteTransferDestination.done],
+      );
+      expect(
+        remoteTransferDestinations(hasLink: false, hasProfiles: true),
+        <RemoteTransferDestination>[
+          RemoteTransferDestination.existing,
+          RemoteTransferDestination.createNew,
+          RemoteTransferDestination.done,
+        ],
+      );
+    });
+
+    test('suggests a safe and recognizable Local instance name', () {
+      expect(
+        remotePullDefaultLocalName(
+          remoteName: 'Survival Main #1',
+          serverIdentifier: 'a1b2c3',
+        ),
+        'Survival-Main-1-local',
+      );
+      expect(
+        remotePullDefaultLocalName(
+          remoteName: '... ---',
+          serverIdentifier: 'a1b2c3',
+        ),
+        'a1b2c3-local',
+      );
+      expect(
+        remotePullDefaultLocalName(
+          remoteName: 'staging-local',
+          serverIdentifier: 'a1b2c3',
+        ),
+        'staging-local',
+      );
+    });
+
+    test('only mirror requires an exact case-sensitive typed token', () {
+      expect(
+        remoteTransferRequiresTypedConfirmation(PterodactylTransferMode.update),
+        isFalse,
+      );
+      expect(
+        remoteTransferRequiresTypedConfirmation(PterodactylTransferMode.mirror),
+        isTrue,
+      );
+      expect(
+        remoteTransferConfirmationMatches(
+          expected: 'MIRROR abc123',
+          typed: 'MIRROR abc123',
+        ),
+        isTrue,
+      );
+      expect(
+        remoteTransferConfirmationMatches(
+          expected: 'MIRROR abc123',
+          typed: 'mirror abc123',
+        ),
+        isFalse,
+      );
+      expect(remoteMirrorConfirmationPhrase(' abc123 '), 'MIRROR abc123');
+    });
+
+    test('an existing link is never replaced by default', () {
+      expect(remoteTransferRelinkDefault(hasExistingLink: false), isTrue);
+      expect(remoteTransferRelinkDefault(hasExistingLink: true), isFalse);
+    });
+
+    test('preflight preserves and sanitizes every engine warning', () {
+      final PterodactylTransferPlan plan = PterodactylTransferPlan(
+        direction: PterodactylTransferDirection.push,
+        mode: PterodactylTransferMode.update,
+        localInstanceName: 'local',
+        profileId: 'production',
+        serverIdentifier: 'abc123',
+        remoteServerName: 'Remote',
+        targetExists: true,
+        targetWasRunning: false,
+        sourceFingerprint: 'source',
+        confirmationToken: 'token',
+        createdAt: DateTime.utc(2026, 8, 14),
+        changes: const <PterodactylTransferChange>[],
+        warnings: const <String>[
+          'Symlink skipped',
+          '\u001b[31mUnsafe\u001b[0m\nSecond line',
+        ],
+      );
+
+      expect(remoteTransferPlanWarnings(plan), <String>[
+        'Symlink skipped',
+        'Unsafe Second line',
+      ]);
+    });
+
+    test('runtime result distinguishes a new start from state restoration', () {
+      expect(
+        remoteTransferRuntimeResultMessage(
+          remoteStarted: true,
+          newTarget: true,
+        ),
+        'The new Remote target was started after validation.',
+      );
+      expect(
+        remoteTransferRuntimeResultMessage(
+          remoteStarted: true,
+          newTarget: false,
+        ),
+        'The Remote target was restored to its previous running state.',
+      );
+      expect(
+        remoteTransferRuntimeResultMessage(
+          remoteStarted: false,
+          newTarget: true,
+        ),
+        isNull,
+      );
+    });
+
+    test(
+      'ambiguous intents resume and completed intents never create again',
+      () {
+        expect(
+          remoteCreatePushClaimAction(
+            shouldCreate: true,
+            alreadyCompleted: false,
+          ),
+          RemoteCreatePushClaimAction.create,
+        );
+        expect(
+          remoteCreatePushClaimAction(
+            shouldCreate: false,
+            alreadyCompleted: false,
+          ),
+          RemoteCreatePushClaimAction.resume,
+        );
+        expect(
+          remoteCreatePushClaimAction(
+            shouldCreate: false,
+            alreadyCompleted: true,
+          ),
+          RemoteCreatePushClaimAction.completed,
+        );
+        expect(
+          () => remoteCreatePushClaimAction(
+            shouldCreate: true,
+            alreadyCompleted: true,
+          ),
+          throwsStateError,
+        );
+      },
+    );
+
+    test('postcondition failures route only resumable intents to repair', () {
+      expect(
+        remoteCreatePushUsesPostconditionRepair(
+          action: RemoteCreatePushClaimAction.resume,
+          needsPostconditionRepair: true,
+        ),
+        isTrue,
+      );
+      expect(
+        remoteCreatePushUsesPostconditionRepair(
+          action: RemoteCreatePushClaimAction.resume,
+          needsPostconditionRepair: false,
+        ),
+        isFalse,
+      );
+      expect(
+        remoteCreatePushUsesPostconditionRepair(
+          action: RemoteCreatePushClaimAction.create,
+          needsPostconditionRepair: false,
+        ),
+        isFalse,
+      );
+      for (final RemoteCreatePushClaimAction action
+          in <RemoteCreatePushClaimAction>[
+            RemoteCreatePushClaimAction.create,
+            RemoteCreatePushClaimAction.completed,
+          ]) {
+        expect(
+          () => remoteCreatePushUsesPostconditionRepair(
+            action: action,
+            needsPostconditionRepair: true,
+          ),
+          throwsStateError,
+          reason: action.name,
+        );
+      }
+    });
+
+    test(
+      'exact create preview shows every field without environment values',
+      () {
+        final PterodactylCreatePushPlan unresolved =
+            PterodactylCreatePushPlan.template(
+              plan: PterodactylTemplateCreatePlan.fromTemplate(
+                template: _template(
+                  environment: const <String, String>{
+                    'Z_SECRET': 'do-not-print',
+                    'A_TOKEN': 'also-secret',
+                  },
+                  limits: const PterodactylServerLimits(
+                    memoryMiB: 6144,
+                    swapMiB: -1,
+                    diskMiB: 20480,
+                    ioWeight: 750,
+                    cpuPercent: 225,
+                    threads: '0-3',
+                    oomDisabled: true,
+                  ),
+                  featureLimits: const PterodactylFeatureLimits(
+                    databases: 2,
+                    allocations: 3,
+                    backups: 4,
+                  ),
+                  startup: 'java -Xms128M -jar server.jar --nogui',
+                ),
+                name: 'New Remote',
+                ownerId: 7,
+                startOnCompletion: false,
+              ),
+              ownerName: 'owner',
+              nodeName: 'node',
+            );
+        final PterodactylTransferPlan transferPlan = PterodactylTransferPlan(
+          direction: PterodactylTransferDirection.push,
+          mode: PterodactylTransferMode.update,
+          localInstanceName: 'local-one',
+          localConsumer: 'plugin',
+          localInstancePath: '/workspace/instances/local-one',
+          profileId: 'production',
+          serverIdentifier: 'New Remote',
+          remoteServerName: 'New Remote',
+          targetExists: false,
+          targetWasRunning: false,
+          sourceFingerprint: 'sha256:source-fingerprint',
+          confirmationToken: 'transfer-token',
+          createdAt: DateTime.utc(2026, 8, 14),
+          changes: const <PterodactylTransferChange>[],
+        );
+        final String intentId = pterodactylCreatePushIntentId(
+          transferPlan: transferPlan,
+          canonicalCreation: unresolved.canonicalJson,
+          startAfterTransfer: true,
+          persistNewLink: false,
+        );
+        final PterodactylCreatePushPlan resolved = unresolved.withExternalId(
+          intentId,
+        );
+        final String confirmation = pterodactylCreatePushConfirmationToken(
+          transferConfirmationToken: transferPlan.confirmationToken,
+          canonicalCreation: resolved.canonicalJson,
+          startAfterTransfer: true,
+          persistNewLink: false,
+        );
+
+        expect(unresolved.externalId, isNull);
+        expect(resolved.externalId, intentId);
+        expect(intentId, startsWith('multiplexor-push-'));
+        expect(confirmation, startsWith('push-new:'));
+        final DateTime linkedAt = DateTime.utc(2026, 8, 13);
+        final PterodactylRemoteLink existingLink = PterodactylRemoteLink(
+          profileId: 'legacy',
+          serverIdentifier: 'old12345',
+          serverUuid: '00000000-0000-0000-0000-000000000099',
+          serverName: 'Old Remote',
+          localInstanceName: 'local-one',
+          localConsumer: 'plugin',
+          linkedAt: linkedAt,
+          lastTransferredAt: linkedAt,
+        );
+        final List<MapEntry<String, String>> detailEntries =
+            remoteCreatePushPreviewDetails(
+              creation: resolved,
+              transferPlan: transferPlan,
+              existingLink: existingLink,
+              startAfterTransfer: true,
+              persistNewLink: false,
+              intentId: intentId,
+              confirmationToken: confirmation,
+            );
+        final Map<String, String> details = Map<String, String>.fromEntries(
+          detailEntries,
+        );
+        expect(details.keys, <String>[
+          'create from',
+          'template UUID',
+          'egg ID',
+          'server name',
+          'external ID',
+          'owner',
+          'node',
+          'image',
+          'startup',
+          'environment',
+          'resources',
+          'features',
+          'create flags',
+          'final state',
+          'link action',
+          'transfer fingerprint',
+          'transfer token',
+          'intent',
+          'confirmation token',
+        ]);
+        expect(details['create from'], 'template · Template');
+        expect(
+          details['template UUID'],
+          '00000000-0000-0000-0000-000000000001',
+        );
+        expect(details['egg ID'], '20');
+        expect(details['server name'], 'New Remote');
+        expect(details['external ID'], intentId);
+        expect(details['owner'], '7 · owner');
+        expect(details['node'], '1 · node');
+        expect(details['image'], 'ghcr.io/pterodactyl/yolks:java_21');
+        expect(details['startup'], 'java -Xms128M -jar server.jar --nogui');
+        expect(
+          details['environment'],
+          'A_TOKEN=<redacted>, Z_SECRET=<redacted>',
+        );
+        expect(
+          details['resources'],
+          'memory=6144 MiB · swap=-1 MiB · disk=20480 MiB · io=750 · '
+          'cpu=225% · threads=0-3',
+        );
+        expect(details['features'], 'databases=2 · allocations=3 · backups=4');
+        expect(
+          details['create flags'],
+          'oom_disabled=true · skip_scripts=false · start_on_completion=false',
+        );
+        expect(details['final state'], 'running after validation');
+        expect(
+          details['link action'],
+          'preserve legacy/old12345 · new server is one-time',
+        );
+        expect(details['transfer fingerprint'], 'sha256:source-fingerprint');
+        expect(details['transfer token'], 'transfer-token');
+        expect(details['intent'], intentId);
+        expect(details['confirmation token'], confirmation);
+        final String preview = detailEntries
+            .map<String>(
+              (MapEntry<String, String> detail) =>
+                  '${detail.key}: ${detail.value}',
+            )
+            .join('\n');
+        expect(preview, isNot(contains('do-not-print')));
+        expect(preview, isNot(contains('also-secret')));
+        expect(
+          pterodactylCreatePushConfirmationToken(
+            transferConfirmationToken: 'transfer-token',
+            canonicalCreation: resolved.canonicalJson,
+            startAfterTransfer: false,
+            persistNewLink: false,
+          ),
+          isNot(confirmation),
+        );
+        expect(
+          pterodactylCreatePushConfirmationToken(
+            transferConfirmationToken: 'transfer-token',
+            canonicalCreation: resolved.canonicalJson,
+            startAfterTransfer: true,
+            persistNewLink: true,
+          ),
+          isNot(confirmation),
+        );
+        final PterodactylTransferPlan changedSourcePlan =
+            PterodactylTransferPlan(
+              direction: PterodactylTransferDirection.push,
+              mode: PterodactylTransferMode.update,
+              localInstanceName: transferPlan.localInstanceName,
+              localConsumer: transferPlan.localConsumer,
+              localInstancePath: transferPlan.localInstancePath,
+              profileId: transferPlan.profileId,
+              serverIdentifier: transferPlan.serverIdentifier,
+              remoteServerName: transferPlan.remoteServerName,
+              targetExists: false,
+              targetWasRunning: false,
+              sourceFingerprint: 'sha256:changed-source',
+              confirmationToken: 'transfer-token-after-change',
+              createdAt: DateTime.utc(2026, 8, 15),
+              changes: const <PterodactylTransferChange>[],
+            );
+        expect(
+          pterodactylCreatePushIntentId(
+            transferPlan: changedSourcePlan,
+            canonicalCreation: unresolved.canonicalJson,
+            startAfterTransfer: true,
+            persistNewLink: false,
+          ),
+          intentId,
+        );
+        expect(
+          pterodactylCreatePushConfirmationToken(
+            transferConfirmationToken: changedSourcePlan.confirmationToken,
+            canonicalCreation: resolved.canonicalJson,
+            startAfterTransfer: true,
+            persistNewLink: false,
+          ),
+          isNot(confirmation),
+        );
+
+        final PterodactylEgg egg = _egg();
+        final PterodactylCreatePushPlan eggCreation =
+            PterodactylCreatePushPlan.egg(
+              name: 'Egg Remote',
+              source: egg,
+              plan: PterodactylEggCreatePlan(
+                ownerId: 9,
+                nodeId: 4,
+                eggId: egg.id,
+                eggUuid: egg.uuid,
+                dockerImage: 'ghcr.io/pterodactyl/yolks:java_21',
+                startup: 'java -jar {{SERVER_JARFILE}}',
+                environment: const <String, String>{
+                  'SERVER_JARFILE': 'egg-secret.jar',
+                },
+              ),
+              ownerName: 'egg-owner',
+              nodeName: 'egg-node',
+            ).withExternalId('multiplexor-push-egg-source');
+        final Map<String, String> eggDetails = Map<String, String>.fromEntries(
+          remoteCreatePushPreviewDetails(
+            creation: eggCreation,
+            transferPlan: transferPlan,
+            existingLink: null,
+            startAfterTransfer: false,
+            persistNewLink: true,
+            intentId: eggCreation.externalId!,
+            confirmationToken: 'push-new:egg-confirmation',
+          ),
+        );
+        expect(eggDetails['create from'], 'egg · Paper');
+        expect(eggDetails['egg UUID'], '00000000-0000-0000-0000-000000000020');
+        expect(eggDetails['egg ID'], '20');
+        expect(eggDetails, isNot(contains('template UUID')));
+        expect(eggDetails['environment'], 'SERVER_JARFILE=<redacted>');
+        expect(eggDetails.values.join('\n'), isNot(contains('egg-secret.jar')));
+        expect(
+          eggDetails['link action'],
+          'save new Remote server · Local is unlinked',
+        );
+      },
+    );
+  });
+
   group('Pterodactyl account key enrollment', () {
     test(
       'accepts the expected standard prefix and legacy unknown prefixes',
@@ -328,6 +791,8 @@ void main() {
         requiredBlank,
         editableOptional,
       ]);
+      expect(remoteCreateVariableUsesSecretInput(requiredBlank), isTrue);
+      expect(remoteCreateVariableUsesSecretInput(editableOptional), isTrue);
     });
 
     test('node eligibility excludes maintenance and under-allocated nodes', () {
@@ -571,7 +1036,24 @@ PterodactylCreationCatalog _catalog({
   eggInventoryUnavailablePermission: eggInventoryUnavailablePermission,
 );
 
-PterodactylApplicationServer _template() => PterodactylApplicationServer(
+PterodactylApplicationServer _template({
+  Map<String, String> environment = const <String, String>{},
+  PterodactylServerLimits limits = const PterodactylServerLimits(
+    memoryMiB: 4096,
+    swapMiB: 0,
+    diskMiB: 0,
+    ioWeight: 500,
+    cpuPercent: 0,
+    threads: null,
+    oomDisabled: false,
+  ),
+  PterodactylFeatureLimits featureLimits = const PterodactylFeatureLimits(
+    databases: 0,
+    allocations: 0,
+    backups: 0,
+  ),
+  String startup = 'java -jar server.jar',
+}) => PterodactylApplicationServer(
   id: 1,
   uuid: '00000000-0000-0000-0000-000000000001',
   identifier: 'template',
@@ -583,24 +1065,12 @@ PterodactylApplicationServer _template() => PterodactylApplicationServer(
   allocationId: 1,
   nestId: 10,
   eggId: 20,
-  limits: const PterodactylServerLimits(
-    memoryMiB: 4096,
-    swapMiB: 0,
-    diskMiB: 0,
-    ioWeight: 500,
-    cpuPercent: 0,
-    threads: null,
-    oomDisabled: false,
-  ),
-  featureLimits: const PterodactylFeatureLimits(
-    databases: 0,
-    allocations: 0,
-    backups: 0,
-  ),
+  limits: limits,
+  featureLimits: featureLimits,
   image: 'ghcr.io/pterodactyl/yolks:java_21',
-  startup: 'java -jar server.jar',
+  startup: startup,
   skipScripts: false,
-  environment: const <String, String>{},
+  environment: environment,
 );
 
 PterodactylEgg _egg({

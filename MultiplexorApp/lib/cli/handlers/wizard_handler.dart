@@ -7,6 +7,7 @@ Future<void> handleWizard() async {
     passthrough: passthroughService,
     pterodactyl: pterodactylService,
     pterodactylSmb: pterodactylSmbService,
+    transfer: pterodactylTransferService,
     requestedConsumer: appContext.requestedConsumer,
   );
   await wizard.run();

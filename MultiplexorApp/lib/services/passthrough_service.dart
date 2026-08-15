@@ -19,10 +19,17 @@ class PassthroughService {
   final ManagerContext context;
   final ConsumerService consumerService;
   final NativeCommandService _native;
+  ConsumerProfile? _consumerOverride;
 
   bool get hasLegacyBackend => context.hasLegacyBackend;
 
+  ConsumerProfile get effectiveConsumer =>
+      _consumerOverride ??
+      context.requestedConsumer ??
+      consumerService.readActive();
+
   void setConsumerOverride(ConsumerProfile? profile) {
+    _consumerOverride = profile;
     _native.setConsumerOverride(profile);
   }
 
@@ -39,6 +46,22 @@ class PassthroughService {
   Future<CapturedResult> capture(List<String> args) async {
     return _native.execute(args, stream: false);
   }
+
+  Future<CapturedResult> createIsolatedTransferInstance(
+    String name, {
+    required String creationToken,
+  }) => _native.createIsolatedTransferInstance(
+    name,
+    creationToken: creationToken,
+  );
+
+  bool cleanupPartialTransferInstance(
+    String name, {
+    required String creationToken,
+  }) => _native.cleanupPartialTransferInstance(
+    name,
+    creationToken: creationToken,
+  );
 
   Future<String?> captureStdoutLine(List<String> args) async {
     final result = await capture(args);

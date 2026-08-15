@@ -49,6 +49,8 @@ enum InstanceModalAction {
   stop,
   restart,
   console,
+  pullToLocal,
+  pushToRemote,
   settings,
   history,
   reinstall,
@@ -231,6 +233,9 @@ int _cardWidth(int columns, List<List<ButtonSpec>> rows) {
 /// - FACTORY RESET and DELETE need the instance stopped *and* unlocked; that
 ///   pair is the entire reach of the lock, which is what the old menu's
 ///   "block delete and factory reset" lock copy promised.
+/// - PUSH TO REMOTE needs a stopped Local source. Remote cards apply the same
+///   stopped-source rule to PULL TO LOCAL so neither flow advertises an
+///   operation the transfer engine will refuse.
 /// - SET PORT, MAKE ACTIVE, MOTD, FOLDER, the lock pair and the isolation
 ///   pair are always live.
 List<List<ButtonSpec>> _instanceRows({
@@ -268,6 +273,13 @@ List<List<ButtonSpec>> _instanceRows({
       ButtonSpec(
         id: instanceModalHitId(InstanceModalAction.setPort),
         label: 'SET PORT',
+      ),
+    ],
+    <ButtonSpec>[
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.pushToRemote),
+        label: 'PUSH TO REMOTE',
+        enabled: stopped,
       ),
     ],
     <ButtonSpec>[
@@ -398,6 +410,13 @@ List<List<ButtonSpec>> _remoteInstanceRows({
       ButtonSpec(
         id: instanceModalHitId(InstanceModalAction.history),
         label: 'HISTORY',
+      ),
+    ],
+    <ButtonSpec>[
+      ButtonSpec(
+        id: instanceModalHitId(InstanceModalAction.pullToLocal),
+        label: 'PULL TO LOCAL',
+        enabled: stopped && !operationsBlocked,
       ),
     ],
     <ButtonSpec>[

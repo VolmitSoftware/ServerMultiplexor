@@ -976,6 +976,7 @@ final class PterodactylEggCreatePlan {
     required this.ownerId,
     required this.nodeId,
     required this.eggId,
+    this.eggUuid,
     required this.dockerImage,
     required this.startup,
     required Map<String, String> environment,
@@ -988,6 +989,7 @@ final class PterodactylEggCreatePlan {
     this.allocationLimit = 0,
     this.backupLimit = 0,
     this.startOnCompletion = false,
+    this.externalId,
   }) : environment = UnmodifiableMapView<String, String>(
          Map<String, String>.from(environment),
        ) {
@@ -996,6 +998,10 @@ final class PterodactylEggCreatePlan {
     }
     if (dockerImage.trim().isEmpty || startup.trim().isEmpty) {
       throw ArgumentError('Docker image and startup command are required.');
+    }
+    if (externalId != null &&
+        (externalId!.trim().isEmpty || externalId!.length > 191)) {
+      throw ArgumentError('Panel external ID is invalid.');
     }
     if (memoryMiB < 0 ||
         swapMiB < -1 ||
@@ -1013,6 +1019,7 @@ final class PterodactylEggCreatePlan {
   final int ownerId;
   final int nodeId;
   final int eggId;
+  final String? eggUuid;
   final String dockerImage;
   final String startup;
   final Map<String, String> environment;
@@ -1025,6 +1032,215 @@ final class PterodactylEggCreatePlan {
   final int allocationLimit;
   final int backupLimit;
   final bool startOnCompletion;
+  final String? externalId;
+
+  PterodactylEggCreatePlan copyWithExternalId(String value) =>
+      PterodactylEggCreatePlan(
+        ownerId: ownerId,
+        nodeId: nodeId,
+        eggId: eggId,
+        eggUuid: eggUuid,
+        dockerImage: dockerImage,
+        startup: startup,
+        environment: environment,
+        memoryMiB: memoryMiB,
+        swapMiB: swapMiB,
+        diskMiB: diskMiB,
+        ioWeight: ioWeight,
+        cpuPercent: cpuPercent,
+        databaseLimit: databaseLimit,
+        allocationLimit: allocationLimit,
+        backupLimit: backupLimit,
+        startOnCompletion: startOnCompletion,
+        externalId: value,
+      );
+}
+
+/// Fully resolved, immutable inputs for cloning a server configuration.
+///
+/// Allocation IDs are intentionally selected only when the create request is
+/// sent. Every operator-controlled and template-derived server setting is
+/// captured here so a caller can preview, confirm, and execute the same plan.
+final class PterodactylTemplateCreatePlan {
+  PterodactylTemplateCreatePlan({
+    required this.templateUuid,
+    required this.templateIdentifier,
+    required this.templateName,
+    required this.name,
+    required this.description,
+    required this.ownerId,
+    required this.nodeId,
+    required this.eggId,
+    required this.dockerImage,
+    required this.startup,
+    required Map<String, String> environment,
+    required this.limits,
+    required this.featureLimits,
+    required this.startOnCompletion,
+    required this.skipScripts,
+    required this.oomDisabled,
+    this.externalId,
+  }) : environment = UnmodifiableMapView<String, String>(
+         Map<String, String>.from(environment),
+       ) {
+    if (templateUuid.trim().isEmpty ||
+        templateIdentifier.trim().isEmpty ||
+        templateName.trim().isEmpty ||
+        name.trim().isEmpty ||
+        ownerId < 1 ||
+        nodeId < 1 ||
+        eggId < 1 ||
+        dockerImage.trim().isEmpty ||
+        startup.trim().isEmpty) {
+      throw ArgumentError('Resolved template creation inputs are invalid.');
+    }
+    if (externalId != null &&
+        (externalId!.trim().isEmpty || externalId!.length > 191)) {
+      throw ArgumentError('Panel external ID is invalid.');
+    }
+  }
+
+  factory PterodactylTemplateCreatePlan.fromTemplate({
+    required PterodactylApplicationServer template,
+    required String name,
+    required int ownerId,
+    int? memoryMiB,
+    int? diskMiB,
+    int? cpuPercent,
+    bool startOnCompletion = false,
+  }) {
+    final PterodactylServerLimits sourceLimits = template.limits;
+    return PterodactylTemplateCreatePlan(
+      templateUuid: template.uuid,
+      templateIdentifier: template.identifier,
+      templateName: template.name,
+      name: name.trim(),
+      description: 'Created by Multiplexor from ${template.name}.',
+      ownerId: ownerId,
+      nodeId: template.nodeId,
+      eggId: template.eggId,
+      dockerImage: template.image,
+      startup: template.startup,
+      environment: <String, String>{
+        for (final MapEntry<String, String> entry
+            in template.environment.entries)
+          if (!entry.key.startsWith('P_SERVER_') && entry.key != 'STARTUP')
+            entry.key: entry.value,
+      },
+      limits: PterodactylServerLimits(
+        memoryMiB: memoryMiB ?? sourceLimits.memoryMiB,
+        swapMiB: sourceLimits.swapMiB,
+        diskMiB: diskMiB ?? sourceLimits.diskMiB,
+        ioWeight: sourceLimits.ioWeight,
+        cpuPercent: cpuPercent ?? sourceLimits.cpuPercent,
+        threads: sourceLimits.threads,
+        oomDisabled: sourceLimits.oomDisabled,
+      ),
+      featureLimits: template.featureLimits,
+      startOnCompletion: startOnCompletion,
+      skipScripts: false,
+      oomDisabled: sourceLimits.oomDisabled,
+    );
+  }
+
+  final String templateUuid;
+  final String templateIdentifier;
+  final String templateName;
+  final String name;
+  final String description;
+  final int ownerId;
+  final int nodeId;
+  final int eggId;
+  final String dockerImage;
+  final String startup;
+  final Map<String, String> environment;
+  final PterodactylServerLimits limits;
+  final PterodactylFeatureLimits featureLimits;
+  final bool startOnCompletion;
+  final bool skipScripts;
+  final bool oomDisabled;
+  final String? externalId;
+
+  PterodactylTemplateCreatePlan copyWithExternalId(String value) =>
+      PterodactylTemplateCreatePlan(
+        templateUuid: templateUuid,
+        templateIdentifier: templateIdentifier,
+        templateName: templateName,
+        name: name,
+        description: description,
+        ownerId: ownerId,
+        nodeId: nodeId,
+        eggId: eggId,
+        dockerImage: dockerImage,
+        startup: startup,
+        environment: environment,
+        limits: limits,
+        featureLimits: featureLimits,
+        startOnCompletion: startOnCompletion,
+        skipScripts: skipScripts,
+        oomDisabled: oomDisabled,
+        externalId: value,
+      );
+
+  JsonObject canonicalJson() {
+    final SplayTreeMap<String, String> sortedEnvironment =
+        SplayTreeMap<String, String>.from(environment);
+    return <String, Object?>{
+      'source_kind': 'template',
+      'source_uuid': templateUuid,
+      'source_identifier': templateIdentifier,
+      'source_name': templateName,
+      'name': name,
+      'description': description,
+      'external_id': externalId,
+      'owner_id': ownerId,
+      'node_id': nodeId,
+      'egg_id': eggId,
+      'docker_image': dockerImage,
+      'startup': startup,
+      'environment': sortedEnvironment,
+      'limits': <String, Object?>{
+        'memory': limits.memoryMiB,
+        'swap': limits.swapMiB,
+        'disk': limits.diskMiB,
+        'io': limits.ioWeight,
+        'cpu': limits.cpuPercent,
+        'threads': limits.threads,
+        'oom_disabled': limits.oomDisabled,
+      },
+      'feature_limits': <String, Object?>{
+        'databases': featureLimits.databases,
+        'allocations': featureLimits.allocations,
+        'backups': featureLimits.backups,
+      },
+      'start_on_completion': startOnCompletion,
+      'skip_scripts': skipScripts,
+      'oom_disabled': oomDisabled,
+    };
+  }
+
+  PterodactylCreateServerRequest toRequest({
+    required int defaultAllocationId,
+    int? additionalAllocationId,
+  }) => PterodactylCreateServerRequest(
+    name: name,
+    description: description,
+    externalId: externalId,
+    ownerId: ownerId,
+    eggId: eggId,
+    dockerImage: dockerImage,
+    startup: startup,
+    environment: environment,
+    limits: limits,
+    featureLimits: featureLimits,
+    defaultAllocationId: defaultAllocationId,
+    additionalAllocationIds: additionalAllocationId == null
+        ? const <int>[]
+        : <int>[additionalAllocationId],
+    startOnCompletion: startOnCompletion,
+    skipScripts: skipScripts,
+    oomDisabled: oomDisabled,
+  );
 }
 
 final class PterodactylServerDeployment {

@@ -5,9 +5,11 @@ import 'manager_context.dart';
 import 'passthrough_service.dart';
 import 'pterodactyl/pterodactyl_credential_store.dart';
 import 'pterodactyl/pterodactyl_history_service.dart';
+import 'pterodactyl/pterodactyl_native_local_instance_gateway.dart';
 import 'pterodactyl/pterodactyl_profile_store.dart';
 import 'pterodactyl/pterodactyl_service.dart';
 import 'pterodactyl/pterodactyl_smb_service.dart';
+import 'pterodactyl/pterodactyl_transfer_service.dart';
 
 late final ManagerContext appContext;
 late final ConsumerService consumerService;
@@ -16,6 +18,7 @@ late final PassthroughService passthroughService;
 late final PterodactylService pterodactylService;
 late final PterodactylHistoryService pterodactylHistoryService;
 late final PterodactylSmbService pterodactylSmbService;
+late final PterodactylTransferService pterodactylTransferService;
 
 void initializeAppContext({
   String? requestedConsumer,
@@ -51,5 +54,14 @@ void initializeAppContext({
     loadServers: pterodactylService.listServers,
     loadPanelUsername: pterodactylService.accountUsername,
     ensureSshPublicKey: pterodactylService.ensureAccountSshPublicKey,
+  );
+  pterodactylTransferService = PterodactylTransferService(
+    metadataDirectoryPath: appContext.metadataDir,
+    drive: pterodactylSmbService,
+    remote: pterodactylService,
+    localInstances: PterodactylNativeLocalInstanceGateway(
+      passthrough: passthroughService,
+      loadConsumer: () => passthroughService.effectiveConsumer,
+    ),
   );
 }

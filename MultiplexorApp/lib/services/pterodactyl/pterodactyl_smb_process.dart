@@ -47,6 +47,7 @@ abstract interface class PterodactylSmbProcessRunner {
     String executable,
     List<String> arguments, {
     Map<String, String>? environment,
+    bool detached = false,
   });
 
   Future<bool> executableExists(String executable);
@@ -115,16 +116,17 @@ final class DartIoPterodactylSmbProcessRunner
     String executable,
     List<String> arguments, {
     Map<String, String>? environment,
+    bool detached = false,
   }) async {
     final Process process = await Process.start(
       executable,
       arguments,
       environment: environment,
       includeParentEnvironment: true,
-      mode: ProcessStartMode.normal,
+      mode: detached ? ProcessStartMode.detached : ProcessStartMode.normal,
       runInShell: false,
     );
-    return _DartIoPterodactylSmbProcessHandle(process);
+    return _DartIoPterodactylSmbProcessHandle(process, detached: detached);
   }
 
   @override
@@ -171,14 +173,18 @@ final class DartIoPterodactylSmbProcessRunner
 
 final class _DartIoPterodactylSmbProcessHandle
     implements PterodactylSmbProcessHandle {
-  _DartIoPterodactylSmbProcessHandle(this._process) {
-    _capture(_process.stdout);
-    _capture(_process.stderr);
+  _DartIoPterodactylSmbProcessHandle(this._process, {required bool detached})
+    : _detached = detached {
+    if (!detached) {
+      _capture(_process.stdout);
+      _capture(_process.stderr);
+    }
   }
 
   static const int _diagnosticLimit = 8192;
 
   final Process _process;
+  final bool _detached;
   final StringBuffer _diagnostics = StringBuffer();
 
   @override
@@ -199,11 +205,52 @@ final class _DartIoPterodactylSmbProcessHandle
 
   @override
   Future<int?> waitForExit(Duration timeout) async {
+    if (_detached) return _waitForDetachedExit(timeout);
     final Object result = await Future.any<Object>(<Future<Object>>[
       _process.exitCode,
       Future<void>.delayed(timeout).then<Object>((void _) => _stillRunning),
     ]);
     return identical(result, _stillRunning) ? null : result as int;
+  }
+
+  Future<int?> _waitForDetachedExit(Duration timeout) async {
+    final Stopwatch stopwatch = Stopwatch()..start();
+    do {
+      if (!await _detachedProcessIsRunning()) return 0;
+      if (timeout == Duration.zero) break;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    } while (stopwatch.elapsed < timeout);
+    return null;
+  }
+
+  Future<bool> _detachedProcessIsRunning() async {
+    try {
+      if (Platform.isWindows) {
+        final ProcessResult result =
+            await Process.run('powershell.exe', <String>[
+              '-NoLogo',
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              r'if (Get-Process -Id $args[0] -ErrorAction SilentlyContinue) '
+                  r'{ exit 0 } else { exit 1 }',
+              '${_process.pid}',
+            ], runInShell: false);
+        return result.exitCode == 0;
+      }
+      final ProcessResult result = await Process.run('ps', <String>[
+        '-p',
+        '${_process.pid}',
+        '-o',
+        'pid=',
+      ], runInShell: false);
+      return result.exitCode == 0 && result.stdout.toString().trim().isNotEmpty;
+    } on ProcessException {
+      // Conservatively retain ownership when a platform process inspector is
+      // unavailable. The service performs a second command-line ownership
+      // check before treating this PID as a healthy mount or terminating it.
+      return true;
+    }
   }
 
   @override

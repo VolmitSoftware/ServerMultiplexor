@@ -163,6 +163,11 @@ final class DartIoPterodactylConsoleTerminalIo
 /// Minimal live-console frontend: sanitized output above a raw-mode line
 /// editor. Escape, Ctrl+C, and `:exit` detach without stopping the server.
 final class PterodactylConsoleTerminal {
+  static const int _maximumPendingOutputLines = 4096;
+  static const int _maximumLinesPerFlush = 128;
+  static const int _pendingOutputTrimChunk = 256;
+  static const int _maximumDetachOutputLines = 16;
+
   PterodactylConsoleTerminal({
     required PterodactylConsoleConnection connection,
     PterodactylConsoleTerminalIo? terminal,
@@ -189,17 +194,27 @@ final class PterodactylConsoleTerminal {
   double? _cpu;
   int? _memory;
   int? _memoryLimit;
-  bool _connected = false;
+  bool _transportConnected = false;
+  bool _serverAcceptsCommands = false;
   bool _chromeVisible = false;
   bool _acceptOutput = true;
+  int _droppedOutputLines = 0;
   Timer? _outputTimer;
+  final Completer<_ConsoleTerminalFailure> _terminalFailure =
+      Completer<_ConsoleTerminalFailure>.sync();
 
   Future<void> run() async {
     StreamSubscription<PterodactylConsoleEvent>? remoteEvents;
     try {
       await _terminal.activate();
       _printHeader();
-      remoteEvents = _connection.events.listen(_renderEvent);
+      remoteEvents = _connection.events.listen((PterodactylConsoleEvent event) {
+        try {
+          _renderEvent(event);
+        } catch (error, stackTrace) {
+          _failTerminal(error, stackTrace);
+        }
+      });
       final Future<void> input = _inputLoop();
       final Future<void> connecting = _connection.connect();
       // If input detaches first, the lifecycle `finally` closes the
@@ -210,28 +225,52 @@ final class PterodactylConsoleTerminal {
         connecting.then<Object>((_) => const _ConsoleConnected()),
         input.then<Object>((_) => const _ConsoleDetached()),
         _connection.done.then<Object>((_) => const _ConsoleDetached()),
+        _terminalFailure.future.then<Object>(
+          (_ConsoleTerminalFailure value) => value,
+        ),
       ]);
+      if (first case final _ConsoleTerminalFailure failure) {
+        Error.throwWithStackTrace(failure.error, failure.stackTrace);
+      }
       if (first is _ConsoleDetached) return;
-      _connected = true;
-      _redraw();
-      await Future.any<void>(<Future<void>>[input, _connection.done]);
+      final Object finished = await Future.any<Object>(<Future<Object>>[
+        input.then<Object>((_) => const _ConsoleDetached()),
+        _connection.done.then<Object>((_) => const _ConsoleDetached()),
+        _terminalFailure.future.then<Object>(
+          (_ConsoleTerminalFailure value) => value,
+        ),
+      ]);
+      if (finished case final _ConsoleTerminalFailure failure) {
+        Error.throwWithStackTrace(failure.error, failure.stackTrace);
+      }
     } finally {
       _acceptOutput = false;
       _outputTimer?.cancel();
       _outputTimer = null;
-      await remoteEvents?.cancel();
-      _flushOutput();
-      _finishDisplay();
       try {
-        // Restore the shared terminal before waiting on network teardown so
-        // Escape always returns control to the dashboard immediately.
-        await _terminal.restore();
+        try {
+          _trimPendingOutputForDetach();
+          _flushOutput(drainAll: true);
+          _finishDisplay();
+        } finally {
+          // Restore before awaiting socket/subscription cleanup. A stalled
+          // WebSocket listener must never leave the caller in raw/no-echo
+          // mode or make Escape appear to hang during a restart flood.
+          await _terminal.restore();
+        }
       } finally {
         try {
-          await _connection.close().timeout(_closeTimeout);
+          await remoteEvents?.cancel().timeout(_closeTimeout);
         } catch (_) {
-          // A stuck or failed socket close must not keep the CLI alive or
-          // replace the error that originally ended the session.
+          // Rendering is disabled and the tty is already restored. A stalled
+          // listener is safe to abandon with the socket.
+        } finally {
+          try {
+            await _connection.close().timeout(_closeTimeout);
+          } catch (_) {
+            // A stuck or failed socket close must not keep the CLI alive or
+            // replace the error that originally ended the session.
+          }
         }
       }
     }
@@ -253,7 +292,6 @@ final class PterodactylConsoleTerminal {
       case TermEventKind.ctrlC:
         return true;
       case TermEventKind.enter:
-        if (!_connected) return false;
         return _submit();
       case TermEventKind.char:
         if (_buffer.length < 4096 &&
@@ -305,32 +343,52 @@ final class PterodactylConsoleTerminal {
 
   Future<bool> _submit() async {
     final String command = _buffer.join();
-    _clearChrome();
-    _terminal.write(
-      '${_style(Ansi.gray)}${_safe(_prompt)}${_style(Ansi.reset)}',
-    );
-    _terminal.write('${_safe(command)}\r\n');
-    _buffer.clear();
-    _cursor = 0;
-    if (command.trim() == ':exit') return true;
+    if (command.trim() == ':exit') {
+      _echoSubmittedCommand(command);
+      return true;
+    }
     if (command.isEmpty) {
       _redraw();
       return false;
     }
-    if (_history.isEmpty || _history.last != command) _history.add(command);
-    if (_history.length > 100) _history.removeAt(0);
-    _historyIndex = _history.length;
+    if (!_transportConnected || !_serverAcceptsCommands) {
+      final String reason = !_transportConnected
+          ? 'The remote console is reconnecting.'
+          : 'The remote server is ${_state.toUpperCase()}.';
+      _printNotice(
+        'WAITING',
+        '$reason Command retained; press Enter to retry.',
+        _style(Ansi.yellow),
+      );
+      return false;
+    }
     try {
       await _connection.sendCommand(command);
     } catch (_) {
       _printNotice(
         'ERROR',
-        'Unable to send the console command.',
+        'Unable to send the console command. Command retained; press Enter '
+            'to retry.',
         _style(Ansi.red),
       );
+      return false;
     }
+    _echoSubmittedCommand(command);
+    if (_history.isEmpty || _history.last != command) _history.add(command);
+    if (_history.length > 100) _history.removeAt(0);
+    _historyIndex = _history.length;
     _redraw();
     return false;
+  }
+
+  void _echoSubmittedCommand(String command) {
+    _clearChrome();
+    _terminal.write(
+      '${_style(Ansi.gray)}${_safe(_prompt)}${_style(Ansi.reset)}'
+      '${_safe(command)}\r\n',
+    );
+    _buffer.clear();
+    _cursor = 0;
   }
 
   void _recall(int delta) {
@@ -366,17 +424,20 @@ final class PterodactylConsoleTerminal {
           ),
         );
       case PterodactylConsoleStatus(:final status):
-        _state = _safe(status).trim().toLowerCase();
+        _state = _singleLine(status).toLowerCase();
+        _serverAcceptsCommands = _isRunningState(_state);
         _redraw();
       case PterodactylConsoleStats():
         if (event.state case final String state) {
-          _state = _safe(state).trim().toLowerCase();
+          _state = _singleLine(state).toLowerCase();
+          _serverAcceptsCommands = _isRunningState(_state);
         }
         _cpu = event.cpuAbsolute;
         _memory = event.memoryBytes;
         _memoryLimit = event.memoryLimitBytes;
         _redraw();
       case PterodactylConsoleAuthenticated():
+        _transportConnected = true;
         if (_state == 'connecting') _state = 'connected';
         _redraw();
       case PterodactylConsoleTokenExpiring():
@@ -398,9 +459,22 @@ final class PterodactylConsoleTerminal {
       case PterodactylConsoleProtocolWarning(:final message):
         _printNotice('WARNING', message, _style(Ansi.yellow));
       case PterodactylConsoleConnectionEvent(:final state, :final message):
+        _transportConnected = switch (state) {
+          PterodactylConsoleConnectionState.connected => true,
+          PterodactylConsoleConnectionState.refreshing => _transportConnected,
+          PterodactylConsoleConnectionState.connecting ||
+          PterodactylConsoleConnectionState.reconnecting ||
+          PterodactylConsoleConnectionState.disconnected ||
+          PterodactylConsoleConnectionState.error => false,
+        };
+        if (state != PterodactylConsoleConnectionState.connected &&
+            state != PterodactylConsoleConnectionState.refreshing) {
+          _serverAcceptsCommands = false;
+        }
         _state = switch (state) {
           PterodactylConsoleConnectionState.connecting => 'connecting',
           PterodactylConsoleConnectionState.connected => 'connected',
+          PterodactylConsoleConnectionState.reconnecting => 'reconnecting',
           PterodactylConsoleConnectionState.refreshing => 'refreshing auth',
           PterodactylConsoleConnectionState.disconnected => 'disconnected',
           PterodactylConsoleConnectionState.error => 'connection error',
@@ -458,32 +532,82 @@ final class PterodactylConsoleTerminal {
   void _queueLines(Iterable<String> lines) {
     bool added = false;
     for (final String line in lines) {
+      if (_pendingOutput.length >= _maximumPendingOutputLines) {
+        final int discard = _pendingOutput.length.clamp(
+          0,
+          _pendingOutputTrimChunk,
+        );
+        _pendingOutput.removeRange(0, discard);
+        _droppedOutputLines += discard;
+      }
       _pendingOutput.add(line);
       added = true;
     }
-    if (!added || _outputTimer != null) return;
-    _outputTimer = Timer(_outputBatchDelay, () {
+    if (!added) return;
+    _scheduleOutputFlush(_outputBatchDelay);
+  }
+
+  void _trimPendingOutputForDetach() {
+    final int overflow = _pendingOutput.length - _maximumDetachOutputLines;
+    if (overflow <= 0) return;
+    _pendingOutput.removeRange(0, overflow);
+    _droppedOutputLines += overflow;
+  }
+
+  void _scheduleOutputFlush(Duration delay) {
+    if (_outputTimer != null) return;
+    _outputTimer = Timer(delay, () {
       _outputTimer = null;
-      _flushOutput();
+      try {
+        _flushOutput();
+      } catch (error, stackTrace) {
+        _failTerminal(error, stackTrace);
+      }
     });
   }
 
-  void _flushOutput() {
-    if (_pendingOutput.isEmpty) return;
-    final List<String> lines = List<String>.of(_pendingOutput);
-    _pendingOutput.clear();
+  void _failTerminal(Object error, StackTrace stackTrace) {
+    _acceptOutput = false;
+    _outputTimer?.cancel();
+    _outputTimer = null;
+    if (!_terminalFailure.isCompleted) {
+      _terminalFailure.complete(_ConsoleTerminalFailure(error, stackTrace));
+    }
+  }
+
+  void _flushOutput({bool drainAll = false}) {
+    if (_pendingOutput.isEmpty && _droppedOutputLines == 0) return;
+    final int count = drainAll
+        ? _pendingOutput.length
+        : _pendingOutput.length.clamp(0, _maximumLinesPerFlush);
+    final List<String> lines = _pendingOutput.sublist(0, count);
+    _pendingOutput.removeRange(0, count);
+    final int dropped = _droppedOutputLines;
+    _droppedOutputLines = 0;
     _clearChrome();
+    if (dropped > 0) {
+      _terminal.write(
+        '${_style(Ansi.yellow)}[OUTPUT]${_style(Ansi.reset)} '
+        '$dropped older console lines skipped to keep input responsive.'
+        '${_style(Ansi.reset)}\r\n',
+      );
+    }
     for (final String line in lines) {
       _terminal.write('${_clipRendered(line)}${_style(Ansi.reset)}\r\n');
     }
     _redraw();
+    if (_pendingOutput.isNotEmpty) {
+      _scheduleOutputFlush(Duration.zero);
+    }
   }
 
   String _clipRendered(String line) => Ansi.clipVisible(line, _usableWidth);
 
   void _printNotice(String label, String message, String tone) {
+    final List<String> lines = _safe(message).split('\n');
     _queueLines(<String>[
-      '$tone[$label]${_style(Ansi.reset)} ${_safe(message)}',
+      for (final String line in lines)
+        '$tone[$label]${_style(Ansi.reset)} ${line.trim()}',
     ]);
   }
 
@@ -494,7 +618,7 @@ final class PterodactylConsoleTerminal {
   }
 
   void _redraw() {
-    if (!_connected && !_acceptOutput) return;
+    if (!_transportConnected && !_acceptOutput) return;
     _clearChrome();
     final String status = _statusLine();
     final String line = _buffer.join();
@@ -563,6 +687,18 @@ final class PterodactylConsoleTerminal {
   String _style(String ansi) => _terminal.supportsColor ? ansi : '';
 
   static String _safe(String value) => PterodactylConsoleSanitizer.text(value);
+
+  static String _singleLine(String value) {
+    final String output = _safe(value)
+        .split('\n')
+        .map((String line) => line.trim())
+        .where((String line) => line.isNotEmpty)
+        .join(' ');
+    return output.isEmpty ? 'unknown' : output;
+  }
+
+  static bool _isRunningState(String state) =>
+      state.trim().toLowerCase() == 'running';
 }
 
 /// Makes Wings console output resemble Multiplexor's Local minimal console.
@@ -778,4 +914,11 @@ final class _ConsoleConnected {
 
 final class _ConsoleDetached {
   const _ConsoleDetached();
+}
+
+final class _ConsoleTerminalFailure {
+  const _ConsoleTerminalFailure(this.error, this.stackTrace);
+
+  final Object error;
+  final StackTrace stackTrace;
 }

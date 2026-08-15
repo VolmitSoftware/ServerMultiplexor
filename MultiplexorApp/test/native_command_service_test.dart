@@ -6,17 +6,19 @@ import 'package:multiplexor/models/consumer_profile.dart';
 import 'package:multiplexor/services/consumer_service.dart';
 import 'package:multiplexor/services/manager_context.dart';
 import 'package:multiplexor/services/native_command_service.dart';
+import 'package:multiplexor/utils/process_runner.dart';
 import 'package:test/test.dart';
 
 void main() {
   group('NativeCommandService consumer ownership', () {
     late Directory root;
     late NativeCommandService service;
+    late ConsumerService consumerService;
 
     setUp(() {
       root = Directory.systemTemp.createTempSync('multiplexor-test-');
       final context = ManagerContext(rootDir: root.path, verbose: false);
-      final consumerService = ConsumerService(context);
+      consumerService = ConsumerService(context);
       service = NativeCommandService(
         context: context,
         consumerService: consumerService,
@@ -46,6 +48,143 @@ void main() {
         contains('Server type "fabric" belongs to the fabric consumer'),
       );
       expect(result.stderr, contains('--consumer fabric server create'));
+    });
+
+    test(
+      'custom jars are imported into content-addressed managed builds',
+      () async {
+        final File external = File('${root.path}/external/custom.jar');
+        external.parent.createSync(recursive: true);
+        external.writeAsStringSync('custom jar bytes');
+        final String digest = sha256
+            .convert(external.readAsBytesSync())
+            .toString();
+
+        final CapturedResult result = await service.execute(<String>[
+          'server',
+          'create',
+          'managed-custom',
+          '--type',
+          'custom',
+          '--jar',
+          external.path,
+          '--isolated',
+        ], stream: false);
+
+        expect(result.exitCode, 0, reason: result.stderr);
+        final String consumerRoot = consumerService.rootFor(
+          ConsumerProfile.plugin,
+        );
+        final File managed = File('$consumerRoot/builds/custom/$digest.jar');
+        final String instance = '$consumerRoot/instances/managed-custom';
+        expect(managed.readAsStringSync(), 'custom jar bytes');
+        expect(
+          File('$instance/server.jar').resolveSymbolicLinksSync(),
+          managed.resolveSymbolicLinksSync(),
+        );
+        expect(
+          File('$instance/.server-source').readAsStringSync(),
+          contains('jar=${managed.path}'),
+        );
+        external.deleteSync();
+        expect(
+          File('$instance/server.jar').readAsStringSync(),
+          'custom jar bytes',
+        );
+      },
+    );
+
+    test('instance update imports a replacement custom jar', () async {
+      final File first = File('${root.path}/external/first.jar');
+      final File second = File('${root.path}/external/second.jar');
+      first.parent.createSync(recursive: true);
+      first.writeAsStringSync('first jar');
+      second.writeAsStringSync('second jar');
+      final CapturedResult created = await service.execute(<String>[
+        'server',
+        'create',
+        'managed-update',
+        '--type',
+        'custom',
+        '--jar',
+        first.path,
+        '--isolated',
+      ], stream: false);
+      expect(created.exitCode, 0, reason: created.stderr);
+
+      final CapturedResult updated = await service.execute(<String>[
+        'instance',
+        'update',
+        'managed-update',
+        '--type',
+        'custom',
+        '--jar',
+        second.path,
+      ], stream: false);
+
+      expect(updated.exitCode, 0, reason: updated.stderr);
+      final String digest = sha256.convert(second.readAsBytesSync()).toString();
+      final String consumerRoot = consumerService.rootFor(
+        ConsumerProfile.plugin,
+      );
+      final File managed = File('$consumerRoot/builds/custom/$digest.jar');
+      expect(managed.readAsStringSync(), 'second jar');
+      expect(
+        File(
+          '$consumerRoot/instances/managed-update/server.jar',
+        ).resolveSymbolicLinksSync(),
+        managed.resolveSymbolicLinksSync(),
+      );
+    });
+
+    test('blank create preserves every pre-existing entity type', () async {
+      consumerService.ensureConsumerDirs(ConsumerProfile.plugin);
+      final String instances =
+          '${consumerService.rootFor(ConsumerProfile.plugin)}/instances';
+      final File existingFile = File('$instances/existing-file')
+        ..writeAsStringSync('keep file');
+      final Directory existingDirectory = Directory(
+        '$instances/existing-directory',
+      )..createSync();
+      final File sentinel = File('${existingDirectory.path}/keep.txt')
+        ..writeAsStringSync('keep directory');
+
+      for (final String name in <String>[
+        'existing-file',
+        'existing-directory',
+      ]) {
+        final CapturedResult result = await service.execute(<String>[
+          'instance',
+          'create',
+          name,
+          '--isolated',
+        ], stream: false);
+        expect(result.exitCode, 2);
+        expect(result.stderr, contains('was not changed'));
+      }
+      expect(existingFile.readAsStringSync(), 'keep file');
+      expect(sentinel.readAsStringSync(), 'keep directory');
+
+      if (!Platform.isWindows) {
+        final Directory outside = Directory('${root.path}/outside')
+          ..createSync();
+        final File outsideSentinel = File('${outside.path}/keep.txt')
+          ..writeAsStringSync('keep link target');
+        final Link existingLink = Link('$instances/existing-link')
+          ..createSync(outside.path);
+        final CapturedResult result = await service.execute(<String>[
+          'instance',
+          'create',
+          'existing-link',
+          '--isolated',
+        ], stream: false);
+        expect(result.exitCode, 2);
+        expect(
+          FileSystemEntity.typeSync(existingLink.path, followLinks: false),
+          FileSystemEntityType.link,
+        );
+        expect(outsideSentinel.readAsStringSync(), 'keep link target');
+      }
     });
 
     test('build refuses modded types in plugin consumer', () async {

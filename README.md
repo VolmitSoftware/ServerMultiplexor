@@ -60,7 +60,7 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
-`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc. Local keeps the existing state-aware server and workspace actions. Remote exposes permission-aware power, console, history, account, lifecycle, settings, creation, and Multiplexor Drive workflows. Remote creation can clone an existing configuration or build directly from a Panel egg, so a completely empty panel can create its first server. Its workspace card includes Create many and Bulk actions; `b` opens the bulk selector directly, with all/selected/running/stopped presets, per-server toggles, bounded execution, progress, and an outcome for every target. Suspended, installing, maintenance, unavailable, and otherwise non-runnable servers retain their rows but have mutating actions disabled. Kill, reinstall, and delete default to no and require typed confirmation.
+`./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc. Local keeps the existing state-aware server and workspace actions. Remote exposes permission-aware power, console, history, account, lifecycle, settings, creation, transfer, and Multiplexor Drive workflows. **Pull to Local** copies a Remote server into a new, stopped Local instance and links the pair. **Push to Remote** shows a file diff before it can update the linked server, another existing server, or a newly created stopped server. Remote creation can clone an existing configuration or build directly from a Panel egg, so a completely empty panel can create its first server. Its workspace card includes Create many and Bulk actions; `b` opens the bulk selector directly, with all/selected/running/stopped presets, per-server toggles, bounded execution, progress, and an outcome for every target. Suspended, installing, maintenance, unavailable, and otherwise non-runnable servers retain their rows but have mutating actions disabled. Mirror push, kill, reinstall, and delete default to no and require typed confirmation.
 
 The Remote console has a persistent server/resource header, severity colors, safe Minecraft `§` formatting, prefix and routine-noise trimming, and batched history rendering. `Esc`, `Ctrl-C`, or `:exit` immediately restores the dashboard without stopping the server.
 
@@ -90,6 +90,7 @@ Pull latest builds refreshes the newest build of every platform the active consu
 - **Backup** — `consumers/<profile>/backups/<instance>/<backup-id>/` stores a restorable snapshot with checksums and a manifest. Backups are used manually and by `instance safe-update`.
 - **Gameplay test** — a Mineflayer scenario run against an actual instance. Built-ins cover connection, command responses, and status effects; custom `.mjs` scenarios can assert any protocol-visible player behavior. Reports stay under ignored per-consumer state.
 - **Remote profile** — non-secret Pterodactyl panel metadata in `.multiplexor/pterodactyl-profiles.yaml`. Client/Application bearer keys live in macOS Keychain under an exact profile+HTTPS-origin identity, never in the YAML file.
+- **Remote link** — `.multiplexor-remote.json` inside a pulled, initially paired, or explicitly relinked Local instance records the exact remote account, immutable server identity, display name, Local consumer, and transfer timestamps. `remote push <local>` uses this identity instead of guessing from names.
 - **Multiplexor Drive** — the local `~/Multiplexor Drive` folder containing one live folder for every accessible Pterodactyl server, grouped by remote account. Selecting Open folder for a remote server opens its folder here in Finder.
 
 ## CLI Reference
@@ -117,7 +118,7 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `remote drive add [--profile <id>] [--username <name>] [--no-key]` | Add or refresh one remote account in Multiplexor Drive. Stop the drive first when changing its accounts. |
 | `remote drive remove [profile] --confirm <profile>` | Remove one account and its saved SFTP password from Multiplexor Drive with exact confirmation. |
 | `remote drive password [profile]` | Enroll the Panel password through secure interactive input as an SSH-key fallback. |
-| `remote drive trust` | Scan Wings SFTP host keys, display every SHA256 fingerprint, and persist them only after an explicit default-no confirmation. |
+| `remote drive trust [server] [--profile <id>]` | Scan Wings SFTP host keys, display every SHA256 fingerprint, and persist them only after an explicit default-no confirmation. Supplying a server scans only that selected target; omitting it retains the all-configured-Drive workflow. |
 | `remote drive doctor` | Check rclone, the local mount provider, SFTP authentication, SSH host trust, and safe Drive-folder ownership. |
 | `remote drive start\|status\|stop` | Mount all configured servers locally, inspect their current paths and health, or stop the mounts safely. No SMB server or administrator authorization is involved. |
 | `remote drive open [server] [--profile <id>]` | Open `~/Multiplexor Drive` in Finder, or open the exact local folder for a server. The drive starts or repairs itself first when necessary. |
@@ -129,6 +130,9 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `remote bulk <start\|stop\|restart\|kill\|reinstall\|delete> [servers...] [--all] [--state running\|offline] [--concurrency <1-8>] [--confirm <token>] [--force] [--profile <id>]` | Safely operate on an explicit remote fleet. Every selector is resolved before mutation; state filters use live resource state (`running` includes transitional non-offline states), work is bounded, and every server receives an outcome. Reinstall/delete print the exact token required by `--confirm`. |
 | `remote console <server> [--profile <id>]` | Attach to a severity-colored, prefix/noise-trimmed live console with server resource chrome and safe Minecraft `§` formatting. Esc, Ctrl-C, or `:exit` restores the caller without stopping the server. |
 | `remote command <server> <command> [--profile <id>]` | Send one console command. |
+| `remote pull <server> --as <local> [--profile <id>] [--consumer <profile>]` | Copy the transferable files of a stopped Remote server into a new, stopped Local instance and record its exact remote account/server link. Pull never changes the Remote, refuses a running Remote, and refuses to overwrite an existing Local instance. |
+| `remote push <local> [--to <server>] [--mirror] [--link] [--start\|--no-restart] [--confirm <token>] [--profile <id>] [--consumer <profile>]` | Diff a stopped Local instance against its linked Remote, or the existing server selected by `--to`, then push changed/new files. Without `--confirm`, prints the exact token and exits without mutation. The default preserves remote-only files; `--mirror` deletes them and requires the stronger destructive token. A previously running target is stopped for the transfer and restarted after success unless `--no-restart`; `--start` starts a previously stopped target. `--link` records the selected target as the Local instance's new link. After committing files, an unverified explicit `--link` or `--start` outcome returns nonzero so the same idempotent workflow can repair it. |
+| `remote push <local> --new <name> (--template <server>\|--egg <id\|name>) [creation flags] [--link] [--start] [--confirm <token>] [--profile <id>] [--consumer <profile>]` | Resolve and show the exact source UUID/egg ID, owner, node, image, startup, environment variable names (values are redacted), resources, features, final power state, and link action before creating anything. The composite confirmation token still binds every exact environment value, the complete creation plan, and the current Local snapshot. The durable intent identity does not change when Local files later change, so a freshly previewed and confirmed retry resumes the same created server instead of allocating another one. The server is created stopped, receives and validates Local files before its first start, then starts only with `--start`. An unlinked Local records the new pairing automatically; an already-linked Local preserves its existing target unless `--link` explicitly replaces it. A failed transfer leaves the new server stopped and prints the exact existing-target retry command. |
 | `remote create <name> (--template <server>\|--egg <id\|name>) [--owner <id\|username\|email>] [--node <id\|name>] [--image <label\|value>] [--env <KEY=VALUE,...>] [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--databases <count>] [--allocations <count>] [--backups <count>] [--start] [--profile <id>]` | Create from an existing Application-visible configuration or directly from a Panel egg. Egg creation works on an empty panel, defaults to the connected owner and sole viable node, sends every egg-variable default, and requires explicit values for required blank variables. `--node`, `--image`, `--env`, `--swap`, `--io`, and feature-limit flags apply only to egg creation. |
 | `remote create-many (--template <server>\|--egg <id\|name>) (--names <a,b,c>\|--prefix <name> --count <1-100>) [--owner <id\|username\|email>] [--node <id\|name>] [--image <label\|value>] [--env <KEY=VALUE,...>] [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--databases <count>] [--allocations <count>] [--backups <count>] [--start] [--concurrency <1-8>] [--profile <id>]` | Create several servers from one template or egg. Multiplexor validates the full plan and reserves distinct allocations before the first create request, bounds parallelism, and reports every result. The same egg-only flag restriction as `remote create` applies. |
 | `remote rename <server> <name> [--description <text>] [--profile <id>]` | Rename or describe a server using Client permission first and Application fallback when enrolled. |
@@ -141,9 +145,11 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 
 The active account is used when `--profile` is omitted; `--profile` remains available as a one-command override. `ptero` is an alias for `remote`.
 
+Transfers carry worlds, server jars, plugins/mods, and normal configuration while excluding runtime-only `logs/`, `crash-reports/`, `session.lock`, and Multiplexor's own metadata. They reuse Multiplexor Drive account credentials but connect directly to only the selected server over SFTP; they never start or require the cached browsing mount or unrelated profiles. An interactive terminal can add a missing account and approve that target's displayed host fingerprint, while headless use exits with exact `remote drive install --profile ... --no-open` and target-scoped `remote drive trust <server> --profile ...` recovery commands. Push confirmation tokens bind the exact Local snapshot and the Remote overwrite/delete path scope; Create & Push additionally binds every resolved creation field, desired final state, and link decision. A changed input requires a fresh preview. Remote contents are re-read after the server stops, then every non-empty push snapshots the complete Remote tree under `.multiplexor/pterodactyl-transfers/backups/` before applying files, writes a recovery manifest, and rolls back automatically if the upload fails. Create & Push also writes a durable intent under `.multiplexor/pterodactyl-transfers/intents/` and assigns its unique ID as the Panel `external_id`. That stable identity binds the Local consumer and canonical instance path, profile, proposed server name, immutable creation configuration, and requested start/link postconditions, but not the changing file fingerprint. A newly confirmed current snapshot can therefore discover and resume the same committed server after an ambiguous create response, Local edits, or transfer failure. If only its requested durable link or final running state failed and Local is unchanged, the exact retry repairs those postconditions without uploading files again; changed Local files resume the normal diff and transfer against the same server. Ambiguous, duplicated, or mismatched identities stop without another Panel mutation. The CLI prints the relevant intent, backup, and recovery paths.
+
 Multiplexor Drive never treats an API key as an SFTP password. It creates a dedicated local Ed25519 identity per remote profile, registers only the public key with the account, and requires explicit Wings host-key trust. API keys, private-key contents, and cleartext Panel passwords are never written to Drive settings or runtime state. The mounted files remain live remote server files: normal Finder edits, moves, and deletions affect the server immediately.
 
-The drive remains mounted until `remote drive stop` or the computer reboots. After a reboot, `remote drive start` restores every configured mount; `remote drive open` also starts or repairs it on demand before opening Finder.
+The drive remains mounted until `remote drive stop` or the computer reboots. After a reboot, `remote drive start` restores every configured mount; `remote drive open` also starts or repairs it on demand before opening Finder. If Finder leaves `.DS_Store` metadata in a detached mount folder or its VFS write cache, Multiplexor preserves it in a `.multiplexor-local-recovery` or `finder-metadata-recovery` folder before remounting. Any other local file, directory, or symlink remains untouched and blocks the mount with its exact path instead of being hidden.
 
 For CI/non-macOS sessions, set both an origin-bound key and its companion origin, for example `MULTIPLEXOR_PTERODACTYL_DEV_CLIENT_API_KEY` plus `MULTIPLEXOR_PTERODACTYL_DEV_ORIGIN=https://panel.example.com`. Environment credentials are session-only and should not be used for long-running child-process workflows.
 
@@ -162,7 +168,7 @@ For CI/non-macOS sessions, set both an origin-bound key and its companion origin
 |---------|--------------|
 | `instance list` | List instances in the active profile; the active one is tagged `(active)`. |
 | `instance current` | Print the active instance name. |
-| `instance create <name>` | Create a blank instance (no jar wired up). |
+| `instance create <name> [--isolated]` | Create a blank instance (no jar wired up). `--isolated` skips shared drop-ins, Iris packs, and plugin ops; Remote Pull uses this mode so copied servers cannot inherit unrelated Local shared state. |
 | `instance clone <source> <target>` | Copy an instance verbatim, then re-wire shared links. |
 | `instance activate <name>` | Make this instance the default target. |
 | `instance path [name]` | Print the on-disk path. Active instance if omitted. |
@@ -384,6 +390,17 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 ./start.sh remote catalog
 ./start.sh remote create survival --egg paper --memory 4096 --disk 0
 
+# Pull Remote to a linked Local instance, then preview and confirm a safe push back
+./start.sh remote stop survival
+./start.sh remote pull survival --as survival-local --consumer plugin
+./start.sh remote push survival-local --consumer plugin
+# Repeat the printed command with its exact --confirm token
+
+# Create a stopped Remote target, upload Local before its first start, then start it
+./start.sh remote push survival-local --new survival-staging --egg paper --start --consumer plugin
+# Repeat the printed command with its exact --confirm token
+# survival-local keeps its existing link; add --link only to replace it
+
 # Install one local drive containing every accessible Pterodactyl server
 ./start.sh remote drive install     # verify fingerprints, mount, open Finder
 ./start.sh remote drive status
@@ -420,6 +437,7 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   dropins/plugins or dropins/mods   # dropin jars (manual and content-managed)
   instances/<name>/                 # one server's worldroot
     .server-source                # type, launch mode, jar path, isolated flag
+    .multiplexor-remote.json      # durable link after pull, first new push, or --link
     .multiplexor-dropins.json     # last synchronized jar hashes
     server.jar                    # symlink into builds/
     plugins/ or mods/             # synced from dropin-source

@@ -30,8 +30,14 @@ final class PterodactylSmbShareManager {
   final Map<String, String> _environment;
   final PterodactylSmbPrivilegeAuthorizer _privilegeAuthorizer;
 
-  String get connectionHost =>
-      Platform.localHostname.isEmpty ? 'localhost' : Platform.localHostname;
+  /// The SMB client and server are on the same machine.
+  ///
+  /// Using the advertised hostname routes this local Drive through mDNS and
+  /// the active Wi-Fi/Ethernet interface. Finder then loses the mounted share
+  /// when that interface sleeps or changes networks even though the local SMB
+  /// server is still available. Loopback keeps the session independent of
+  /// external network state.
+  String get connectionHost => 'localhost';
 
   String connectionUrl(String shareName) =>
       'smb://$connectionHost/${Uri.encodeComponent(shareName)}';

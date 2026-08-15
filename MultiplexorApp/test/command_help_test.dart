@@ -80,7 +80,7 @@ void main() {
       expect(output, contains('remote history <server>'));
       expect(output, contains('remote catalog'));
       expect(output, contains('remote drive install'));
-      expect(output, contains('remote drive trust'));
+      expect(output, contains('remote drive trust [server] [--profile <id>]'));
       expect(output, contains('remote drive start'));
       expect(output, contains('remote drive open [server]'));
       expect(output, contains('remote files <...> (compatibility alias'));
@@ -94,6 +94,17 @@ void main() {
         contains('remote bulk <start|stop|restart|kill|reinstall|delete>'),
       );
       expect(output, contains('remote create-many (--template <server>'));
+      expect(output, contains('remote pull <server> --as <local>'));
+      expect(output, contains('remote push <local> [--to <server>]'));
+      expect(output, contains('remote push <local> --new <name>'));
+      final String createAndPushHelp = output
+          .split('\n')
+          .firstWhere(
+            (String line) => line.contains('remote push <local> --new <name>'),
+          );
+      expect(createAndPushHelp, contains('--link'));
+      expect(output, contains('[--mirror]'));
+      expect(output, contains('[--confirm <token>]'));
       expect(output, contains('--databases <count>'));
       expect(output, contains('--state <running|offline>'));
       expect(output, contains('--concurrency <1-8>'));

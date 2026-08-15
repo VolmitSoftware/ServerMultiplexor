@@ -28,7 +28,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'drive add [--profile <id>] [--username <name>] [--no-key]',
     'drive remove [profile] --confirm <profile>',
     'drive password [profile]',
-    'drive trust',
+    'drive trust [server] [--profile <id>]',
     'drive doctor',
     'drive start',
     'drive status',
@@ -43,6 +43,9 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'bulk <start|stop|restart|kill|reinstall|delete> [servers...] [--all] [--state <running|offline>] [--concurrency <1-8>] [--confirm <token>] [--force] [--profile <id>]',
     'console <server> [--profile <id>]',
     'command <server> <command> [--profile <id>]',
+    'pull <server> --as <local> [--profile <id>] [--consumer <plugin|forge|fabric|neoforge>]',
+    'push <local> [--to <server>] [--mirror] [--link] [--start|--no-restart] [--confirm <token>] [--profile <id>] [--consumer <plugin|forge|fabric|neoforge>]',
+    'push <local> --new <name> (--template <server>|--egg <id|name>) [--owner <id|username|email>] [--node <id|name>] [--image <label|value>] [--env <KEY=VALUE,...>] [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--databases <count>] [--allocations <count>] [--backups <count>] [--link] [--start] [--confirm <token>] [--profile <id>] [--consumer <plugin|forge|fabric|neoforge>]',
     'create <name> (--template <server>|--egg <id|name>) [--owner <id|username|email>] [--node <id|name>] [--image <label|value>] [--env <KEY=VALUE,...>] [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--databases <count>] [--allocations <count>] [--backups <count>] [--start] [--profile <id>]',
     'create-many (--template <server>|--egg <id|name>) (--names <a,b,c>|--prefix <name> --count <1-100>) [--owner <id|username|email>] [--node <id|name>] [--image <label|value>] [--env <KEY=VALUE,...>] [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--databases <count>] [--allocations <count>] [--backups <count>] [--start] [--concurrency <1-8>] [--profile <id>]',
     'rename <server> <name> [--description <text>] [--profile <id>]',
@@ -62,7 +65,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
   CommandHelpGroup('instance', <String>[
     'list',
     'current',
-    'create <name>',
+    'create <name> [--isolated]',
     'clone <source> <target>',
     'activate <name>',
     'path [name]',
@@ -244,6 +247,11 @@ void writeGlobalHelp(void Function(String line) write) {
     write,
     './start.sh remote verify',
     'verify and inspect the saved Pterodactyl panel',
+  );
+  _writeHelpCommand(
+    write,
+    './start.sh remote pull survival --as survival-local',
+    'copy a remote server into a linked, stopped local instance',
   );
   _writeHelpCommand(
     write,

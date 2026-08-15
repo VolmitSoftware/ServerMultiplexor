@@ -265,6 +265,7 @@ Future<int> _runInstance(List<String> rest) async {
     case 'create':
       await handleInstanceCreate(<String, dynamic>{
         'name': parsed.option('name') ?? parsed.positionalOrNull(0),
+        'isolated': parsed.flag('isolated'),
       });
       return 0;
     case 'clone':
