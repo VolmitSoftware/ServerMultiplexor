@@ -1884,6 +1884,7 @@ final class PterodactylSmbService {
       source,
       '${target.remoteName}:',
       ..._directCommonArguments,
+      ..._wingsWriteCompatibilityArguments,
       if (mode != PterodactylSmbDirectWriteMode.restore)
         ...PterodactylTransferPathPolicy.rcloneExclusions,
     ];
@@ -2011,6 +2012,13 @@ final class PterodactylSmbService {
     '--stats=0',
     '--log-level',
     'ERROR',
+  ];
+
+  // Wings rejects SFTP rename when the destination already exists and treats
+  // modtime-only Setstat requests as chmod 0644. Avoid both write hazards.
+  static const List<String> _wingsWriteCompatibilityArguments = <String>[
+    '--inplace',
+    '--sftp-set-modtime=false',
   ];
 
   String _directLocalDirectory(
@@ -2474,6 +2482,7 @@ final class PterodactylSmbService {
       p.join(stateDirectory, 'cache'),
       '--vfs-cache-mode',
       'writes',
+      ..._wingsWriteCompatibilityArguments,
       '--vfs-cache-max-age',
       '1h',
       '--exclude=/.DS_Store',

@@ -136,6 +136,8 @@ void main() {
     expect(first.arguments.first, 'nfsmount');
     expect(first.detached, isTrue);
     expect(first.arguments, contains('mx_remote_abc12345:'));
+    expect(first.arguments, contains('--inplace'));
+    expect(first.arguments, contains('--sftp-set-modtime=false'));
     expect(
       first.arguments,
       containsAllInOrder(<String>[
@@ -1727,6 +1729,14 @@ Future<void> main(List<String> arguments) async {
       snapshotProcess.complete(_success);
       await snapshotFuture;
       expect(snapshotFinished, isTrue);
+      expect(
+        fixture.runner.directRuns.single.arguments,
+        isNot(contains('--inplace')),
+      );
+      expect(
+        fixture.runner.directRuns.single.arguments,
+        isNot(contains('--sftp-set-modtime=false')),
+      );
 
       final Completer<PterodactylSmbCommandResult> mirrorProcess =
           Completer<PterodactylSmbCommandResult>();
@@ -1745,12 +1755,33 @@ Future<void> main(List<String> arguments) async {
       final _RunCommand mirror = fixture.runner.directRuns.last;
       expect(mirror.arguments.first, 'sync');
       expect(mirror.arguments, contains('--create-empty-src-dirs'));
+      expect(mirror.arguments, contains('--inplace'));
+      expect(mirror.arguments, contains('--sftp-set-modtime=false'));
       for (final String exclusion
           in PterodactylTransferPathPolicy.rcloneExclusions) {
         expect(mirror.arguments, contains(exclusion));
       }
       mirrorProcess.complete(_success);
       await mirrorFuture;
+
+      fixture.runner.directRcloneCompletion = null;
+      await session.applyFrom(
+        sourcePath: source.path,
+        mode: PterodactylSmbDirectWriteMode.update,
+      );
+      final _RunCommand update = fixture.runner.directRuns.last;
+      expect(update.arguments.first, 'copy');
+      expect(update.arguments, contains('--inplace'));
+      expect(update.arguments, contains('--sftp-set-modtime=false'));
+
+      await session.applyFrom(
+        sourcePath: source.path,
+        mode: PterodactylSmbDirectWriteMode.restore,
+      );
+      final _RunCommand restore = fixture.runner.directRuns.last;
+      expect(restore.arguments.first, 'sync');
+      expect(restore.arguments, contains('--inplace'));
+      expect(restore.arguments, contains('--sftp-set-modtime=false'));
       await session.close();
 
       expect(mirrorFinished, isTrue);

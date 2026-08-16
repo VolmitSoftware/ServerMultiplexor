@@ -475,20 +475,27 @@ void main() {
     late PterodactylTransferService service;
     final DateTime clock = DateTime.utc(2026, 8, 14, 20, 30);
 
+    PterodactylTransferService createService({
+      Duration remoteReadyTimeout = const Duration(milliseconds: 10),
+      List<Duration>? observedDelays,
+    }) => PterodactylTransferService.withGateways(
+      metadataDirectoryPath: p.join(temporary.path, '.multiplexor'),
+      remoteGateway: remote,
+      localInstances: local,
+      clock: () => clock,
+      remoteReadyTimeout: remoteReadyTimeout,
+      delay: (Duration duration) async {
+        observedDelays?.add(duration);
+      },
+    );
+
     setUp(() {
       temporary = Directory.systemTemp.createTempSync(
         'multiplexor-transfer-service-',
       );
       local = _FakeLocalGateway(p.join(temporary.path, 'local'));
       remote = _FakeRemoteGateway(p.join(temporary.path, 'remote'));
-      service = PterodactylTransferService.withGateways(
-        metadataDirectoryPath: p.join(temporary.path, '.multiplexor'),
-        remoteGateway: remote,
-        localInstances: local,
-        clock: () => clock,
-        remoteReadyTimeout: const Duration(milliseconds: 10),
-        delay: (Duration duration) async {},
-      );
+      service = createService();
     });
 
     tearDown(() {
@@ -1094,6 +1101,116 @@ void main() {
       expect(remote.currentState, PterodactylTransferRemoteState.running);
       expect(remote.snapshotCount, 0);
       expect(remote.applyCount, 0);
+    });
+
+    test(
+      'postcondition start accepts delayed offline to starting transition',
+      () async {
+        final List<Duration> observedDelays = <Duration>[];
+        service = createService(
+          remoteReadyTimeout: const Duration(seconds: 3),
+          observedDelays: observedDelays,
+        );
+        final PterodactylLocalInstance instance = local.seed('local');
+        _write(instance.path, 'server.properties', 'new');
+        final PterodactylTransferPlan plan = await service.planNewPush(
+          localInstanceName: 'local',
+          profileId: 'panel',
+          proposedServerName: 'Survival',
+        );
+        remote.statesAfterStart.addAll(<PterodactylTransferRemoteState>[
+          PterodactylTransferRemoteState.offline,
+          PterodactylTransferRemoteState.offline,
+          PterodactylTransferRemoteState.starting,
+          PterodactylTransferRemoteState.running,
+        ]);
+
+        final PterodactylTransferResult result = await service
+            .repairNewPushPostconditions(
+              plan: plan,
+              createdServerIdentifier: 'abc123',
+              relink: false,
+              startAfter: true,
+            );
+
+        expect(result.remoteRestarted, isTrue);
+        expect(result.warnings, isEmpty);
+        expect(remote.startCount, 1);
+        expect(remote.stateCountAfterStart, 4);
+        expect(observedDelays, hasLength(3));
+        expect(observedDelays, everyElement(const Duration(milliseconds: 500)));
+      },
+    );
+
+    test('postcondition start fails promptly after a real crash', () async {
+      final List<Duration> observedDelays = <Duration>[];
+      service = createService(
+        remoteReadyTimeout: const Duration(seconds: 30),
+        observedDelays: observedDelays,
+      );
+      final PterodactylLocalInstance instance = local.seed('local');
+      _write(instance.path, 'server.properties', 'new');
+      final PterodactylTransferPlan plan = await service.planNewPush(
+        localInstanceName: 'local',
+        profileId: 'panel',
+        proposedServerName: 'Survival',
+      );
+      remote.statesAfterStart.addAll(<PterodactylTransferRemoteState>[
+        PterodactylTransferRemoteState.starting,
+        PterodactylTransferRemoteState.offline,
+        PterodactylTransferRemoteState.running,
+      ]);
+
+      final PterodactylTransferResult result = await service
+          .repairNewPushPostconditions(
+            plan: plan,
+            createdServerIdentifier: 'abc123',
+            relink: false,
+            startAfter: true,
+          );
+
+      expect(result.remoteRestarted, isFalse);
+      expect(
+        result.warnings,
+        contains(contains('returned offline after reporting starting')),
+      );
+      expect(remote.startCount, 1);
+      expect(remote.stateCountAfterStart, 2);
+      expect(observedDelays, <Duration>[const Duration(milliseconds: 500)]);
+      expect(remote.statesAfterStart, <PterodactylTransferRemoteState>[
+        PterodactylTransferRemoteState.running,
+      ]);
+    });
+
+    test('postcondition start bounds a permanently offline target', () async {
+      final List<Duration> observedDelays = <Duration>[];
+      service = createService(
+        remoteReadyTimeout: const Duration(seconds: 30),
+        observedDelays: observedDelays,
+      );
+      final PterodactylLocalInstance instance = local.seed('local');
+      _write(instance.path, 'server.properties', 'new');
+      final PterodactylTransferPlan plan = await service.planNewPush(
+        localInstanceName: 'local',
+        profileId: 'panel',
+        proposedServerName: 'Survival',
+      );
+      remote.statesAfterStart.add(PterodactylTransferRemoteState.offline);
+
+      final PterodactylTransferResult result = await service
+          .repairNewPushPostconditions(
+            plan: plan,
+            createdServerIdentifier: 'abc123',
+            relink: false,
+            startAfter: true,
+          );
+
+      expect(result.remoteRestarted, isFalse);
+      expect(result.warnings, contains(contains('last state: offline')));
+      expect(remote.startCount, 1);
+      expect(remote.stateCountAfterStart, 21);
+      expect(observedDelays, hasLength(20));
+      expect(observedDelays, everyElement(const Duration(milliseconds: 500)));
     });
 
     test('mirror preserves excluded Remote runtime files', () async {
@@ -1769,6 +1886,9 @@ final class _FakeRemoteGateway implements PterodactylTransferRemoteGateway {
   int snapshotCount = 0;
   int applyCount = 0;
   int restoreCount = 0;
+  int stateCountAfterStart = 0;
+  final List<PterodactylTransferRemoteState> statesAfterStart =
+      <PterodactylTransferRemoteState>[];
   void Function()? onStop;
   void Function(int count)? onResolveTarget;
   Future<void> Function(int count)? onSnapshot;
@@ -1807,13 +1927,23 @@ final class _FakeRemoteGateway implements PterodactylTransferRemoteGateway {
   @override
   Future<void> start(PterodactylTransferRemoteTarget target) async {
     startCount++;
-    currentState = PterodactylTransferRemoteState.running;
+    if (statesAfterStart.isEmpty) {
+      currentState = PterodactylTransferRemoteState.running;
+    }
   }
 
   @override
   Future<PterodactylTransferRemoteState> state(
     PterodactylTransferRemoteTarget target,
-  ) async => currentState;
+  ) async {
+    if (startCount > 0) {
+      stateCountAfterStart++;
+      if (statesAfterStart.isNotEmpty) {
+        currentState = statesAfterStart.removeAt(0);
+      }
+    }
+    return currentState;
+  }
 
   @override
   Future<void> stop(PterodactylTransferRemoteTarget target) async {

@@ -69,6 +69,7 @@ final class PterodactylTransferService {
   static const String _driveRaceWarning =
       'Close files for this server in Multiplexor Drive before transferring; '
       'another SFTP client can still change Remote files during the operation.';
+  static const Duration _startOfflineAcceptanceGrace = Duration(seconds: 10);
   static final Set<String> _heldTransferLocks = <String>{};
 
   Future<PterodactylTransferPlan> planPull({
@@ -1173,12 +1174,25 @@ final class PterodactylTransferService {
 
   Future<void> _waitUntilRunning(PterodactylTransferRemoteTarget target) async {
     final int attempts = _pollAttempts(_remoteReadyTimeout);
+    final int graceAttempts = _pollAttempts(_startOfflineAcceptanceGrace);
+    final int offlineAcceptanceAttempts = graceAttempts < attempts
+        ? graceAttempts
+        : attempts;
     PterodactylTransferRemoteState current =
         PterodactylTransferRemoteState.unknown;
+    bool observedStarting = false;
     for (int attempt = 0; attempt < attempts; attempt++) {
       current = await _remoteGateway.state(target);
       if (current == PterodactylTransferRemoteState.running) return;
-      if (current == PterodactylTransferRemoteState.offline && attempt > 0) {
+      if (current == PterodactylTransferRemoteState.starting) {
+        observedStarting = true;
+      } else if (current == PterodactylTransferRemoteState.offline &&
+          (observedStarting || attempt + 1 >= offlineAcceptanceAttempts)) {
+        if (observedStarting) {
+          throw StateError(
+            'Remote ${target.name} returned offline after reporting starting.',
+          );
+        }
         break;
       }
       if (attempt + 1 < attempts) {
