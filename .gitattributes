@@ -1,0 +1,5 @@
+# Shell scripts have to stay LF. Git for Windows defaults to
+# core.autocrlf=true, and a CRLF shebang line makes bash fail the script
+# ($'\r': command not found) — which on a fresh clone would take out
+# start.sh, the entrypoint the whole workspace is driven through.
+*.sh text eol=lf

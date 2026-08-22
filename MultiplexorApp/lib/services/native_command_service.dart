@@ -1959,7 +1959,15 @@ class NativeCommandService {
       List<String> versionArgs,
     ) async {
       try {
-        final result = await Process.run(executable, versionArgs);
+        // Through the shell on Windows: the tools most worth reporting on
+        // (dart, npm) are installed there as .bat/.cmd shims, which
+        // CreateProcess cannot launch by itself, so a direct spawn calls
+        // every one of them missing on a machine that has them all.
+        final result = await Process.run(
+          executable,
+          versionArgs,
+          runInShell: Platform.isWindows,
+        );
         final output = '${result.stdout}\n${result.stderr}'
             .split('\n')
             .map((line) => line.trim())
@@ -1968,7 +1976,14 @@ class NativeCommandService {
         if (result.exitCode == 0) {
           add('PASS', executable, output.isEmpty ? 'available' : output);
         } else {
-          add('FAIL', executable, 'command exited ${result.exitCode}');
+          // A shell reports a missing command by failing rather than by
+          // refusing to start, so its output is the only account of what
+          // actually went wrong.
+          add(
+            'FAIL',
+            executable,
+            output.isEmpty ? 'command exited ${result.exitCode}' : output,
+          );
         }
       } on ProcessException catch (e) {
         add('FAIL', executable, e.message);

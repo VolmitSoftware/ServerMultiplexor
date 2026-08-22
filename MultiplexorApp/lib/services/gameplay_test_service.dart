@@ -29,13 +29,30 @@ class GameplayTestService {
     required void Function(String line) write,
     required void Function(String line) error,
   }) {
-    if (!File(p.join(harnessDirectory, 'package-lock.json')).existsSync()) {
-      error('[ERROR] Mineflayer package lock is missing: $harnessDirectory');
+    if (!File(p.join(harnessDirectory, 'package.json')).existsSync()) {
+      error('[ERROR] Mineflayer harness is missing: $harnessDirectory');
       return Future<int>.value(2);
+    }
+    // `npm ci` is the reproducible install and the one to prefer, but it
+    // requires a lockfile, and the lockfile is not in the repo — so on a
+    // fresh checkout demanding one meant setup could never run at all. The
+    // plain install writes the lock that every install after it uses.
+    final bool locked = File(
+      p.join(harnessDirectory, 'package-lock.json'),
+    ).existsSync();
+    if (!locked) {
+      write('[INFO] No package lock yet; resolving dependencies once.');
     }
     return _run(
       'npm',
-      const <String>['ci', '--no-audit', '--no-fund'],
+      locked
+          ? const <String>['ci', '--no-audit', '--no-fund']
+          : const <String>['install', '--no-audit', '--no-fund'],
+      // npm on Windows is npm.cmd, a batch shim CreateProcess refuses to
+      // launch; only the shell can start it. The harness runs (`node
+      // src/cli.mjs`) go to a real executable and stay off the shell, where
+      // scenario arguments cannot be re-parsed on the way through.
+      shell: Platform.isWindows,
       write: write,
       error: error,
     );
@@ -135,6 +152,7 @@ class GameplayTestService {
     List<String> arguments, {
     required void Function(String line) write,
     required void Function(String line) error,
+    bool shell = false,
   }) async {
     Process process;
     try {
@@ -142,7 +160,7 @@ class GameplayTestService {
         executable,
         arguments,
         workingDirectory: harnessDirectory,
-        runInShell: false,
+        runInShell: shell,
       );
     } on ProcessException catch (exception) {
       error('[ERROR] ${exception.message}');

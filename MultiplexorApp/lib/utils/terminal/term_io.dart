@@ -4,13 +4,17 @@ import 'dart:io';
 import 'package:dart_console/dart_console.dart';
 
 import 'term_events.dart';
+import 'windows_console.dart';
 
 /// Owns the terminal for interactive UI: raw-mode reads, mouse reporting,
 /// stale-input draining, and guaranteed cleanup.
 ///
 /// dart_console raw mode uses VMIN=0/VTIME=1, so [stdin.readByteSync]
 /// returns -1 after ~100ms of silence. That property powers both bare-ESC
-/// disambiguation and [drainInput].
+/// disambiguation and [drainInput]. Windows has no VMIN/VTIME and its
+/// dart_console raw mode does not even apply, so there [_readByte] goes
+/// through [WindowsConsole], which reproduces the same idle tick from
+/// console input records. Everything below that one method is shared.
 class TermIo {
   TermIo._();
 
@@ -40,12 +44,40 @@ class TermIo {
 
   bool get hasTerminal => stdin.hasTerminal && stdout.hasTerminal;
 
+  /// The silence after which [_readByte] reports an idle tick, matching the
+  /// VTIME=1 deciseconds the POSIX path gets from termios.
+  static const Duration _idleTick = Duration(milliseconds: 100);
+
+  /// True when the console has to be driven through Win32 rather than
+  /// dart_console and termios.
+  bool get _viaWindows => WindowsConsole.instance.isUsable;
+
   void setRawMode(bool enabled) {
     if (_rawMode == enabled || !hasTerminal) {
       return;
     }
     _rawMode = enabled;
+    if (_viaWindows) {
+      if (enabled) {
+        WindowsConsole.instance.enterRawMode();
+      } else {
+        WindowsConsole.instance.exitRawMode();
+      }
+      return;
+    }
     _console.rawMode = enabled;
+  }
+
+  /// One input byte, or -1 once [_idleTick] passes with none.
+  ///
+  /// Raw mode has to be on: on POSIX that is what makes the read time out
+  /// rather than block, and on Windows it is what stops the console host
+  /// from swallowing keys into a line buffer first.
+  int _readByte() {
+    if (_viaWindows) {
+      return WindowsConsole.instance.readByte(_idleTick);
+    }
+    return stdin.readByteSync();
   }
 
   void enableMouse() {
@@ -57,6 +89,7 @@ class TermIo {
     // attach/detach, subprocess cleanup) can reset tracking modes behind
     // our back, and the sequence is idempotent.
     _mouseEnabled = true;
+    WindowsConsole.instance.mouseReporting = true;
     stdout.write(enableMouseSequence);
   }
 
@@ -65,6 +98,7 @@ class TermIo {
       return;
     }
     _mouseEnabled = false;
+    WindowsConsole.instance.mouseReporting = false;
     if (stdout.hasTerminal) {
       stdout.write(disableMouseSequence);
     }
@@ -90,7 +124,7 @@ class TermIo {
       }
       int byte;
       try {
-        byte = stdin.readByteSync();
+        byte = _readByte();
       } on StdinException {
         throw const TermInputUnavailable();
       } on OSError {
@@ -119,7 +153,7 @@ class TermIo {
     while (DateTime.now().isBefore(deadline)) {
       int byte;
       try {
-        byte = stdin.readByteSync();
+        byte = _readByte();
       } on StdinException {
         throw const TermInputUnavailable();
       } on OSError {
@@ -153,7 +187,7 @@ class TermIo {
       while (true) {
         int byte;
         try {
-          byte = stdin.readByteSync();
+          byte = _readByte();
         } catch (_) {
           break;
         }
@@ -185,7 +219,7 @@ class TermIo {
     while (DateTime.now().isBefore(deadline)) {
       int byte;
       try {
-        byte = stdin.readByteSync();
+        byte = _readByte();
       } catch (_) {
         return null;
       }

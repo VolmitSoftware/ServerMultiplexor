@@ -9,6 +9,7 @@ environment:
 dependencies:
   crypto: ^3.0.0
   dart_console: ^1.2.0
+  ffi: ^2.1.0
   fast_log: ^1.0.7
   path: ^1.9.1
   unorm_dart: ^0.3.2
