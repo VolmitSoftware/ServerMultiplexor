@@ -1,0 +1,98 @@
+name: Build executables
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            runner: macos-15
+            executable: multiplexor
+            archive: multiplexor-macos-arm64.tar.gz
+          - name: macOS (Intel)
+            runner: macos-15-intel
+            executable: multiplexor
+            archive: multiplexor-macos-x64.tar.gz
+          - name: Windows (x64)
+            runner: windows-latest
+            executable: multiplexor.exe
+            archive: multiplexor-windows-x64.zip
+    env:
+      EXECUTABLE_NAME: ${{ matrix.executable }}
+      ARCHIVE_NAME: ${{ matrix.archive }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: "3.10.0"
+
+      - name: Install dependencies
+        working-directory: MultiplexorApp
+        run: dart pub get
+
+      - name: Compile macOS executable
+        if: runner.os == 'macOS'
+        shell: bash
+        run: dart run MultiplexorApp/tool/build_exe.dart --output "$RUNNER_TEMP/$EXECUTABLE_NAME"
+
+      - name: Compile Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
+          dart run MultiplexorApp/tool/build_exe.dart --output $outputPath
+
+      - name: Smoke-test macOS executable
+        if: runner.os == 'macOS'
+        shell: bash
+        run: '"$RUNNER_TEMP/$EXECUTABLE_NAME" version'
+
+      - name: Smoke-test Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
+          & $outputPath version
+
+      - name: Package macOS executable
+        if: runner.os == 'macOS'
+        shell: bash
+        run: tar -czf "$RUNNER_TEMP/$ARCHIVE_NAME" -C "$RUNNER_TEMP" "$EXECUTABLE_NAME"
+
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
+          $archivePath = Join-Path $env:RUNNER_TEMP $env:ARCHIVE_NAME
+          Compress-Archive -LiteralPath $outputPath -DestinationPath $archivePath -Force
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ runner.temp }}/${{ matrix.archive }}
+          archive: false
+          if-no-files-found: error
