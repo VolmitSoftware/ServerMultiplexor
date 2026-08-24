@@ -47,7 +47,7 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 | `d` | Detail screen for the selected server. |
 | `R` `S` `X` `O` | Restart, stop (graceful), kill (force), open console — on the selected server. Uppercase on purpose, so a slipped key can never fire one. |
 | `g` | Open every running console in a tmux grid. |
-| `n` | Create a new instance. |
+| `n` | Create a new instance. Isolated servers offer a checkbox list of drop-in artifacts, plus Select All and Deselect All controls, for one-time local copies. |
 | `b` | Open Remote bulk actions, or Local Build & tuning. The remaining workspace actions live behind `[ MORE ]`. |
 | `w` | Open the workspace card — the keyboard twin of `[ MORE ]` on the workspace bar. Landing view only. |
 | `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
@@ -190,8 +190,8 @@ For CI/non-macOS sessions, set both an origin-bound key and its companion origin
 
 | Command | What it does |
 |---------|--------------|
-| `server create <name> --type <type> [--mc <v>] [--auto-build] [--isolated]` | Create + wire `server.jar` from the build cache (or refresh upstream first if `--auto-build`). `--isolated` opts the instance out of shared dropins/iris/ops. |
-| `server create <name> --jar <path> [--type label] [--isolated]` | Create + wire an explicit jar. |
+| `server create <name> --type <type> [--mc <v>] [--auto-build] [--isolated] [--artifact <dropin.jar> ...]` | Create + wire `server.jar` from the build cache (or refresh upstream first if `--auto-build`). `--isolated` opts the instance out of shared dropins/iris/ops; repeat `--artifact` to make one-time local copies from that consumer's drop-ins folder. |
+| `server create <name> --jar <path> [--type label] [--isolated] [--artifact <dropin.jar> ...]` | Create + wire an explicit jar. Isolated instances can receive the same one-time selected artifact copies. |
 | `server create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]` | Spin up one instance per type in a single call. Each instance is named after its type (or `<prefix>-<type>` if `--prefix` is set) and routed to the correct consumer (plugin types → plugin profile, modded types → their own). Skips collisions and resolution failures without aborting the batch. |
 
 Single `server create` and `build <type>` commands must run under the consumer that owns the selected server type. Use `--consumer fabric`, `--consumer forge`, or `--consumer neoforge` for modded types; plugin-family types use `plugin`. `server create-many` remains the cross-consumer batch command.

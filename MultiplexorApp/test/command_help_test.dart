@@ -21,6 +21,7 @@ void main() {
       expect(code, 0);
       expect(lines.first, 'Multiplexor server');
       expect(lines.join('\n'), contains('./start.sh server create <name>'));
+      expect(lines.join('\n'), contains('--artifact <dropin.jar>'));
       expect(lines.join('\n'), isNot(contains('Multiplexor runtime')));
     });
 

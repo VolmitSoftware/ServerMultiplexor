@@ -83,8 +83,8 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'delete-all [--everywhere] [--force]',
   ]),
   CommandHelpGroup('server', <String>[
-    'create <name> --type <type> [--mc <version>] [--loader <version>] [--installer <version>] [--auto-build] [--isolated]',
-    'create <name> --jar <path> [--type label] [--isolated]',
+    'create <name> --type <type> [--mc <version>] [--loader <version>] [--installer <version>] [--auto-build] [--isolated] [--artifact <dropin.jar> ...]',
+    'create <name> --jar <path> [--type label] [--isolated] [--artifact <dropin.jar> ...]',
     'create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]',
   ]),
   CommandHelpGroup('runtime', <String>[

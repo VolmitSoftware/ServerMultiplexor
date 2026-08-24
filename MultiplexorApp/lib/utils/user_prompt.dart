@@ -221,6 +221,70 @@ class Ui {
     return options[index];
   }
 
+  /// Checkbox-style multi-select with explicit bulk controls.
+  ///
+  /// Enter or Space toggles an item. Select All and Deselect All are kept as
+  /// ordinary mouse/keyboard-accessible rows, and Done returns the selected
+  /// option indexes in source order.
+  static Future<Set<int>> checklist(
+    String title,
+    List<String> options, {
+    Set<int> initiallySelected = const <int>{},
+  }) async {
+    final Set<int> selected = <int>{
+      for (final int index in initiallySelected)
+        if (index >= 0 && index < options.length) index,
+    };
+    int initialIndex = 0;
+
+    while (true) {
+      final List<MenuEntry<int>> entries = <MenuEntry<int>>[
+        for (int index = 0; index < options.length; index++)
+          MenuEntry<int>(
+            '${selected.contains(index) ? '[x]' : '[ ]'} ${options[index]}',
+            value: index,
+          ),
+        const MenuEntry<int>.separator('selection'),
+        const MenuEntry<int>('Select All', value: -1, shortcut: 'a'),
+        const MenuEntry<int>('Deselect All', value: -2, shortcut: 'x'),
+        const MenuEntry<int>('Done', value: -3, shortcut: 'd'),
+      ];
+      final int action = await menuSelect<int>(
+        title,
+        entries,
+        initialIndex: initialIndex,
+        echoSelection: false,
+        hint: 'up/down move · enter/space toggle · a all · x none · d done',
+        footer: '${selected.length} of ${options.length} selected',
+        onActionKey: (String rawChar, MenuEntry<int> highlighted) =>
+            rawChar == ' ' ? highlighted.value : null,
+      );
+
+      if (action == -3) {
+        _inputAccepted(title, '${selected.length} selected');
+        return Set<int>.unmodifiable(selected);
+      }
+      if (action == -1) {
+        selected.addAll(<int>[
+          for (int index = 0; index < options.length; index++) index,
+        ]);
+        initialIndex = options.length + 1;
+        continue;
+      }
+      if (action == -2) {
+        selected.clear();
+        initialIndex = options.length + 2;
+        continue;
+      }
+      if (action >= 0 && action < options.length) {
+        selected.contains(action)
+            ? selected.remove(action)
+            : selected.add(action);
+        initialIndex = action;
+      }
+    }
+  }
+
   static String _inputPrompt(String message, {String? hint}) {
     final MonitorTheme theme = Ui.theme;
     final String hintPart = hint == null || hint.isEmpty

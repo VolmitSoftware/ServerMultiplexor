@@ -1306,12 +1306,27 @@ class NativeCommandService {
     }
 
     final name = rest.first;
-    final options = _parseOptions(rest.sublist(1));
+    final _ServerCreateArguments createArguments = _parseServerCreateArguments(
+      rest.sublist(1),
+    );
+    final Map<String, String> options = createArguments.options;
 
     final type = (options['type'] ?? 'purpur').toLowerCase();
     final jar = options['jar'];
     final profile = _activeConsumer;
     final isolated = options['isolated'] == 'true';
+    final List<String> artifacts = createArguments.artifacts;
+
+    if (artifacts.isNotEmpty && !isolated) {
+      throw _NativeCommandException(
+        '--artifact is only valid with --isolated; subscribed instances receive drop-ins through sync.',
+        2,
+      );
+    }
+    final List<File> artifactSources = _resolveSelectedDropinArtifacts(
+      profile,
+      artifacts,
+    );
 
     if (!_isKnownServerType(type) && (jar == null || jar.isEmpty)) {
       throw _NativeCommandException(
@@ -1331,6 +1346,7 @@ class NativeCommandService {
         isolated: isolated,
         io: io,
       );
+      _copySelectedDropinArtifacts(profile, name, artifactSources, io);
       io.write(
         '[OK] Server instance created: $name ($type, port ${_instanceGetServerPort(profile, name)}${isolated ? ', isolated' : ''})',
       );
@@ -1373,6 +1389,7 @@ class NativeCommandService {
       isolated: isolated,
       io: io,
     );
+    _copySelectedDropinArtifacts(profile, name, artifactSources, io);
     io.write(
       '[OK] Server instance created: $name ($type mc=$mc, port ${_instanceGetServerPort(profile, name)}${isolated ? ', isolated' : ''})',
     );
@@ -5895,6 +5912,87 @@ class NativeCommandService {
     }
 
     return options;
+  }
+
+  _ServerCreateArguments _parseServerCreateArguments(List<String> args) {
+    final List<String> optionArgs = <String>[];
+    final List<String> artifacts = <String>[];
+    for (int index = 0; index < args.length; index++) {
+      if (args[index] != '--artifact') {
+        optionArgs.add(args[index]);
+        continue;
+      }
+      if (index + 1 >= args.length) {
+        throw _NativeCommandException('Missing value for --artifact', 2);
+      }
+      artifacts.add(args[++index]);
+    }
+    return _ServerCreateArguments(
+      options: _parseOptions(optionArgs),
+      artifacts: List<String>.unmodifiable(artifacts),
+    );
+  }
+
+  List<File> _resolveSelectedDropinArtifacts(
+    ConsumerProfile profile,
+    List<String> names,
+  ) {
+    final String source = _dropinsSource(
+      profile,
+      mods: !_isPluginConsumer(profile),
+    );
+    final List<File> files = <File>[];
+    final Set<String> seen = <String>{};
+    for (final String rawName in names) {
+      final String name = rawName.trim();
+      if (name.isEmpty ||
+          p.basename(name) != name ||
+          p.windows.basename(name) != name ||
+          !name.toLowerCase().endsWith('.jar')) {
+        throw _NativeCommandException(
+          'Invalid drop-in artifact name: $rawName',
+          2,
+        );
+      }
+      if (!seen.add(name)) {
+        continue;
+      }
+      final File file = File(p.join(source, name));
+      if (FileSystemEntity.typeSync(file.path, followLinks: true) !=
+          FileSystemEntityType.file) {
+        throw _NativeCommandException(
+          'Drop-in artifact not found: $name ($source)',
+          2,
+        );
+      }
+      files.add(file);
+    }
+    return List<File>.unmodifiable(files);
+  }
+
+  void _copySelectedDropinArtifacts(
+    ConsumerProfile profile,
+    String instance,
+    List<File> artifacts,
+    _NativeIoBuffer io,
+  ) {
+    if (artifacts.isEmpty) {
+      return;
+    }
+    final String target = p.join(
+      _instanceDir(profile, instance),
+      _isPluginConsumer(profile) ? 'plugins' : 'mods',
+    );
+    Directory(target).createSync(recursive: true);
+    for (final File artifact in artifacts) {
+      artifact.copySync(p.join(target, p.basename(artifact.path)));
+    }
+    io.write(
+      '[OK] Copied ${artifacts.length} selected drop-in artifact(s) -> $instance',
+    );
+    io.write(
+      '[INFO] Local artifacts: ${artifacts.map((File file) => p.basename(file.path)).join(', ')}',
+    );
   }
 
   Map<String, String> _serverCreateBuildOptions(
@@ -10472,6 +10570,16 @@ class _RuntimeTargetArgs {
 
   final String? instance;
   final bool noConsole;
+}
+
+class _ServerCreateArguments {
+  const _ServerCreateArguments({
+    required this.options,
+    required this.artifacts,
+  });
+
+  final Map<String, String> options;
+  final List<String> artifacts;
 }
 
 class _DropinSyncReport {

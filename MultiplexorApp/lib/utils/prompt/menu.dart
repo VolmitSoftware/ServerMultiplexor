@@ -87,6 +87,7 @@ Future<T> menuSelect<T>(
   String title,
   List<MenuEntry<T>> entries, {
   int initialIndex = 0,
+  bool echoSelection = true,
   String? hint,
   String? footer,
   Future<MenuTick<T>> Function()? onTick,
@@ -319,13 +320,15 @@ Future<T> menuSelect<T>(
       // Leave raw mode before printing: with OPOST off, "\n" does not
       // return the carriage and the next line starts mid-column.
       io.setRawMode(false);
-      stdout.writeln(
-        renderPromptResult(
-          prompt: title,
-          value: label,
-          theme: MonitorTheme.cached,
-        ),
-      );
+      if (echoSelection) {
+        stdout.writeln(
+          renderPromptResult(
+            prompt: title,
+            value: label,
+            theme: MonitorTheme.cached,
+          ),
+        );
+      }
       return value;
     }
 

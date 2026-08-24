@@ -94,6 +94,60 @@ void main() {
       },
     );
 
+    test('isolated server copies only explicitly selected drop-ins', () async {
+      final String consumerRoot = consumerService.rootFor(
+        ConsumerProfile.plugin,
+      );
+      final Directory dropins = Directory('$consumerRoot/dropins/plugins')
+        ..createSync(recursive: true);
+      File('${dropins.path}/First.jar').writeAsStringSync('first');
+      File('${dropins.path}/Second.jar').writeAsStringSync('second');
+      final File serverJar = File('${root.path}/server.jar')
+        ..writeAsStringSync('server');
+
+      final CapturedResult result = await service.execute(<String>[
+        'server',
+        'create',
+        'picked',
+        '--type',
+        'custom',
+        '--jar',
+        serverJar.path,
+        '--isolated',
+        '--artifact',
+        'Second.jar',
+      ], stream: false);
+
+      expect(result.exitCode, 0, reason: result.stderr);
+      final Directory plugins = Directory(
+        '$consumerRoot/instances/picked/plugins',
+      );
+      expect(File('${plugins.path}/Second.jar').readAsStringSync(), 'second');
+      expect(File('${plugins.path}/First.jar').existsSync(), isFalse);
+      expect(result.stdout, contains('1 selected drop-in artifact'));
+    });
+
+    test('artifact selection requires an isolated server', () async {
+      final String consumerRoot = consumerService.rootFor(
+        ConsumerProfile.plugin,
+      );
+      final Directory dropins = Directory('$consumerRoot/dropins/plugins')
+        ..createSync(recursive: true);
+      File('${dropins.path}/Example.jar').writeAsStringSync('plugin');
+
+      final CapturedResult result = await service.execute(<String>[
+        'server',
+        'create',
+        'shared',
+        '--artifact',
+        'Example.jar',
+      ], stream: false);
+
+      expect(result.exitCode, 2);
+      expect(result.stderr, contains('only valid with --isolated'));
+      expect(Directory('$consumerRoot/instances/shared').existsSync(), isFalse);
+    });
+
     test('instance update imports a replacement custom jar', () async {
       final File first = File('${root.path}/external/first.jar');
       final File second = File('${root.path}/external/second.jar');

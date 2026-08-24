@@ -4275,6 +4275,9 @@ class InteractiveWizard {
       'Subscribe $name to plugin/mod dropins and shared ops?',
     );
     final bool isolated = !subscribe;
+    final List<String> artifacts = isolated
+        ? await _selectIsolatedDropinArtifacts()
+        : const <String>[];
 
     Ui.doing('Creating ${_serverTypeLabel(type)} $version server "$name"');
     final int code = await _shellRun(<String>[
@@ -4287,6 +4290,10 @@ class InteractiveWizard {
       version.trim(),
       if (refresh) '--auto-build',
       if (isolated) '--isolated',
+      for (final String artifact in artifacts) ...<String>[
+        '--artifact',
+        artifact,
+      ],
     ]);
     if (code != 0) {
       await Ui.pause();
@@ -4309,6 +4316,49 @@ class InteractiveWizard {
     if (activate) {
       await _shellRun(<String>['instance', 'activate', name]);
     }
+  }
+
+  Future<List<String>> _selectIsolatedDropinArtifacts() async {
+    final String command = _isPluginConsumer() ? 'plugins' : 'mods';
+    final String? source = await Ui.shielded(
+      () => passthrough.captureStdoutLine(<String>[command, 'show-source']),
+    );
+    if (source == null || source.isEmpty) {
+      Ui.warn(
+        'Drop-ins folder could not be resolved; creating with no artifacts.',
+      );
+      return const <String>[];
+    }
+
+    final Directory directory = Directory(source);
+    final List<String> artifacts =
+        directory
+            .listSync(recursive: false, followLinks: false)
+            .where(
+              (FileSystemEntity entity) =>
+                  FileSystemEntity.typeSync(entity.path, followLinks: true) ==
+                      FileSystemEntityType.file &&
+                  entity.path.toLowerCase().endsWith('.jar'),
+            )
+            .map((FileSystemEntity entity) => p.basename(entity.path))
+            .toList(growable: false)
+          ..sort(
+            (String left, String right) =>
+                left.toLowerCase().compareTo(right.toLowerCase()),
+          );
+    if (artifacts.isEmpty) {
+      Ui.note('No .jar artifacts are available in $source.');
+      return const <String>[];
+    }
+
+    final Set<int> selected = await Ui.checklist(
+      'Copy artifacts into this isolated server',
+      artifacts,
+    );
+    return <String>[
+      for (int index = 0; index < artifacts.length; index++)
+        if (selected.contains(index)) artifacts[index],
+    ];
   }
 
   Future<void> _createMany() async {
