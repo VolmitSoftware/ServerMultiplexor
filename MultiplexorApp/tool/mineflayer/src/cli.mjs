@@ -47,10 +47,11 @@ async function doctor(json) {
     const mineflayer = mineflayerModule.default ?? mineflayerModule
     const require = createRequire(import.meta.url)
     const packageMetadata = require('mineflayer/package.json')
+    const supportsRequiredVersion = mineflayer.testedVersions.includes('26.1')
     checks.push({
       name: 'mineflayer',
-      status: packageMetadata.version === '4.37.1' ? 'PASS' : 'FAIL',
-      detail: `${packageMetadata.version}; ${mineflayer.testedVersions.length} tested versions`
+      status: packageMetadata.version === '4.37.1' && supportsRequiredVersion ? 'PASS' : 'FAIL',
+      detail: `${packageMetadata.version}; ${mineflayer.testedVersions.length} tested versions; latest ${mineflayer.latestSupportedVersion}`
     })
   } catch (error) {
     checks.push({ name: 'mineflayer', status: 'FAIL', detail: error.message })
