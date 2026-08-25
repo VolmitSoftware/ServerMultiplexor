@@ -209,7 +209,7 @@ jobs:
             }
 
             if ($ExpectRestart) {
-              $pidFile = Join-Path $smokeRoot "consumers\$consumerRoot\state\runtime\$Name.pid"
+              $pidFile = Join-Path $smokeRoot "consumers\$consumerRoot\state\runtime\$Name.server.pid"
               $initialPid = (Get-Content -Raw -LiteralPath $pidFile).Trim()
               $restarted = $false
               for ($attempt = 0; $attempt -lt 45; $attempt++) {
