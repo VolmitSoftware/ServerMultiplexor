@@ -143,17 +143,16 @@ jobs:
             }
             stdout.writeln('fake java started');
             final File restartMarker = File('.ci-restart-triggered');
-            final File restartScript = File('multiplexor-restart.cmd');
             if (Directory.current.path.toLowerCase().endsWith('ci-purpur') &&
                 !restartMarker.existsSync()) {
-              restartMarker.writeAsStringSync('triggered');
-              await Future<void>.delayed(const Duration(seconds: 10));
-              await Process.start(
-                'cmd.exe',
-                <String>['/d', '/c', restartScript.path],
-                mode: ProcessStartMode.detached,
-              );
-              return;
+              final File restartRequest = File('.ci-request-restart');
+              for (var attempt = 0; attempt < 300; attempt++) {
+                if (restartRequest.existsSync()) {
+                  restartMarker.writeAsStringSync('triggered');
+                  return;
+                }
+                await Future<void>.delayed(const Duration(milliseconds: 100));
+              }
             }
             await Future<void>.delayed(const Duration(seconds: 30));
           }
@@ -211,6 +210,9 @@ jobs:
             if ($ExpectRestart) {
               $pidFile = Join-Path $smokeRoot "consumers\$consumerRoot\state\runtime\$Name.server.pid"
               $initialPid = (Get-Content -Raw -LiteralPath $pidFile).Trim()
+              $restartScript = Join-Path $instanceRoot "multiplexor-restart.cmd"
+              Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", $restartScript) -WindowStyle Hidden
+              Set-Content -LiteralPath (Join-Path $instanceRoot ".ci-request-restart") -Value "requested"
               $restarted = $false
               for ($attempt = 0; $attempt -lt 45; $attempt++) {
                 Start-Sleep -Seconds 1
