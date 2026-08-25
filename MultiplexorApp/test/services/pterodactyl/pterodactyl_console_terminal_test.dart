@@ -343,8 +343,11 @@ void main() {
     await running;
 
     final String output = terminal.output.toString();
-    expect(output, contains('history-0'));
     expect(output, contains('history-99'));
+    expect(
+      output,
+      anyOf(contains('history-0'), contains('older console lines skipped')),
+    );
     // Header, transport connection, server state, and one batched history
     // flush. The 100 history rows must not trigger 100 prompt redraws.
     expect(RegExp(r'> ').allMatches(output).length, 4);

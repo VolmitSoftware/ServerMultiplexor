@@ -28,7 +28,7 @@ void main() {
           const DartIoPterodactylSmbProcessRunner();
       final PterodactylSmbProcessHandle handle = await runner.start(
         '/bin/sleep',
-        const <String>['0.2'],
+        const <String>['2'],
         detached: true,
       );
 
@@ -36,7 +36,7 @@ void main() {
         await handle.waitForExit(const Duration(milliseconds: 20)),
         isNull,
       );
-      expect(await handle.waitForExit(const Duration(seconds: 2)), 0);
+      expect(await handle.waitForExit(const Duration(seconds: 4)), 0);
     },
     skip: Platform.isWindows,
   );

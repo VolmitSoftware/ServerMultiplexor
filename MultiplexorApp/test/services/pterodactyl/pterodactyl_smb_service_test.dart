@@ -522,7 +522,9 @@ Future<void> main(List<String> arguments) async {
 
       expect(
         opened,
-        p.join(fixture.mountRoot.path, 'remote', 'lobby--abc12345'),
+        p.normalize(
+          p.join(fixture.mountRoot.path, 'remote', 'lobby--abc12345'),
+        ),
       );
       expect(fixture.runner.openedPath, opened);
       expect(fixture.runner.started, hasLength(2));
@@ -602,7 +604,9 @@ Future<void> main(List<String> arguments) async {
 
     expect(
       opened,
-      p.join(fixture.mountRoot.path, 'remote', 'renamed-lobby--abc12345'),
+      p.normalize(
+        p.join(fixture.mountRoot.path, 'remote', 'renamed-lobby--abc12345'),
+      ),
     );
     expect(fixture.runner.openedPath, opened);
     expect(fixture.runner.started, hasLength(2));

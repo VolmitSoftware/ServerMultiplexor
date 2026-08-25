@@ -9731,15 +9731,6 @@ class NativeCommandService {
         sharedOpsPath,
         allowWindowsFileCopy: false,
       );
-      if (Platform.isWindows &&
-          !FileSystemEntity.identicalSync(instanceOpsPath, sharedOpsPath)) {
-        File(instanceOpsPath).deleteSyncSafe();
-        throw _NativeCommandException(
-          'Windows could not create the shared ops hard link. '
-          'Place the workspace on an NTFS volume and retry.',
-          1,
-        );
-      }
     }
   }
 
