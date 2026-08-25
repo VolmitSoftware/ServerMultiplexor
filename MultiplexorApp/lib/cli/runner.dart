@@ -491,7 +491,7 @@ Future<int> _runPlugins(List<String> rest) async {
       await handlePluginsWatchStop();
       return 0;
     case 'watch-daemon':
-      await handlePluginsWatchDaemon();
+      await handleNativePassthrough(<String>['plugins', ...rest]);
       return 0;
     default:
       stderr.writeln(
@@ -534,7 +534,7 @@ Future<int> _runMods(List<String> rest) async {
       await handlePluginsWatchStop(mods: true);
       return 0;
     case 'watch-daemon':
-      await handlePluginsWatchDaemon(mods: true);
+      await handleNativePassthrough(<String>['mods', ...rest]);
       return 0;
     default:
       stderr.writeln(

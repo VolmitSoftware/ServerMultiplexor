@@ -1881,7 +1881,18 @@ class NativeCommandService {
       case 'watch-status':
         return _pluginsWatchStatus(profile, io, mods: mods);
       case 'watch-daemon':
-        return _pluginsWatchDaemon(profile, io, mods: mods);
+        if (Platform.isWindows && rest.length != 1) {
+          throw _NativeCommandException('Internal watcher misuse', 2);
+        }
+        if (!Platform.isWindows && rest.isNotEmpty) {
+          throw _NativeCommandException('Internal watcher misuse', 2);
+        }
+        return _pluginsWatchDaemon(
+          profile,
+          io,
+          mods: mods,
+          ownerToken: rest.isEmpty ? null : rest.first,
+        );
       default:
         throw _NativeCommandException(
           mods
@@ -3969,6 +3980,7 @@ class NativeCommandService {
       }
       File(pidFilePath).deleteSyncSafe();
       File(_pluginsWatchTokenFile(profile, mods: mods)).deleteSyncSafe();
+      File(_pluginsWatchOwnerFile(profile, mods: mods)).deleteSyncSafe();
       File(logFilePath).createSync(recursive: true);
       final String ownerToken = _newPinSalt();
       final _SelfInvocation invocation = _selfInvocation(
@@ -4074,6 +4086,7 @@ class NativeCommandService {
       if (daemonPid == null) {
         File(pidFilePath).deleteSyncSafe();
         File(_pluginsWatchTokenFile(profile, mods: mods)).deleteSyncSafe();
+        File(_pluginsWatchOwnerFile(profile, mods: mods)).deleteSyncSafe();
         io.write('[WARN] ${mods ? 'Mods' : 'Plugins'} watcher is not running');
         return 0;
       }
@@ -4093,6 +4106,7 @@ class NativeCommandService {
       }
       File(pidFilePath).deleteSyncSafe();
       File(_pluginsWatchTokenFile(profile, mods: mods)).deleteSyncSafe();
+      File(_pluginsWatchOwnerFile(profile, mods: mods)).deleteSyncSafe();
       io.write('[OK] ${mods ? 'Mods' : 'Plugins'} watcher stopped');
       return 0;
     }
@@ -4147,6 +4161,7 @@ class NativeCommandService {
     ConsumerProfile profile,
     _NativeIoBuffer io, {
     required bool mods,
+    String? ownerToken,
   }) async {
     final _NativeIoBuffer daemonIo = Platform.isWindows
         ? _NativeIoBuffer(
@@ -4155,6 +4170,34 @@ class NativeCommandService {
           )
         : io;
     final pidFilePath = _pluginsWatchPidFile(profile, mods: mods);
+    Timer? ownerHeartbeat;
+    if (Platform.isWindows) {
+      if (ownerToken == null ||
+          !RegExp(r'^[0-9a-f]{32,128}$').hasMatch(ownerToken)) {
+        throw _NativeCommandException('Invalid Windows watcher owner token', 2);
+      }
+      final File tokenFile = File(_pluginsWatchTokenFile(profile, mods: mods));
+      for (var attempt = 0; attempt < 40; attempt++) {
+        if (tokenFile.existsSync() &&
+            tokenFile.readAsStringSync().trim() == ownerToken) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      if (!tokenFile.existsSync() ||
+          tokenFile.readAsStringSync().trim() != ownerToken) {
+        throw _NativeCommandException(
+          'Windows watcher ownership handshake failed',
+          1,
+        );
+      }
+      final File ownerFile = File(_pluginsWatchOwnerFile(profile, mods: mods));
+      _writeWindowsOwnerHeartbeat(ownerFile, ownerToken);
+      ownerHeartbeat = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _writeWindowsOwnerHeartbeat(ownerFile, ownerToken),
+      );
+    }
     File(pidFilePath)
       ..createSync(recursive: true)
       ..writeAsStringSync('$pid\n');
@@ -4378,7 +4421,9 @@ class NativeCommandService {
     await sigintSub?.cancel();
     await sigtermSub?.cancel();
     await sighupSub?.cancel();
+    ownerHeartbeat?.cancel();
     File(pidFilePath).deleteSyncSafe();
+    File(_pluginsWatchOwnerFile(profile, mods: mods)).deleteSyncSafe();
     daemonIo.write(
       '[INFO] ${mods ? 'Mods' : 'Plugins'} watcher daemon stopped',
     );
@@ -6738,6 +6783,7 @@ class NativeCommandService {
     File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
     File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
     File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
+    File(_runtimeHostOwnerFile(profile, instance)).deleteSyncSafe();
 
     final String ownerToken = _newPinSalt();
     final _SelfInvocation invocation = _selfInvocation(
@@ -6764,7 +6810,7 @@ class NativeCommandService {
       if (serverPid != null && await _pidRunning(serverPid)) {
         break;
       }
-      if (!await _runtimeWindowsHostOwned(profile, instance)) {
+      if (!await _pidRunning(host.pid)) {
         break;
       }
       await Future<void>.delayed(const Duration(milliseconds: 100));
@@ -6777,6 +6823,7 @@ class NativeCommandService {
       if (!hostOwned) {
         File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
         File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
+        File(_runtimeHostOwnerFile(profile, instance)).deleteSyncSafe();
       }
       if (serverPid == null || !await _pidRunning(serverPid)) {
         File(serverPidFile).deleteSyncSafe();
@@ -6806,7 +6853,32 @@ class NativeCommandService {
     logFile.createSync(recursive: true);
     final IOSink log = logFile.openWrite(mode: FileMode.append);
     Process? server;
+    Timer? ownerHeartbeat;
     try {
+      final File tokenFile = File(_runtimeHostTokenFile(profile, instance));
+      final File hostPidFile = File(_runtimeHostPidFile(profile, instance));
+      for (var attempt = 0; attempt < 40; attempt++) {
+        if (tokenFile.existsSync() &&
+            tokenFile.readAsStringSync().trim() == ownerToken &&
+            _readPid(hostPidFile.path) == pid) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      if (!tokenFile.existsSync() ||
+          tokenFile.readAsStringSync().trim() != ownerToken ||
+          _readPid(hostPidFile.path) != pid) {
+        throw _NativeCommandException(
+          'Windows runtime ownership handshake failed',
+          1,
+        );
+      }
+      final File ownerFile = File(_runtimeHostOwnerFile(profile, instance));
+      _writeWindowsOwnerHeartbeat(ownerFile, ownerToken);
+      ownerHeartbeat = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _writeWindowsOwnerHeartbeat(ownerFile, ownerToken),
+      );
       final _LaunchTarget launch = _runtimeLaunchTarget(profile, instance);
       final _RuntimeSettingsData settings = _runtimeSettingsLoad(profile);
       final String workingDirectory = _runtimeLaunchWorkingDir(
@@ -6844,6 +6916,7 @@ class NativeCommandService {
       }
       rethrow;
     } finally {
+      ownerHeartbeat?.cancel();
       final int? recordedPid = _readPid(
         _runtimeServerPidFile(profile, instance),
       );
@@ -6856,6 +6929,7 @@ class NativeCommandService {
       if (tokenFile.existsSync() &&
           tokenFile.readAsStringSync().trim() == ownerToken) {
         File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
+        File(_runtimeHostOwnerFile(profile, instance)).deleteSyncSafe();
         tokenFile.deleteSyncSafe();
       }
     }
@@ -7548,6 +7622,7 @@ class NativeCommandService {
       }
       File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
       File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
+      File(_runtimeHostOwnerFile(profile, instance)).deleteSyncSafe();
       File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
       File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
       io.write(
@@ -8231,7 +8306,11 @@ class NativeCommandService {
     if (!RegExp(r'^[0-9a-f]{32,128}$').hasMatch(token)) {
       return false;
     }
-    return _windowsProcessCommandLineContains(hostPid, token);
+    return _windowsOwnerHeartbeatValid(
+      hostPid,
+      token,
+      File(_runtimeHostOwnerFile(profile, instance)),
+    );
   }
 
   Future<bool> _windowsWatcherOwned(ConsumerProfile profile, bool mods) async {
@@ -8247,30 +8326,46 @@ class NativeCommandService {
     if (!RegExp(r'^[0-9a-f]{32,128}$').hasMatch(token)) {
       return false;
     }
-    return _windowsProcessCommandLineContains(watcherPid, token);
+    return _windowsOwnerHeartbeatValid(
+      watcherPid,
+      token,
+      File(_pluginsWatchOwnerFile(profile, mods: mods)),
+    );
   }
 
-  Future<bool> _windowsProcessCommandLineContains(
+  Future<bool> _windowsOwnerHeartbeatValid(
     int pid,
-    String marker,
+    String token,
+    File ownerFile,
   ) async {
     try {
-      final ProcessResult result = await Process.run('powershell.exe', <String>[
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        r'$p = Get-CimInstance Win32_Process -Filter '
-            r'("ProcessId = " + $args[0]) -ErrorAction SilentlyContinue; '
-            r'if ($null -ne $p -and $null -ne $p.CommandLine -and '
-            r'$p.CommandLine.Contains($args[1])) { exit 0 } else { exit 1 }',
-        '$pid',
-        marker,
-      ], runInShell: false);
-      return result.exitCode == 0;
-    } on ProcessException {
+      if (!ownerFile.existsSync()) {
+        return false;
+      }
+      final List<String> lines = ownerFile.readAsLinesSync();
+      if (lines.length != 3 ||
+          int.tryParse(lines[0].trim()) != pid ||
+          lines[1].trim() != token) {
+        return false;
+      }
+      final DateTime? writtenAt = DateTime.tryParse(lines[2].trim());
+      if (writtenAt == null ||
+          DateTime.now().difference(writtenAt).abs() >
+              const Duration(seconds: 5)) {
+        return false;
+      }
+      return _pidRunning(pid);
+    } on FileSystemException {
       return false;
     }
+  }
+
+  void _writeWindowsOwnerHeartbeat(File ownerFile, String token) {
+    ownerFile.createSync(recursive: true);
+    ownerFile.writeAsStringSync(
+      '$pid\n$token\n${DateTime.now().toIso8601String()}\n',
+      flush: true,
+    );
   }
 
   Future<bool> _killWindowsProcessTree(int pid) async {
@@ -10039,6 +10134,7 @@ class NativeCommandService {
     File(_runtimeConsolePidFile(profile, name)).deleteSyncSafe();
     File(_runtimeHostPidFile(profile, name)).deleteSyncSafe();
     File(_runtimeHostTokenFile(profile, name)).deleteSyncSafe();
+    File(_runtimeHostOwnerFile(profile, name)).deleteSyncSafe();
     File(_runtimeRestartTokenFile(profile, name)).deleteSyncSafe();
 
     final active = _currentInstance(profile);
@@ -11255,6 +11351,10 @@ class NativeCommandService {
     return p.join(_runtimeDir(profile), '$instance.host.token');
   }
 
+  String _runtimeHostOwnerFile(ConsumerProfile profile, String instance) {
+    return p.join(_runtimeDir(profile), '$instance.host.owner');
+  }
+
   String _runtimeLogFile(ConsumerProfile profile, String instance) {
     return p.join(_runtimeDir(profile), '$instance.log');
   }
@@ -11289,6 +11389,13 @@ class NativeCommandService {
     return p.join(
       _stateDir(profile),
       mods ? 'mods-watch.token' : 'plugins-watch.token',
+    );
+  }
+
+  String _pluginsWatchOwnerFile(ConsumerProfile profile, {required bool mods}) {
+    return p.join(
+      _stateDir(profile),
+      mods ? 'mods-watch.owner' : 'plugins-watch.owner',
     );
   }
 
