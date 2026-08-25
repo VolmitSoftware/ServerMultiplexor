@@ -147,7 +147,7 @@ jobs:
             if (Directory.current.path.toLowerCase().endsWith('ci-purpur') &&
                 !restartMarker.existsSync()) {
               restartMarker.writeAsStringSync('triggered');
-              await Future<void>.delayed(const Duration(seconds: 2));
+              await Future<void>.delayed(const Duration(seconds: 10));
               await Process.start(
                 'cmd.exe',
                 <String>['/d', '/c', restartScript.path],
