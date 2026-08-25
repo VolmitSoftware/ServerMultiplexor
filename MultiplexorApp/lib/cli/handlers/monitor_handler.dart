@@ -86,6 +86,7 @@ Future<int> _printSnapshot() async {
   );
 
   final (int columns, int lines) = _snapshotSize();
+  final DateTime now = DateTime.now().toUtc();
   final MonitorFrame frame = buildMonitorFrame(
     snapshot: snapshot,
     selectedIndex: 0,
@@ -94,7 +95,8 @@ Future<int> _printSnapshot() async {
     lines: lines,
     theme: _snapshotTheme(),
     range: monitorRanges.first,
-    now: DateTime.now().toUtc(),
+    now: now,
+    clockNow: now,
   );
   stdout.writeln(frame.rows.join('\n'));
   return 0;

@@ -150,9 +150,15 @@ String rangeLabel(Duration range) => switch (range.inMinutes) {
 };
 
 /// The busy-spinner glyph for [frame] from [theme]'s glyph set.
+///
+/// A negative frame means the provider is idle and deliberately renders a
+/// blank cell. The badge keeps its width without animating an idle dashboard.
 String monitorSpinner(MonitorTheme theme, int frame) {
+  if (frame < 0) {
+    return ' ';
+  }
   final List<String> spinner = theme.glyphs.spinner;
-  return spinner[frame.abs() % spinner.length];
+  return spinner[frame % spinner.length];
 }
 
 /// Forces [rows] to exactly [lines] rows of exactly [columns] visible

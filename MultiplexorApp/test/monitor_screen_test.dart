@@ -4,6 +4,7 @@ import 'package:multiplexor/services/monitor/monitor_frame_util.dart';
 import 'package:multiplexor/services/monitor/monitor_keymap.dart';
 import 'package:multiplexor/services/monitor/monitor_modal.dart';
 import 'package:multiplexor/services/monitor/monitor_screen.dart';
+import 'package:multiplexor/services/runtime_state.dart';
 import 'package:multiplexor/utils/terminal/theme.dart';
 import 'package:test/test.dart';
 
@@ -28,6 +29,41 @@ MonitorScreen screen({
 );
 
 void main() {
+  group('MonitorScreen rendering cadence', () {
+    test('renders the monitor activity cell blank', () {
+      expect(monitorSpinner(MonitorTheme.plain(), -1), ' ');
+    });
+
+    test('keeps chart time stable until a newer sample arrives', () {
+      final DateTime previous = DateTime.utc(2026, 1, 1, 12);
+      final MetricSample older = MetricSample(
+        ts: previous.subtract(const Duration(seconds: 1)),
+        instance: 'older',
+        state: RuntimeState.running,
+      );
+      final MetricSample newer = MetricSample(
+        ts: previous.add(const Duration(seconds: 2)),
+        instance: 'newer',
+        state: RuntimeState.running,
+      );
+
+      expect(
+        monitorDataTime(
+          previous: previous,
+          latestSamples: <MetricSample?>[older, null],
+        ),
+        previous,
+      );
+      expect(
+        monitorDataTime(
+          previous: previous,
+          latestSamples: <MetricSample?>[older, newer],
+        ),
+        newer.ts,
+      );
+    });
+  });
+
   group('MonitorScreen sweep cadence', () {
     test('defaults to the Local two-second cadence', () {
       expect(screen().sweepInterval, const Duration(seconds: 2));

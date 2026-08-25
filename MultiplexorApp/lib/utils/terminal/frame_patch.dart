@@ -9,14 +9,16 @@
 /// Otherwise the two frames are split on `\n` and compared line by line;
 /// each differing line is rewritten in place via a cursor-addressed escape
 /// sequence, including trailing lines that were removed (cleared) or added
-/// (written) when the line counts differ.
+/// (written) when the line counts differ. Every non-empty update finishes by
+/// resetting styles, parking the caret at the top-left, and hiding it so a
+/// terminal cannot expose a cursor at whichever row was patched last.
 String renderTerminalPatch({
   required String? previous,
   required String next,
   bool forceFull = false,
 }) {
   if (forceFull || previous == null) {
-    return '\x1B[H\x1B[2J$next\x1B[0m';
+    return '\x1B[H\x1B[2J$next\x1B[0m\x1B[H\x1B[?25l';
   }
   if (previous == next) {
     return '';
@@ -44,6 +46,6 @@ String renderTerminalPatch({
   if (patch.isEmpty) {
     return '';
   }
-  patch.write('\x1B[0m');
+  patch.write('\x1B[0m\x1B[H\x1B[?25l');
   return patch.toString();
 }

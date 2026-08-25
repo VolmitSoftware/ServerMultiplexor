@@ -161,10 +161,11 @@ const List<ButtonSpec> _remoteEmptyWorkspaceButtons = <ButtonSpec>[
 /// action bar, and a one-row footer hint. An empty workspace drops the
 /// selection bar and spends its body on a prompt instead.
 ///
-/// Pure: no clock reads and no IO. [now] must be UTC — sample timestamps
-/// are UTC and chart windows are `[now - range, now]` — and is the only
-/// notion of "current" the frame has. The header clock is rendered in local
-/// time from it.
+/// Pure: no clock reads and no IO. [now] and [clockNow] must be UTC. Sample
+/// timestamps are UTC and chart windows are `[now - range, now]`; the header
+/// clock is rendered in local time from [clockNow]. Keeping the two clocks
+/// separate lets an unchanged chart stay byte-for-byte stable between data
+/// samples while the visible clock remains current.
 ///
 /// [hoveredId] and [pressedId] select the interaction state of whatever they
 /// name: a button chip renders hovered or pressed, and a hovered server row
@@ -179,6 +180,7 @@ MonitorFrame buildMonitorFrame({
   required MonitorTheme theme,
   required Duration range,
   required DateTime now,
+  required DateTime clockNow,
   String? hoveredId,
   String? pressedId,
 }) {
@@ -220,7 +222,7 @@ MonitorFrame buildMonitorFrame({
     columns: columns,
     theme: theme,
     range: range,
-    now: now,
+    now: clockNow,
     hoveredId: hoveredId,
     pressedId: pressedId,
   );

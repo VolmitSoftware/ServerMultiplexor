@@ -367,6 +367,7 @@ void main() {
       String? pressedId,
       Duration window = range,
       int spinner = 0,
+      DateTime? clock,
     }) => buildMonitorFrame(
       snapshot: snapshot ?? twoServers(),
       selectedIndex: selectedIndex,
@@ -376,6 +377,7 @@ void main() {
       theme: theme ?? plain,
       range: window,
       now: now,
+      clockNow: clock ?? now,
       hoveredId: hoveredId,
       pressedId: pressedId,
     );
@@ -664,25 +666,28 @@ void main() {
       expect(rows.join('\n'), contains('no data · waiting for a first sample'));
     });
 
-    test('the chart axis ends on the same clock the header shows', () {
-      // The header localizes `now` and the log tail carries local
-      // timestamps, so a chart axis left in UTC puts two different clocks
-      // in one frame. The right-hand tick is `now`, so it must read the
-      // same as the header.
-      final List<String> rows = stripAll(frameOf(columns: 132, lines: 40).rows);
-      final DateTime local = now.toLocal();
-      final String clock =
-          '${local.hour.toString().padLeft(2, '0')}:'
-          '${local.minute.toString().padLeft(2, '0')}';
+    test('keeps the live header clock independent from chart time', () {
+      final DateTime clockNow = now.add(const Duration(minutes: 7));
+      final List<String> rows = stripAll(
+        frameOf(columns: 132, lines: 40, clock: clockNow).rows,
+      );
+      String localClock(DateTime value) {
+        final DateTime local = value.toLocal();
+        return '${local.hour.toString().padLeft(2, '0')}:'
+            '${local.minute.toString().padLeft(2, '0')}';
+      }
 
-      expect(rows.take(3).join('\n'), contains(clock));
+      expect(rows.take(3).join('\n'), contains(localClock(clockNow)));
 
       final String axis = rows.lastWhere(
         (String row) => RegExp(r'\d\d:\d\d.*\d\d:\d\d').hasMatch(row),
         orElse: () => '',
       );
       expect(axis, isNot(isEmpty), reason: 'the chart should have a time axis');
-      expect(RegExp(r'\d\d:\d\d').allMatches(axis).last.group(0), clock);
+      expect(
+        RegExp(r'\d\d:\d\d').allMatches(axis).last.group(0),
+        localClock(now),
+      );
     });
 
     test('offers START on a stopped selection and STOP on a running one', () {
@@ -1022,6 +1027,7 @@ void main() {
       theme: MonitorTheme.plain(),
       range: range,
       now: now,
+      clockNow: now,
     );
 
     /// Asserts the `[ LABEL ]` chip on [row] is covered by a button hitbox
@@ -1166,6 +1172,7 @@ void main() {
             theme: color,
             range: range,
             now: now,
+            clockNow: now,
             hoveredId: hoveredId,
             pressedId: pressedId,
           ).rows.first;
@@ -1223,6 +1230,7 @@ void main() {
         theme: color,
         range: range,
         now: now,
+        clockNow: now,
         hoveredId: hoveredId,
       ).rows[22];
 

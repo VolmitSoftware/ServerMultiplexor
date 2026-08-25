@@ -20,14 +20,16 @@ class TermIo {
 
   static final TermIo instance = TermIo._();
 
-  /// Enables click reporting (`?1000`), any-motion tracking (`?1003`, so
-  /// mouse moves are reported even with no button held), and the SGR
-  /// extended coordinate encoding (`?1006`).
-  static const String enableMouseSequence = '\x1B[?1000h\x1B[?1003h\x1B[?1006h';
+  /// Clears drag/any-motion modes left by an interrupted older session, then
+  /// enables click reporting (`?1000`) and SGR coordinates (`?1006`). Passive
+  /// pointer motion is intentionally not tracked, so moving the mouse cannot
+  /// churn dashboard redraws.
+  static const String enableMouseSequence =
+      '\x1B[?1003l\x1B[?1002l\x1B[?1000h\x1B[?1006h';
 
   /// Tears the modes back down in reverse of [enableMouseSequence].
   static const String disableMouseSequence =
-      '\x1B[?1006l\x1B[?1003l\x1B[?1000l';
+      '\x1B[?1006l\x1B[?1003l\x1B[?1002l\x1B[?1000l';
 
   final Console _console = Console();
   final TermEventParser _parser = TermEventParser();

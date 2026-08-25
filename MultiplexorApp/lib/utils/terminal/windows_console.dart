@@ -127,8 +127,6 @@ class WindowsConsole {
 
   bool _mouseReporting = false;
   int _lastMouseButton = 0;
-  int _lastMouseCol = -1;
-  int _lastMouseRow = -1;
   int _highSurrogate = 0;
 
   /// True when this process is attached to a real Windows console this class
@@ -174,15 +172,12 @@ class WindowsConsole {
     }
   }
 
-  /// Whether mouse reporting is on. Mirrors the `?1000`/`?1003` sequences
+  /// Whether click-only mouse reporting is on. Mirrors the `?1000` sequence
   /// [TermIo] writes: Windows delivers mouse input as records either way, so
-  /// this is what decides whether they become bytes or are dropped.
+  /// this is what decides whether press, release, and wheel records become
+  /// bytes or are dropped. Motion records are always ignored.
   set mouseReporting(bool enabled) {
     _mouseReporting = enabled;
-    if (!enabled) {
-      _lastMouseCol = -1;
-      _lastMouseRow = -1;
-    }
   }
 
   /// Puts the console into raw mode, remembering the modes to put back.
@@ -423,15 +418,9 @@ class WindowsConsole {
       return;
     }
     if ((flags & _mouseMoved) != 0) {
-      // The UI only cares about cells, so a report for a move that stayed in
-      // one is pure churn.
-      if (col == _lastMouseCol && row == _lastMouseRow) {
-        return;
-      }
-      _lastMouseCol = col;
-      _lastMouseRow = row;
-      final int held = buttons == 0 ? 3 : _buttonCode(buttons);
-      _emitMouse(held + 32, col, row, pressed: true);
+      // Match click-only xterm reporting: passive motion and button drags do
+      // not become input events. The eventual release still carries its
+      // current coordinates, so press/release hit testing remains intact.
       return;
     }
     if (buttons != 0) {

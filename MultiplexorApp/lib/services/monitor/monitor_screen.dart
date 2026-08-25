@@ -43,10 +43,21 @@ const Duration _yieldWindow = Duration(milliseconds: 10);
 /// neither should turn into a sweep storm.
 const Duration _localSweepInterval = Duration(seconds: 2);
 
-/// How long each spinner glyph is shown. The spinner index comes from
-/// elapsed time for the same reason the sweep does — so it animates at a
-/// steady rate no matter how much input arrives.
-const Duration _spinnerPeriod = Duration(milliseconds: 250);
+/// Advances the chart clock only when a newer telemetry sample exists.
+/// Re-render heartbeats therefore cannot slide and rebucket otherwise
+/// unchanged charts between provider sweeps.
+DateTime monitorDataTime({
+  required DateTime previous,
+  required Iterable<MetricSample?> latestSamples,
+}) {
+  DateTime newest = previous;
+  for (final MetricSample? sample in latestSamples) {
+    if (sample != null && sample.ts.isAfter(newest)) {
+      newest = sample.ts;
+    }
+  }
+  return newest;
+}
 
 /// The detail view re-reads its log tail no more than once per second,
 /// however fast frames are drawn.
@@ -197,14 +208,15 @@ class MonitorScreen {
   MonitorModalState? _modal;
 
   int _selectedIndex = 0;
-  int _frame = 0;
   Duration _range = monitorRanges.first;
   bool _forceFull = true;
   int _lastColumns = -1;
   int _lastLines = -1;
 
-  /// When this run started, the origin the spinner's phase is measured from.
-  DateTime _startedAt = DateTime.now();
+  /// The wall clock represented by the telemetry currently on screen. It
+  /// changes only when a sweep publishes a newer sample, keeping chart
+  /// buckets stable between real data updates.
+  DateTime _dataTime = DateTime.now().toUtc();
 
   /// When a sweep was last asked for — the wall clock the sweep cadence is
   /// paced against.
@@ -272,7 +284,7 @@ class MonitorScreen {
     _logReadAt = null;
     _modal = null;
     _clearPointer();
-    _startedAt = DateTime.now();
+    _dataTime = _latestDataTime(_dataTime);
     _clampSelection();
   }
 
@@ -366,13 +378,10 @@ class MonitorScreen {
 
     _clampSelection();
     final DateTime wallClock = DateTime.now();
-    // Phase from elapsed time, not from an iteration count: a held key or a
-    // trackpad flick produces iterations far faster than 250 ms and would
-    // otherwise spin the spinner at input rate.
-    _frame =
-        wallClock.difference(_startedAt).inMilliseconds ~/
-        _spinnerPeriod.inMilliseconds;
-    final DateTime now = wallClock.toUtc();
+    // The monitor deliberately has no heartbeat animation. Telemetry changes
+    // still patch their affected rows, while idle ticks write nothing.
+    const int activityFrame = -1;
+    final DateTime chartNow = _dataTime;
     final MonitorModalState? modal = _modal;
     // Nothing behind a modal is clickable, so nothing behind one is drawn as
     // if it were: the base frame is built with no pointer at all and the
@@ -384,24 +393,25 @@ class MonitorScreen {
             instance: _detailInstance,
             history: _historyFor(_detailInstance),
             logLines: _logLines,
-            frame: _frame,
+            frame: activityFrame,
             columns: columns,
             lines: lines,
             theme: theme,
             range: _range,
-            now: now,
+            now: chartNow,
             hoveredId: baseHovered,
             pressedId: basePressed,
           )
         : buildMonitorFrame(
             snapshot: _snapshot,
             selectedIndex: _selectedIndex,
-            frame: _frame,
+            frame: activityFrame,
             columns: columns,
             lines: lines,
             theme: theme,
             range: _range,
-            now: now,
+            now: chartNow,
+            clockNow: wallClock.toUtc(),
             hoveredId: baseHovered,
             pressedId: basePressed,
           );
@@ -540,6 +550,13 @@ class MonitorScreen {
   MetricSample? _latestFor(String instance) =>
       sampler.latest(instance) ?? _snapshot.latestFor(instance);
 
+  DateTime _latestDataTime(DateTime previous) => monitorDataTime(
+    previous: previous,
+    latestSamples: <MetricSample?>[
+      for (final String instance in _snapshot.instances) _latestFor(instance),
+    ],
+  );
+
   /// Fires a sweep and a snapshot reload without waiting for either: a slow
   /// capture must not stall the heartbeat. Both are dropped if a refresh is
   /// already running.
@@ -548,7 +565,8 @@ class MonitorScreen {
   /// runs longer than [sweepInterval] is followed by a gap rather than
   /// being re-fired on the very next tick.
   void _kickRefresh() {
-    _lastSweepKick = DateTime.now();
+    final DateTime now = DateTime.now();
+    _lastSweepKick = now;
     if (_refreshing) {
       return;
     }
@@ -561,6 +579,7 @@ class MonitorScreen {
       await sampler.sweep();
       final MonitorSnapshot next = await loadSnapshot();
       _snapshot = next;
+      _dataTime = _latestDataTime(_dataTime);
       _clampSelection();
     } catch (_) {
       // A failed refresh leaves the last good snapshot on screen; the next
@@ -661,7 +680,9 @@ class MonitorScreen {
     final String? pressed = _pressedId;
     _pressedId = null;
     final String? id = _hitAt(event);
-    _hoveredId = id;
+    // Click-only reporting intentionally has no persistent hover state. The
+    // pressed chip flashes while held and returns to rest on release.
+    _hoveredId = null;
     final String? target = monitorReleaseTarget(
       pressedId: pressed,
       releasedId: id,

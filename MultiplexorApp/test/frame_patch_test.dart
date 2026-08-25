@@ -7,7 +7,7 @@ void main() {
       const String next = 'line one\nline two';
       final String patch = renderTerminalPatch(previous: null, next: next);
 
-      expect(patch, '\x1B[H\x1B[2J$next\x1B[0m');
+      expect(patch, '\x1B[H\x1B[2J$next\x1B[0m\x1B[H\x1B[?25l');
     });
 
     test('returns an empty string when previous and next are identical', () {
@@ -29,7 +29,7 @@ void main() {
           next: next,
         );
 
-        expect(patch, '\x1B[2;1HCHANGED\x1B[K\x1B[0m');
+        expect(patch, '\x1B[2;1HCHANGED\x1B[K\x1B[0m\x1B[H\x1B[?25l');
         expect('\x1B[1;1H'.allMatches(patch).length, 0);
         expect('\x1B[3;1H'.allMatches(patch).length, 0);
         expect('\x1B[2;1H'.allMatches(patch).length, 1);
@@ -42,7 +42,7 @@ void main() {
 
       final String patch = renderTerminalPatch(previous: previous, next: next);
 
-      expect(patch, '\x1B[2;1H\x1B[K\x1B[3;1H\x1B[K\x1B[0m');
+      expect(patch, '\x1B[2;1H\x1B[K\x1B[3;1H\x1B[K\x1B[0m\x1B[H\x1B[?25l');
     });
 
     test('writes new trailing rows appended when the next frame is longer', () {
@@ -51,7 +51,10 @@ void main() {
 
       final String patch = renderTerminalPatch(previous: previous, next: next);
 
-      expect(patch, '\x1B[2;1Hmiddle\x1B[K\x1B[3;1Hbottom\x1B[K\x1B[0m');
+      expect(
+        patch,
+        '\x1B[2;1Hmiddle\x1B[K\x1B[3;1Hbottom\x1B[K\x1B[0m\x1B[H\x1B[?25l',
+      );
     });
 
     test(
@@ -65,7 +68,7 @@ void main() {
           forceFull: true,
         );
 
-        expect(patch, '\x1B[H\x1B[2J$frame\x1B[0m');
+        expect(patch, '\x1B[H\x1B[2J$frame\x1B[0m\x1B[H\x1B[?25l');
       },
     );
 
@@ -75,7 +78,7 @@ void main() {
 
       final String patch = renderTerminalPatch(previous: previous, next: next);
 
-      expect(patch, '\x1B[2;1HX\x1B[K\x1B[4;1HY\x1B[K\x1B[0m');
+      expect(patch, '\x1B[2;1HX\x1B[K\x1B[4;1HY\x1B[K\x1B[0m\x1B[H\x1B[?25l');
     });
 
     test(
@@ -83,8 +86,20 @@ void main() {
       () {
         final String patch = renderTerminalPatch(previous: null, next: '');
 
-        expect(patch, '\x1B[H\x1B[2J\x1B[0m');
+        expect(patch, '\x1B[H\x1B[2J\x1B[0m\x1B[H\x1B[?25l');
       },
     );
+
+    test('parks and hides the caret after every non-empty update', () {
+      const String trailer = '\x1B[0m\x1B[H\x1B[?25l';
+      final List<String> patches = <String>[
+        renderTerminalPatch(previous: null, next: 'first frame'),
+        renderTerminalPatch(previous: 'old', next: 'new'),
+        renderTerminalPatch(previous: 'same', next: 'same', forceFull: true),
+      ];
+
+      expect(patches, everyElement(endsWith(trailer)));
+      expect(renderTerminalPatch(previous: 'same', next: 'same'), isEmpty);
+    });
   });
 }
