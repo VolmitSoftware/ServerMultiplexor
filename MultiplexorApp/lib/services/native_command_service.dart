@@ -5067,7 +5067,10 @@ class NativeCommandService {
       final client = HttpClient();
       try {
         final request = await client.getUrl(Uri.parse(url));
-        request.headers.set(HttpHeaders.userAgentHeader, 'multiplexor/0.2.0');
+        request.headers.set(
+          HttpHeaders.userAgentHeader,
+          'multiplexor/$multiplexorVersion',
+        );
         final response = await request.close();
         if (response.statusCode < 200 || response.statusCode >= 300) {
           final body = await response.transform(utf8.decoder).join();
@@ -5115,7 +5118,10 @@ class NativeCommandService {
       final client = HttpClient();
       try {
         final request = await client.getUrl(Uri.parse(url));
-        request.headers.set(HttpHeaders.userAgentHeader, 'multiplexor/0.2.0');
+        request.headers.set(
+          HttpHeaders.userAgentHeader,
+          'multiplexor/$multiplexorVersion',
+        );
         final response = await request.close();
         if (response.statusCode < 200 || response.statusCode >= 300) {
           final body = await response.transform(utf8.decoder).join();

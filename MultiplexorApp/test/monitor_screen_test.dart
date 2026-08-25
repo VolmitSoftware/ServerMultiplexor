@@ -29,6 +29,72 @@ MonitorScreen screen({
 );
 
 void main() {
+  group('MonitorGeometryStabilizer', () {
+    test('accepts the first observed size immediately', () {
+      final MonitorGeometryStabilizer stabilizer = MonitorGeometryStabilizer();
+      final DateTime now = DateTime.utc(2026, 1, 1);
+
+      expect(stabilizer.observe(columns: 120, lines: 40, now: now), (
+        columns: 120,
+        lines: 40,
+      ));
+    });
+
+    test('drops a one-tick small geometry without changing the frame', () {
+      final MonitorGeometryStabilizer stabilizer = MonitorGeometryStabilizer();
+      final DateTime now = DateTime.utc(2026, 1, 1);
+      stabilizer.observe(columns: 120, lines: 40, now: now);
+
+      expect(
+        stabilizer.observe(
+          columns: 45,
+          lines: 8,
+          now: now.add(const Duration(milliseconds: 250)),
+        ),
+        isNull,
+      );
+      expect(
+        stabilizer.observe(
+          columns: 120,
+          lines: 40,
+          now: now.add(const Duration(milliseconds: 500)),
+        ),
+        (columns: 120, lines: 40),
+      );
+    });
+
+    test('accepts a real resize only after it stays stable', () {
+      final MonitorGeometryStabilizer stabilizer = MonitorGeometryStabilizer();
+      final DateTime now = DateTime.utc(2026, 1, 1);
+      stabilizer.observe(columns: 120, lines: 40, now: now);
+
+      expect(
+        stabilizer.observe(
+          columns: 100,
+          lines: 30,
+          now: now.add(const Duration(milliseconds: 250)),
+        ),
+        isNull,
+      );
+      expect(
+        stabilizer.observe(
+          columns: 100,
+          lines: 30,
+          now: now.add(const Duration(milliseconds: 749)),
+        ),
+        isNull,
+      );
+      expect(
+        stabilizer.observe(
+          columns: 100,
+          lines: 30,
+          now: now.add(const Duration(milliseconds: 750)),
+        ),
+        (columns: 100, lines: 30),
+      );
+    });
+  });
+
   group('MonitorScreen rendering cadence', () {
     test('renders the monitor activity cell blank', () {
       expect(monitorSpinner(MonitorTheme.plain(), -1), ' ');

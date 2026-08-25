@@ -3,7 +3,7 @@ name: Build executables
 on:
   push:
     branches:
-      - master
+      - "**"
     tags:
       - "v*"
   pull_request:
@@ -15,8 +15,38 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Resolve build version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      sha: ${{ steps.metadata.outputs.sha }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: "3.10.0"
+
+      - name: Resolve build metadata
+        id: metadata
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="$(dart run MultiplexorApp/tool/resolve_build_version.dart --tag "$GITHUB_REF_NAME")"
+          else
+            version="$(dart run MultiplexorApp/tool/resolve_build_version.dart --run-number "$GITHUB_RUN_NUMBER")"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.name }}
+    needs: version
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
@@ -26,22 +56,25 @@ jobs:
           - name: macOS (Apple Silicon)
             runner: macos-15
             executable: multiplexor
-            archive: multiplexor-macos-arm64.tar.gz
+            archive_suffix: macos-arm64.tar.gz
           - name: macOS (Intel)
             runner: macos-15-intel
             executable: multiplexor
-            archive: multiplexor-macos-x64.tar.gz
+            archive_suffix: macos-x64.tar.gz
           - name: Windows (x64)
             runner: windows-latest
             executable: multiplexor.exe
-            archive: multiplexor-windows-x64.zip
+            archive_suffix: windows-x64.zip
     env:
       EXECUTABLE_NAME: ${{ matrix.executable }}
-      ARCHIVE_NAME: ${{ matrix.archive }}
+      ARCHIVE_NAME: multiplexor-v${{ needs.version.outputs.version }}-${{ matrix.archive_suffix }}
+      BUILD_VERSION: ${{ needs.version.outputs.version }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.version.outputs.sha }}
 
       - name: Set up Dart
         uses: dart-lang/setup-dart@v1
@@ -55,26 +88,31 @@ jobs:
       - name: Compile macOS executable
         if: runner.os == 'macOS'
         shell: bash
-        run: dart run MultiplexorApp/tool/build_exe.dart --output "$RUNNER_TEMP/$EXECUTABLE_NAME"
+        run: dart run MultiplexorApp/tool/build_exe.dart --version "$BUILD_VERSION" --output "$RUNNER_TEMP/$EXECUTABLE_NAME"
 
       - name: Compile Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
-          dart run MultiplexorApp/tool/build_exe.dart --output $outputPath
+          dart run MultiplexorApp/tool/build_exe.dart --version $env:BUILD_VERSION --output $outputPath
 
       - name: Smoke-test macOS executable
         if: runner.os == 'macOS'
         shell: bash
-        run: '"$RUNNER_TEMP/$EXECUTABLE_NAME" version'
+        run: |
+          actual="$("$RUNNER_TEMP/$EXECUTABLE_NAME" version | head -n 1)"
+          test "$actual" = "Multiplexor CLI v$BUILD_VERSION"
 
       - name: Smoke-test Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
-          & $outputPath version
+          $actual = (& $outputPath version | Select-Object -First 1)
+          if ($actual -ne "Multiplexor CLI v$env:BUILD_VERSION") {
+            throw "Expected Multiplexor CLI v$env:BUILD_VERSION, got $actual"
+          }
 
       - name: Package macOS executable
         if: runner.os == 'macOS'
@@ -92,14 +130,17 @@ jobs:
       - name: Upload executable
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.archive }}
-          path: ${{ runner.temp }}/${{ matrix.archive }}
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ runner.temp }}/${{ env.ARCHIVE_NAME }}
           if-no-files-found: error
+          retention-days: 30
 
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs:
+      - version
+      - build
     runs-on: ubuntu-latest
     permissions:
       actions: read

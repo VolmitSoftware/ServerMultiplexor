@@ -102,4 +102,14 @@ void main() {
       expect(renderTerminalPatch(previous: 'same', next: 'same'), isEmpty);
     });
   });
+
+  group('synchronizeTerminalPatch', () {
+    test('wraps a visible patch in one synchronized update', () {
+      expect(synchronizeTerminalPatch('patch'), '\x1B[?2026hpatch\x1B[?2026l');
+    });
+
+    test('keeps an idle no-op completely silent', () {
+      expect(synchronizeTerminalPatch(''), isEmpty);
+    });
+  });
 }

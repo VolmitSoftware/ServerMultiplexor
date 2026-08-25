@@ -1,6 +1,10 @@
 import 'dart:io';
 
-const String multiplexorVersion = '0.2.0';
+const String multiplexorSourceVersion = '0.2.0';
+const String multiplexorVersion = String.fromEnvironment(
+  'MULTIPLEXOR_VERSION',
+  defaultValue: multiplexorSourceVersion,
+);
 
 class CommandHelpGroup {
   const CommandHelpGroup(this.command, this.forms);

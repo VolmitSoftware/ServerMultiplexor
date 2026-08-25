@@ -49,3 +49,17 @@ String renderTerminalPatch({
   patch.write('\x1B[0m\x1B[H\x1B[?25l');
   return patch.toString();
 }
+
+/// Makes one terminal update atomic on terminals that support synchronized
+/// output (DEC private mode 2026).
+///
+/// Supporting terminals hold the bytes between these markers and present the
+/// finished patch at once instead of exposing cursor jumps and partially
+/// rewritten rows. Terminals that do not implement the mode ignore the
+/// markers. Empty patches remain empty so an idle dashboard writes nothing.
+String synchronizeTerminalPatch(String patch) {
+  if (patch.isEmpty) {
+    return '';
+  }
+  return '\x1B[?2026h$patch\x1B[?2026l';
+}

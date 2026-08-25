@@ -8,8 +8,9 @@ Future<void> main(List<String> args) async {
   ).absolute;
 
   String? requestedOutput;
-  for (var i = 0; i < args.length; i++) {
-    final arg = args[i];
+  String? requestedVersion;
+  for (int i = 0; i < args.length; i += 1) {
+    final String arg = args[i];
     if (arg == '--output' || arg == '-o') {
       if (i + 1 >= args.length) {
         stderr.writeln('Missing value for $arg');
@@ -24,8 +25,33 @@ Future<void> main(List<String> args) async {
       continue;
     }
 
+    if (arg == '--version') {
+      if (i + 1 >= args.length) {
+        stderr.writeln('Missing value for $arg');
+        exit(2);
+      }
+      requestedVersion = args[++i];
+      continue;
+    }
+
+    if (arg.startsWith('--version=')) {
+      requestedVersion = arg.substring('--version='.length);
+      continue;
+    }
+
     stderr.writeln('Unknown argument: $arg');
-    stderr.writeln('Usage: dart run tool/build_exe.dart [--output <path>]');
+    stderr.writeln(
+      'Usage: dart run tool/build_exe.dart '
+      '[--output <path>] [--version <semver>]',
+    );
+    exit(2);
+  }
+
+  if (requestedVersion != null &&
+      !RegExp(
+        r'^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$',
+      ).hasMatch(requestedVersion)) {
+    stderr.writeln('Invalid semantic version: $requestedVersion');
     exit(2);
   }
 
@@ -41,12 +67,16 @@ Future<void> main(List<String> args) async {
   stdout.writeln('Compiling executable...');
   stdout.writeln('Project: ${appRoot.path}');
   stdout.writeln('Output:  $outputPath');
+  if (requestedVersion != null) {
+    stdout.writeln('Version: $requestedVersion');
+  }
 
-  final result = await Process.start(
+  final Process result = await Process.start(
     'dart',
     <String>[
       'compile',
       'exe',
+      if (requestedVersion != null) '-DMULTIPLEXOR_VERSION=$requestedVersion',
       'bin/main.dart',
       '-o',
       outputPath,
@@ -58,7 +88,7 @@ Future<void> main(List<String> args) async {
   await stdout.addStream(result.stdout);
   await stderr.addStream(result.stderr);
 
-  final exitCode = await result.exitCode;
+  final int exitCode = await result.exitCode;
   if (exitCode != 0) {
     exit(exitCode);
   }

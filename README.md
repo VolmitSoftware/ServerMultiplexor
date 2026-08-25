@@ -4,6 +4,8 @@ A Dart-native Minecraft server workspace manager. One workspace holds many serve
 
 Everything is driven through `./start.sh` — either the interactive wizard (no args) or a direct CLI command. There is no separate build step: `start.sh` compiles `MultiplexorApp/` to the `multiplexor` binary whenever a `.dart` source, `pubspec.yaml`, or `pubspec.lock` is newer than the binary, then execs it. Unchanged sources skip straight to the binary. A failed compile leaves the previous binary in place and exits non-zero rather than running stale-but-working code silently. Set `MULTIPLEXOR_REBUILD=1` to force a recompile; everything `start.sh` itself prints goes to stderr, so stdout stays parseable.
 
+Every branch push runs the executable workflow. It assigns the build a monotonically increasing semantic patch version, embeds that version in the CLI, and uploads versioned Apple Silicon macOS, Intel macOS, and Windows archives as GitHub Actions artifacts retained for 30 days. The checked-in version remains the release baseline, so CI never adds surprise commits to a branch. Tag pushes matching `v*` must match that baseline and continue to publish the archives as a GitHub Release.
+
 ## Requirements
 
 - `dart` 3.10+ (`./start.sh` compiles `MultiplexorApp/` on demand)

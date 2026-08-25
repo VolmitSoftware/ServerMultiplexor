@@ -43,6 +43,68 @@ const Duration _yieldWindow = Duration(milliseconds: 10);
 /// neither should turn into a sweep storm.
 const Duration _localSweepInterval = Duration(seconds: 2);
 
+/// A new terminal geometry must persist this long before the monitor rebuilds
+/// around it. Some terminal hosts briefly report a tiny intermediate size
+/// while updating their own layout; accepting that one reading produces a
+/// resize-required card followed immediately by another full repaint.
+const Duration monitorGeometrySettleTime = Duration(milliseconds: 500);
+
+typedef MonitorGeometry = ({int columns, int lines});
+
+/// Filters transient terminal-size readings while accepting the first real
+/// size immediately.
+///
+/// A changed geometry returns `null` until it remains unchanged for
+/// [settleTime]. Callers should skip that render rather than draw either the
+/// old frame into a smaller terminal or a temporary small layout. Returning
+/// to the accepted geometry cancels the candidate immediately.
+class MonitorGeometryStabilizer {
+  MonitorGeometryStabilizer({this.settleTime = monitorGeometrySettleTime});
+
+  final Duration settleTime;
+
+  MonitorGeometry? _accepted;
+  MonitorGeometry? _candidate;
+  DateTime? _candidateSince;
+
+  MonitorGeometry? observe({
+    required int columns,
+    required int lines,
+    required DateTime now,
+  }) {
+    final MonitorGeometry observed = (columns: columns, lines: lines);
+    final MonitorGeometry? accepted = _accepted;
+    if (accepted == null) {
+      _accepted = observed;
+      return observed;
+    }
+    if (observed == accepted) {
+      _candidate = null;
+      _candidateSince = null;
+      return accepted;
+    }
+    if (observed != _candidate) {
+      _candidate = observed;
+      _candidateSince = now;
+      return null;
+    }
+    final DateTime since = _candidateSince ?? now;
+    if (now.difference(since) < settleTime) {
+      return null;
+    }
+    _accepted = observed;
+    _candidate = null;
+    _candidateSince = null;
+    return observed;
+  }
+
+  void reset() {
+    _accepted = null;
+    _candidate = null;
+    _candidateSince = null;
+  }
+}
+
 /// Advances the chart clock only when a newer telemetry sample exists.
 /// Re-render heartbeats therefore cannot slide and rebucket otherwise
 /// unchanged charts between provider sweeps.
@@ -212,6 +274,7 @@ class MonitorScreen {
   bool _forceFull = true;
   int _lastColumns = -1;
   int _lastLines = -1;
+  final MonitorGeometryStabilizer _geometry = MonitorGeometryStabilizer();
 
   /// The wall clock represented by the telemetry currently on screen. It
   /// changes only when a sweep publishes a newer sample, keeping chart
@@ -278,6 +341,7 @@ class MonitorScreen {
     _forceFull = true;
     _lastColumns = -1;
     _lastLines = -1;
+    _geometry.reset();
     _detailMode = false;
     _detailInstance = '';
     _logLines = const <String>[];
@@ -363,8 +427,17 @@ class MonitorScreen {
   // --- rendering ----------------------------------------------------------
 
   void _render(TermIo io) {
-    final int columns = io.terminalColumns;
-    final int lines = io.terminalLines;
+    final DateTime wallClock = DateTime.now();
+    final MonitorGeometry? geometry = _geometry.observe(
+      columns: io.terminalColumns,
+      lines: io.terminalLines,
+      now: wallClock,
+    );
+    if (geometry == null) {
+      return;
+    }
+    final int columns = geometry.columns;
+    final int lines = geometry.lines;
     if (columns != _lastColumns || lines != _lastLines) {
       // A resized terminal has already scrambled what is on screen; a
       // line-by-line patch against the old geometry would only add to it.
@@ -377,7 +450,6 @@ class MonitorScreen {
     }
 
     _clampSelection();
-    final DateTime wallClock = DateTime.now();
     // The monitor deliberately has no heartbeat animation. Telemetry changes
     // still patch their affected rows, while idle ticks write nothing.
     const int activityFrame = -1;
@@ -441,11 +513,10 @@ class MonitorScreen {
     // returning the carriage and stair-steps the frame. Only the full-frame
     // path contains newlines at all — a patch addresses each line by cursor
     // position — so that is the only one that needs them expanded.
-    stdout.write(
-      patch.startsWith(_fullFramePrefix)
-          ? patch.replaceAll('\n', '\r\n')
-          : patch,
-    );
+    final String normalized = patch.startsWith(_fullFramePrefix)
+        ? patch.replaceAll('\n', '\r\n')
+        : patch;
+    stdout.write(synchronizeTerminalPatch(normalized));
   }
 
   /// Composes [modal]'s card over [base], carrying the instance's latest
