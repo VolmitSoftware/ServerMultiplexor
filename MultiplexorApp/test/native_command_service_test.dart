@@ -7,6 +7,7 @@ import 'package:multiplexor/services/consumer_service.dart';
 import 'package:multiplexor/services/manager_context.dart';
 import 'package:multiplexor/services/native_command_service.dart';
 import 'package:multiplexor/utils/process_runner.dart';
+import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
@@ -86,7 +87,7 @@ void main() {
         }
         expect(
           File('$instance/.server-source').readAsStringSync(),
-          contains('jar=${managed.path}'),
+          contains('jar=${p.normalize(managed.path)}'),
         );
         external.deleteSync();
         expect(

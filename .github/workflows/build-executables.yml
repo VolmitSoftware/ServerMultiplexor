@@ -142,7 +142,20 @@ jobs:
               return;
             }
             stdout.writeln('fake java started');
-            await Future<void>.delayed(const Duration(seconds: 8));
+            final File restartMarker = File('.ci-restart-triggered');
+            final File restartScript = File('multiplexor-restart.cmd');
+            if (Directory.current.path.toLowerCase().endsWith('ci-purpur') &&
+                !restartMarker.existsSync()) {
+              restartMarker.writeAsStringSync('triggered');
+              await Future<void>.delayed(const Duration(seconds: 2));
+              await Process.start(
+                'cmd.exe',
+                <String>['/d', '/c', restartScript.path],
+                mode: ProcessStartMode.detached,
+              );
+              return;
+            }
+            await Future<void>.delayed(const Duration(seconds: 30));
           }
           '@ | Set-Content -LiteralPath $fakeJavaSource
           dart compile exe $fakeJavaSource -o (Join-Path $fakeTools "java.exe")
@@ -153,49 +166,95 @@ jobs:
           $installerPath = Join-Path $env:RUNNER_TEMP "forge-installer.jar"
           Set-Content -LiteralPath $installerPath -Value "fake installer"
 
-          & $outputPath --root $smokeRoot --consumer forge server create ci-forge --type forge --jar $installerPath
-          if ($LASTEXITCODE -ne 0) { throw "Windows Forge installer create failed" }
-          $forgeMetadata = Get-Content -Raw -LiteralPath (Join-Path $smokeRoot "consumers\forge-mod-consumers\instances\ci-forge\.server-source")
-          if ($forgeMetadata -notmatch "args_file_rel=.*win_args.txt") {
-            throw "Windows Forge metadata did not select win_args.txt: $forgeMetadata"
+          function Get-ConsumerRoot([string] $Consumer) {
+            switch ($Consumer) {
+              "plugin" { return "plugin-consumers" }
+              "forge" { return "forge-mod-consumers" }
+              "fabric" { return "fabric-mod-consumers" }
+              "neoforge" { return "neoforge-mod-consumers" }
+              default { throw "Unknown smoke consumer: $Consumer" }
+            }
           }
-          & $outputPath --root $smokeRoot --consumer forge instance delete ci-forge
-          if ($LASTEXITCODE -ne 0) { throw "Windows Forge smoke cleanup failed" }
 
-          & $outputPath --root $smokeRoot server create ci-win --type custom --jar $jarPath
-          if ($LASTEXITCODE -ne 0) { throw "Windows server create failed" }
-          & $outputPath --root $smokeRoot instance activate ci-win
-          if ($LASTEXITCODE -ne 0) { throw "Windows instance activation failed" }
-          & $outputPath --root $smokeRoot instance activate ci-win
-          if ($LASTEXITCODE -ne 0) { throw "Windows instance re-activation failed" }
-          & $outputPath --root $smokeRoot runtime start ci-win --no-console
-          if ($LASTEXITCODE -ne 0) { throw "Windows runtime start failed" }
-          $status = (& $outputPath --root $smokeRoot runtime status ci-win) -join "`n"
-          if ($LASTEXITCODE -ne 0 -or $status -notmatch "Runtime running") {
-            throw "Windows runtime status failed: $status"
+          function Invoke-ServerLifecycle {
+            param(
+              [string] $Consumer,
+              [string] $Type,
+              [string] $Name,
+              [string] $Jar,
+              [switch] $ExpectRestart
+            )
+            & $outputPath --root $smokeRoot --consumer $Consumer server create $Name --type $Type --jar $Jar
+            if ($LASTEXITCODE -ne 0) { throw "Windows $Type server create failed" }
+
+            $consumerRoot = Get-ConsumerRoot $Consumer
+            $instanceRoot = Join-Path $smokeRoot "consumers\$consumerRoot\instances\$Name"
+            if ($Type -eq "forge" -or $Type -eq "neoforge") {
+              $metadata = Get-Content -Raw -LiteralPath (Join-Path $instanceRoot ".server-source")
+              if ($metadata -notmatch "args_file_rel=.*win_args.txt") {
+                throw "Windows $Type metadata did not select win_args.txt: $metadata"
+              }
+            }
+
+            & $outputPath --root $smokeRoot --consumer $Consumer instance activate $Name
+            if ($LASTEXITCODE -ne 0) { throw "Windows $Type activation failed" }
+            & $outputPath --root $smokeRoot --consumer $Consumer instance activate $Name
+            if ($LASTEXITCODE -ne 0) { throw "Windows $Type re-activation failed" }
+            & $outputPath --root $smokeRoot --consumer $Consumer runtime start $Name --no-console
+            if ($LASTEXITCODE -ne 0) { throw "Windows $Type runtime start failed" }
+
+            $status = (& $outputPath --root $smokeRoot --consumer $Consumer runtime status $Name) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $status -notmatch "Runtime running") {
+              throw "Windows $Type runtime status failed: $status"
+            }
+
+            if ($ExpectRestart) {
+              $pidFile = Join-Path $smokeRoot "consumers\$consumerRoot\state\runtime\$Name.pid"
+              $initialPid = (Get-Content -Raw -LiteralPath $pidFile).Trim()
+              $restarted = $false
+              for ($attempt = 0; $attempt -lt 45; $attempt++) {
+                Start-Sleep -Seconds 1
+                if (-not (Test-Path -LiteralPath $pidFile)) { continue }
+                $currentPid = (Get-Content -Raw -LiteralPath $pidFile).Trim()
+                $restartStatus = (& $outputPath --root $smokeRoot --consumer $Consumer runtime status $Name) -join "`n"
+                if ($LASTEXITCODE -eq 0 -and $currentPid -ne $initialPid -and $restartStatus -match "Runtime running") {
+                  $restarted = $true
+                  break
+                }
+              }
+              if (-not $restarted) { throw "Windows $Type /restart lifecycle failed" }
+            }
+
+            & $outputPath --root $smokeRoot --consumer $Consumer runtime stop $Name
+            if ($LASTEXITCODE -ne 0) { throw "Windows $Type runtime stop failed" }
+            $stoppedStatus = (& $outputPath --root $smokeRoot --consumer $Consumer runtime status $Name) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $stoppedStatus -notmatch "Runtime stopped") {
+              throw "Windows $Type stopped status failed: $stoppedStatus"
+            }
+            & $outputPath --root $smokeRoot --consumer $Consumer instance delete $Name
+            if ($LASTEXITCODE -ne 0) { throw "Windows $Type instance delete failed" }
           }
-          $restartScript = Join-Path $smokeRoot "consumers\plugin-consumers\instances\ci-win\multiplexor-restart.cmd"
-          & cmd.exe /d /c $restartScript
-          if ($LASTEXITCODE -ne 0) { throw "Windows restart worker failed" }
-          $restartStatus = (& $outputPath --root $smokeRoot runtime status ci-win) -join "`n"
-          if ($LASTEXITCODE -ne 0 -or $restartStatus -notmatch "Runtime running") {
-            throw "Windows restarted status failed: $restartStatus"
-          }
-          & $outputPath --root $smokeRoot runtime stop ci-win
-          if ($LASTEXITCODE -ne 0) { throw "Windows runtime stop failed" }
-          $stoppedStatus = (& $outputPath --root $smokeRoot runtime status ci-win) -join "`n"
-          if ($LASTEXITCODE -ne 0 -or $stoppedStatus -notmatch "Runtime stopped") {
-            throw "Windows stopped status failed: $stoppedStatus"
-          }
-          & $outputPath --root $smokeRoot plugins watch-stop
-          if ($LASTEXITCODE -ne 0) { throw "Windows watcher stop failed" }
+
+          Invoke-ServerLifecycle -Consumer plugin -Type paper -Name ci-paper -Jar $jarPath
           $sharedIris = Join-Path $smokeRoot "consumers\plugin-consumers\shared-plugin-data\iris\packs"
           $sharedSentinel = Join-Path $sharedIris "keep.txt"
           Set-Content -LiteralPath $sharedSentinel -Value "preserve shared target"
-          & $outputPath --root $smokeRoot instance delete ci-win
-          if ($LASTEXITCODE -ne 0) { throw "Windows instance delete failed" }
+          Invoke-ServerLifecycle -Consumer plugin -Type purpur -Name ci-purpur -Jar $jarPath -ExpectRestart
+          foreach ($type in @("folia", "canvas", "leaf", "spigot", "custom")) {
+            Invoke-ServerLifecycle -Consumer plugin -Type $type -Name "ci-$type" -Jar $jarPath
+          }
+          Invoke-ServerLifecycle -Consumer forge -Type forge -Name ci-forge -Jar $installerPath
+          Invoke-ServerLifecycle -Consumer fabric -Type fabric -Name ci-fabric -Jar $jarPath
+          Invoke-ServerLifecycle -Consumer neoforge -Type neoforge -Name ci-neoforge -Jar $installerPath
+
           if (-not (Test-Path -LiteralPath $sharedSentinel)) {
             throw "Windows junction deletion traversed the shared Iris target"
+          }
+          & $outputPath --root $smokeRoot --consumer plugin plugins watch-stop
+          if ($LASTEXITCODE -ne 0) { throw "Windows plugin watcher stop failed" }
+          foreach ($consumer in @("forge", "fabric", "neoforge")) {
+            & $outputPath --root $smokeRoot --consumer $consumer mods watch-stop
+            if ($LASTEXITCODE -ne 0) { throw "Windows $consumer watcher stop failed" }
           }
 
       - name: Package macOS executable

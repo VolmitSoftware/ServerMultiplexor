@@ -9726,7 +9726,11 @@ class NativeCommandService {
       '${const JsonEncoder.withIndent('  ').convert(merged)}\n',
     );
     if (!instanceOpsLinkedToShared) {
-      _replaceWithSymlink(instanceOpsPath, sharedOpsPath);
+      _replaceWithSymlink(
+        instanceOpsPath,
+        sharedOpsPath,
+        allowWindowsFileCopy: false,
+      );
       if (Platform.isWindows &&
           !FileSystemEntity.identicalSync(instanceOpsPath, sharedOpsPath)) {
         File(instanceOpsPath).deleteSyncSafe();
@@ -10879,7 +10883,11 @@ class NativeCommandService {
     }
   }
 
-  void _replaceWithSymlink(String linkPath, String targetPath) {
+  void _replaceWithSymlink(
+    String linkPath,
+    String targetPath, {
+    bool allowWindowsFileCopy = true,
+  }) {
     if (_windowsDeleteReparsePointIfPresent(linkPath)) {
       // Removed without traversing its target.
     }
@@ -10940,16 +10948,21 @@ class NativeCommandService {
       );
     }
     if (targetType == FileSystemEntityType.file) {
-      final ProcessResult hardLink = Process.runSync('cmd.exe', <String>[
-        '/d',
-        '/c',
-        'mklink',
-        '/H',
+      final ProcessResult hardLink = Process.runSync('fsutil.exe', <String>[
+        'hardlink',
+        'create',
         linkPath,
         absoluteTarget,
       ], runInShell: false);
       if (hardLink.exitCode == 0) {
         return;
+      }
+      if (!allowWindowsFileCopy) {
+        throw _NativeCommandException(
+          'Could not create Windows hard link $linkPath -> $absoluteTarget: '
+          '${hardLink.stderr}',
+          1,
+        );
       }
       File(absoluteTarget).copySync(linkPath);
       return;

@@ -157,7 +157,7 @@ void main() {
     );
     expect(
       first.environment['RCLONE_CONFIG_MX_REMOTE_ABC12345_KNOWN_HOSTS_FILE'],
-      fixture.knownHosts.path,
+      p.normalize(fixture.knownHosts.path),
     );
     expect(
       first.environment['RCLONE_CONFIG_MX_REMOTE_ABC12345_KEY_FILE'],
@@ -520,7 +520,10 @@ Future<void> main(List<String> arguments) async {
         serverIdentifier: 'ABC12345',
       );
 
-      expect(opened, '${fixture.mountRoot.path}/remote/lobby--abc12345');
+      expect(
+        opened,
+        p.join(fixture.mountRoot.path, 'remote', 'lobby--abc12345'),
+      );
       expect(fixture.runner.openedPath, opened);
       expect(fixture.runner.started, hasLength(2));
       expect(fixture.runner.started.first.alive, isFalse);
@@ -597,7 +600,10 @@ Future<void> main(List<String> arguments) async {
       serverIdentifier: 'abc12345',
     );
 
-    expect(opened, '${fixture.mountRoot.path}/remote/renamed-lobby--abc12345');
+    expect(
+      opened,
+      p.join(fixture.mountRoot.path, 'remote', 'renamed-lobby--abc12345'),
+    );
     expect(fixture.runner.openedPath, opened);
     expect(fixture.runner.started, hasLength(2));
     expect(fixture.runner.started.first.alive, isFalse);
@@ -607,7 +613,11 @@ Future<void> main(List<String> arguments) async {
   test('Drive install migrates the exact legacy metadata mount root', () async {
     final _Fixture fixture = _Fixture();
     addTearDown(fixture.close);
-    final String legacyRoot = '${fixture.metadata.path}/pterodactyl-smb/files';
+    final String legacyRoot = p.join(
+      fixture.metadata.path,
+      'pterodactyl-smb',
+      'files',
+    );
     fixture.settingsStore.save(
       PterodactylSmbSettings(
         shareName: 'Multiplexor',
@@ -630,7 +640,10 @@ Future<void> main(List<String> arguments) async {
       profileIds: const <String>['remote'],
     );
 
-    expect(installed.mountRoot, '${fixture.temporary.path}/Multiplexor Drive');
+    expect(
+      installed.mountRoot,
+      p.join(fixture.temporary.path, 'Multiplexor Drive'),
+    );
   });
 
   test('host-key scan returns fingerprints without trusting them', () async {
@@ -884,7 +897,7 @@ Future<void> main(List<String> arguments) async {
             knownHostsFile: fixture.knownHosts.path,
           )
           .mountRoot,
-      fixture.mountRoot.path,
+      p.normalize(fixture.mountRoot.path),
     );
   });
 
@@ -1392,7 +1405,7 @@ Future<void> main(List<String> arguments) async {
           'message',
           allOf(
             contains('Nothing was deleted or hidden'),
-            contains(mountPoint.path),
+            contains(p.normalize(mountPoint.path)),
           ),
         ),
       ),
@@ -1535,7 +1548,7 @@ Future<void> main(List<String> arguments) async {
             allOf(
               contains('now maps to'),
               contains('renamed-lobby--abc12345'),
-              contains(priorFolder.path),
+              contains(p.normalize(priorFolder.path)),
             ),
           ),
         ),

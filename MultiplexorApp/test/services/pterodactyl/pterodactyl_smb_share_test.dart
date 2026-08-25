@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_models.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_process.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_share.dart';
+import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
@@ -32,7 +33,7 @@ void main() {
       '-n',
       '/usr/sbin/sharing',
       '-a',
-      '/tmp/multiplexor-files',
+      p.normalize('/tmp/multiplexor-files'),
       '-S',
       'Multiplexor',
       '-s',

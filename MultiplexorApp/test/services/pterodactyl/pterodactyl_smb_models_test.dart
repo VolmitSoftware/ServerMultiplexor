@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_models.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_models.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_service.dart';
+import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
@@ -54,7 +55,10 @@ void main() {
           ),
         );
 
-    expect(target.relativeDirectory, 'remote/my-server-2j--abc12345');
+    expect(
+      target.relativeDirectory,
+      p.join('remote', 'my-server-2j--abc12345'),
+    );
     expect(target.remoteName, 'mx_remote_abc12345');
     expect(target.sftpUsername, 'operator.abc12345');
   });
