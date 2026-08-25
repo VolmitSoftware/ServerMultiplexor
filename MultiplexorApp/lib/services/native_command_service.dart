@@ -6947,12 +6947,9 @@ class NativeCommandService {
         tokenFile.readAsStringSync().trim() != ownerToken) {
       throw _NativeCommandException('Invalid Windows restart owner token', 2);
     }
-    final File restartLog = File(_runtimeRestartLogFile(profile, instance));
-    restartLog.createSync(recursive: true);
-    restartLog.writeAsStringSync(
-      '${DateTime.now().toIso8601String()} Restart requested for '
-      '${profile.shortName}/$instance\n',
-      mode: FileMode.append,
+    io.write(
+      '[INFO] ${DateTime.now().toIso8601String()} Restart requested for '
+      '${profile.shortName}/$instance',
     );
     File(_runtimeRestartPendingFile(profile, instance))
       ..createSync(recursive: true)
