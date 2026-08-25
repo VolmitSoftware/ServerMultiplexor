@@ -222,7 +222,21 @@ jobs:
                   break
                 }
               }
-              if (-not $restarted) { throw "Windows $Type /restart lifecycle failed" }
+              if (-not $restarted) {
+                $restartLog = Join-Path $smokeRoot "consumers\$consumerRoot\state\runtime\$Name.restart.log"
+                $runtimeLog = Join-Path $smokeRoot "consumers\$consumerRoot\state\runtime\$Name.log"
+                $restartDetails = if (Test-Path -LiteralPath $restartLog) {
+                  Get-Content -Raw -LiteralPath $restartLog
+                } else {
+                  "<missing restart log>"
+                }
+                $runtimeDetails = if (Test-Path -LiteralPath $runtimeLog) {
+                  Get-Content -Raw -LiteralPath $runtimeLog
+                } else {
+                  "<missing runtime log>"
+                }
+                throw "Windows $Type /restart lifecycle failed.`nRestart log:`n$restartDetails`nRuntime log:`n$runtimeDetails"
+              }
             }
 
             & $outputPath --root $smokeRoot --consumer $Consumer runtime stop $Name
