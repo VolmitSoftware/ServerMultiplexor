@@ -5300,7 +5300,23 @@ class InteractiveWizard {
   }
 
   bool _isValidInstanceName(String input) {
-    return RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(input.trim());
+    final String value = input.trim();
+    if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(value)) {
+      return false;
+    }
+    if (value.endsWith('.') || value.endsWith(' ')) {
+      return false;
+    }
+    if (!Platform.isWindows) {
+      return true;
+    }
+    final String stem = value.split('.').first.toUpperCase();
+    return stem != 'CON' &&
+        stem != 'PRN' &&
+        stem != 'AUX' &&
+        stem != 'NUL' &&
+        !RegExp(r'^COM[1-9]$').hasMatch(stem) &&
+        !RegExp(r'^LPT[1-9]$').hasMatch(stem);
   }
 
   List<String> _serverTypesForActiveConsumer() {

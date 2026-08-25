@@ -21,6 +21,7 @@ void main() {
           '.server.properties.multiplexor-a1.part',
           'world/.level.dat.multiplexor-a1-stage.part',
           'world/session.lock',
+          'multiplexor-restart.cmd',
         ]) {
           expect(
             PterodactylTransferPathPolicy.excludes(path),
@@ -570,15 +571,14 @@ void main() {
     });
 
     test('pull preserves isolation and infers a safe Forge argsfile', () async {
-      _write(
-        remote.folder.path,
-        'libraries/net/minecraftforge/forge/unix_args.txt',
-        '--launchTarget forge_server',
-      );
+      final String argsFileName = Platform.isWindows
+          ? 'win_args.txt'
+          : 'unix_args.txt';
+      final String argsFilePath =
+          'libraries/net/minecraftforge/forge/$argsFileName';
+      _write(remote.folder.path, argsFilePath, '--launchTarget forge_server');
       _write(remote.folder.path, 'world/level.dat', 'world');
-      remote.target = _target(
-        launchArgsFile: 'libraries/net/minecraftforge/forge/unix_args.txt',
-      );
+      remote.target = _target(launchArgsFile: argsFilePath);
 
       final PterodactylTransferPlan plan = await service.planPull(
         profileId: 'panel',
@@ -597,12 +597,7 @@ void main() {
       ).readAsStringSync();
       expect(metadata, contains('isolated=true'));
       expect(metadata, contains('launch=argsfile'));
-      expect(
-        metadata,
-        contains(
-          'args_file_rel=libraries/net/minecraftforge/forge/unix_args.txt',
-        ),
-      );
+      expect(metadata, contains('args_file_rel=$argsFilePath'));
       expect(result.warnings, isEmpty);
     });
 

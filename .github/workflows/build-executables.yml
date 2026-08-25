@@ -85,6 +85,14 @@ jobs:
         working-directory: MultiplexorApp
         run: dart pub get
 
+      - name: Analyze
+        working-directory: MultiplexorApp
+        run: dart analyze
+
+      - name: Test
+        working-directory: MultiplexorApp
+        run: dart test
+
       - name: Compile macOS executable
         if: runner.os == 'macOS'
         shell: bash
@@ -112,6 +120,82 @@ jobs:
           $actual = (& $outputPath version | Select-Object -First 1)
           if ($actual -ne "Multiplexor CLI v$env:BUILD_VERSION") {
             throw "Expected Multiplexor CLI v$env:BUILD_VERSION, got $actual"
+          }
+
+      - name: Smoke-test Windows create and runtime lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "multiplexor-windows-smoke"
+          $fakeTools = Join-Path $env:RUNNER_TEMP "multiplexor-fake-tools"
+          New-Item -ItemType Directory -Force -Path $fakeTools | Out-Null
+          $fakeJavaSource = Join-Path $fakeTools "fake_java.dart"
+          @'
+          import 'dart:async';
+          import 'dart:io';
+          Future<void> main(List<String> args) async {
+            if (args.contains('--installServer')) {
+              final Directory argsDir = Directory('libraries\\fake')..createSync(recursive: true);
+              File('${argsDir.path}\\win_args.txt').writeAsStringSync('--launchTarget forge_server');
+              File('run.bat').writeAsStringSync('java @libraries\\fake\\win_args.txt %*');
+              return;
+            }
+            stdout.writeln('fake java started');
+            await Future<void>.delayed(const Duration(seconds: 8));
+          }
+          '@ | Set-Content -LiteralPath $fakeJavaSource
+          dart compile exe $fakeJavaSource -o (Join-Path $fakeTools "java.exe")
+          $env:PATH = "$fakeTools;$env:PATH"
+          $env:MULTIPLEXOR_FORCE_WINDOWS_LINK_FALLBACK = "1"
+          $jarPath = Join-Path $env:RUNNER_TEMP "fake-server.jar"
+          Set-Content -LiteralPath $jarPath -Value "fake server"
+          $installerPath = Join-Path $env:RUNNER_TEMP "forge-installer.jar"
+          Set-Content -LiteralPath $installerPath -Value "fake installer"
+
+          & $outputPath --root $smokeRoot --consumer forge server create ci-forge --type forge --jar $installerPath
+          if ($LASTEXITCODE -ne 0) { throw "Windows Forge installer create failed" }
+          $forgeMetadata = Get-Content -Raw -LiteralPath (Join-Path $smokeRoot "consumers\forge-mod-consumers\instances\ci-forge\.server-source")
+          if ($forgeMetadata -notmatch "args_file_rel=.*win_args.txt") {
+            throw "Windows Forge metadata did not select win_args.txt: $forgeMetadata"
+          }
+          & $outputPath --root $smokeRoot --consumer forge instance delete ci-forge
+          if ($LASTEXITCODE -ne 0) { throw "Windows Forge smoke cleanup failed" }
+
+          & $outputPath --root $smokeRoot server create ci-win --type custom --jar $jarPath
+          if ($LASTEXITCODE -ne 0) { throw "Windows server create failed" }
+          & $outputPath --root $smokeRoot instance activate ci-win
+          if ($LASTEXITCODE -ne 0) { throw "Windows instance activation failed" }
+          & $outputPath --root $smokeRoot instance activate ci-win
+          if ($LASTEXITCODE -ne 0) { throw "Windows instance re-activation failed" }
+          & $outputPath --root $smokeRoot runtime start ci-win --no-console
+          if ($LASTEXITCODE -ne 0) { throw "Windows runtime start failed" }
+          $status = (& $outputPath --root $smokeRoot runtime status ci-win) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $status -notmatch "Runtime running") {
+            throw "Windows runtime status failed: $status"
+          }
+          $restartScript = Join-Path $smokeRoot "consumers\plugin-consumers\instances\ci-win\multiplexor-restart.cmd"
+          & cmd.exe /d /c $restartScript
+          if ($LASTEXITCODE -ne 0) { throw "Windows restart worker failed" }
+          $restartStatus = (& $outputPath --root $smokeRoot runtime status ci-win) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $restartStatus -notmatch "Runtime running") {
+            throw "Windows restarted status failed: $restartStatus"
+          }
+          & $outputPath --root $smokeRoot runtime stop ci-win
+          if ($LASTEXITCODE -ne 0) { throw "Windows runtime stop failed" }
+          $stoppedStatus = (& $outputPath --root $smokeRoot runtime status ci-win) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $stoppedStatus -notmatch "Runtime stopped") {
+            throw "Windows stopped status failed: $stoppedStatus"
+          }
+          & $outputPath --root $smokeRoot plugins watch-stop
+          if ($LASTEXITCODE -ne 0) { throw "Windows watcher stop failed" }
+          $sharedIris = Join-Path $smokeRoot "consumers\plugin-consumers\shared-plugin-data\iris\packs"
+          $sharedSentinel = Join-Path $sharedIris "keep.txt"
+          Set-Content -LiteralPath $sharedSentinel -Value "preserve shared target"
+          & $outputPath --root $smokeRoot instance delete ci-win
+          if ($LASTEXITCODE -ne 0) { throw "Windows instance delete failed" }
+          if (-not (Test-Path -LiteralPath $sharedSentinel)) {
+            throw "Windows junction deletion traversed the shared Iris target"
           }
 
       - name: Package macOS executable

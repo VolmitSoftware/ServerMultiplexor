@@ -173,7 +173,9 @@ List<String> _normalizePositionalArgs(List<String> args) {
       return args;
     case 'server':
       if (sub == 'create') {
-        return injectSingleValue('name', 2);
+        // `server create` is forwarded intact to the native parser so repeated
+        // --artifact options are preserved. Its instance name is positional.
+        return args;
       }
       return args;
     case 'instance':

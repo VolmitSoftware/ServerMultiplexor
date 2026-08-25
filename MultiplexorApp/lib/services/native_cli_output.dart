@@ -1,7 +1,7 @@
 part of 'native_command_service.dart';
 
 class _NativeIoBuffer {
-  _NativeIoBuffer({required this.stream});
+  _NativeIoBuffer({required this.stream, this.logFile});
 
   static const String _reset = '\x1B[0m';
   static const String _bold = '\x1B[1m';
@@ -12,11 +12,13 @@ class _NativeIoBuffer {
   static const String _gray = '\x1B[90m';
 
   final bool stream;
+  final File? logFile;
   final StringBuffer _stdout = StringBuffer();
   final StringBuffer _stderr = StringBuffer();
 
   void write(String line) {
     _stdout.writeln(line);
+    logFile?.writeAsStringSync('$line\n', mode: FileMode.append, flush: true);
     if (stream) {
       stdout.writeln(_styleLine(line, error: false));
     }
@@ -24,6 +26,7 @@ class _NativeIoBuffer {
 
   void error(String line) {
     _stderr.writeln(line);
+    logFile?.writeAsStringSync('$line\n', mode: FileMode.append, flush: true);
     if (stream) {
       stderr.writeln(_styleLine(line, error: true));
     }

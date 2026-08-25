@@ -356,6 +356,12 @@ Future<int> _runRuntime(List<String> rest) async {
   final parsed = _parse(rest.skip(1).toList(growable: false));
 
   switch (sub) {
+    // Internal Windows workers are token-gated by the native runtime service.
+    // Keep them out of public help while forwarding their argument list intact.
+    case 'host':
+    case 'restart-worker':
+      await handleNativePassthrough(<String>['runtime', ...rest]);
+      return 0;
     // Routed here rather than through the native passthrough: the monitor
     // owns the terminal and, interactively, the wizard's own flows.
     case 'watch':

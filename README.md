@@ -10,7 +10,7 @@ Every branch push runs the executable workflow. It assigns the build a monotonic
 
 - `dart` 3.10+ (`./start.sh` compiles `MultiplexorApp/` on demand)
 - `java` 17+ (or whatever your target server requires)
-- `git`, `tmux` (tmux is required for `runtime start` / `runtime console`)
+- `git`; `tmux` is required for interactive runtime consoles on macOS/Linux
 - Node.js 22+ and npm (required for Mineflayer gameplay tests)
 - macOS Keychain for persistent Pterodactyl credentials (origin-bound
   environment credentials are available for CI/non-macOS sessions)
@@ -202,17 +202,17 @@ Single `server create` and `build <type>` commands must run under the consumer t
 
 ### runtime — start, stop, attach
 
-`tmux` is required. Every session is named after the consumer + instance and logs to `consumers/<profile>/state/runtime/<instance>.log`.
+macOS/Linux runtimes use named `tmux` sessions. Windows uses a native background host built into `multiplexor.exe`, so the release executable does not require Git Bash, `sh`, `chmod`, or `tmux`. Runtime output is captured under `consumers/<profile>/state/runtime/<instance>.log`; the Minecraft server also writes `logs/latest.log` inside its instance. Windows start/stop/status, watchers, and `/restart` are supported, while interactive and combined console attachment remain tmux-only.
 
 | Command | What it does |
 |---------|--------------|
 | `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, clickable action bars, and the wizard's flows behind the cards and `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
-| `runtime start [instance] [--no-console]` | Safely sync dropins, start the instance, and attach its console. Locally modified instance jars are preserved with a warning. `--no-console` returns immediately. |
-| `runtime stop [instance] [--graceful]` | Force-stop the instance immediately (kills the tmux session, then SIGTERM/SIGKILL any tracked pids). With `--graceful`, sends `stop` to the server console and waits up to 60s for a clean world-save shutdown, falling back to a force-stop on timeout. |
-| `runtime restart [instance] [--no-console]` | Stop and start again. Attaches console unless `--no-console`. |
-| `runtime console [instance]` | Attach to a running console. Esc detaches; the server keeps running. Mouse wheel scrolls; drag-select copies to clipboard. |
-| `runtime consoles` | Open every running console in a tmux grid. |
-| `runtime consoles-lateral` | Open every running console side-by-side. |
+| `runtime start [instance] [--no-console]` | Safely sync dropins and start the instance. On macOS/Linux it attaches the tmux console unless `--no-console`; Windows starts the native background host and prints its log paths. Locally modified instance jars are preserved with a warning. |
+| `runtime stop [instance] [--graceful]` | Force-stop the tracked runtime immediately. With `--graceful`, sends `stop` through tmux on macOS/Linux or RCON on Windows, waits up to 60s for a clean world-save shutdown, then force-stops on timeout. |
+| `runtime restart [instance] [--no-console]` | Stop and start again. Attaches the tmux console on macOS/Linux unless `--no-console`; Windows prints the background runtime's log paths. |
+| `runtime console [instance]` | Attach to a tmux console on macOS/Linux. On Windows, ensure the background runtime is started and print its server and Multiplexor log paths. |
+| `runtime consoles` | Open every running console in a tmux grid on macOS/Linux; list Windows runtime log paths. |
+| `runtime consoles-lateral` | Open every running console side-by-side on macOS/Linux; list Windows runtime log paths. |
 | `runtime status [instance]` | Print the runtime state of one instance. |
 | `runtime stats [instance]` | Show live stats for running servers: player count (`online/max`), state, CPU, memory, uptime, port, and version, plus the names of online players. With no instance, scans every consumer for running servers; with an instance, reports that one. Player counts come from a Server List Ping, so neither `enable-query` nor `enable-rcon` is required. `CPU` (`4.2%`) and `MEM` (resident set, e.g. `2.4G`) come from a single batched `ps` over the tracked server pids; `CPU`, `MEM`, and `UPTIME` read `n/a` when the value is unavailable rather than showing a zero. |
 | `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked<TAB>isolated`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`; the final two columns are `locked`/`unlocked` and `isolated`/`shared`. |
@@ -222,11 +222,11 @@ Single `server create` and `build <type>` commands must run under the consumer t
 | `runtime settings presets` | List available JVM presets (`aikar`, `vanilla`, `conservative`). |
 | `runtime settings set-heap <2G\|4G\|...>` | Set JVM `-Xmx`. |
 | `runtime settings set-preset <name>` | Apply a JVM preset's flags. |
-| `runtime settings set-wrap <on\|off>` | Toggle tmux console line wrap. Default `off` (long server lines clip at the pane edge instead of wrapping). Takes effect on next `runtime start`. **The `logs/latest.log` file is unaffected** — wrapping is purely a terminal-renderer concern. |
+| `runtime settings set-wrap <on\|off>` | Toggle tmux console line wrap on macOS/Linux. Default `off` (long server lines clip at the pane edge instead of wrapping). Takes effect on next `runtime start`. **The `logs/latest.log` file is unaffected** — wrapping is purely a terminal-renderer concern. |
 | `runtime settings set-log-format <minimal\|default>` | Toggle the console log pattern. Default `minimal` — strips the `[HH:mm:ss INFO]` prefix from the console only, and filters out the `RCON Client … started` / `… shutting down` lines the manager's live TPS polling triggers (from both the console and `logs/latest.log`). `default` restores the server's bundled Log4j pattern (RCON lines reappear). **The `logs/latest.log` file always keeps the full timestamped pattern.** Takes effect on next `runtime start`. |
 | `runtime settings reset` | Restore default runtime settings. |
 
-Paper/Spigot/Purpur `/restart` is wired to a per-instance `multiplexor-restart.sh`, so `/restart` re-enters Multiplexor instead of exiting permanently. While that script waits, the instance reports `restarting`.
+Paper/Spigot/Purpur `/restart` is wired to a per-instance `multiplexor-restart.sh` on macOS/Linux or `multiplexor-restart.cmd` on Windows, so `/restart` re-enters Multiplexor instead of exiting permanently. While that script waits, the instance reports `restarting`.
 
 ### gameplay — Mineflayer player-protocol QA
 

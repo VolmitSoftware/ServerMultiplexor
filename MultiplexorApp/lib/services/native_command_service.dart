@@ -254,7 +254,7 @@ class NativeCommandService {
         return 0;
       case 'delete':
         final name = _requireValue(rest, 'Usage: instance delete <name>');
-        _instanceDelete(profile, name);
+        await _instanceDelete(profile, name, io: io);
         io.write('[OK] Deleted instance: $name');
         return 0;
       case 'reset':
@@ -490,16 +490,19 @@ class NativeCommandService {
       }
 
       if (auth == 'offline' && !parsed.flag('no-op')) {
-        final ProcessResult opResult = await _runProcess('tmux', <String>[
-          'send-keys',
-          '-t',
-          _tmuxSessionName(profile, instance),
-          'op $username',
-          'Enter',
-        ]);
-        if (opResult.exitCode != 0) {
+        final bool opEnabled = Platform.isWindows
+            ? await _instanceSendRconCommand(profile, instance, 'op $username')
+            : (await _runProcess('tmux', <String>[
+                    'send-keys',
+                    '-t',
+                    _tmuxSessionName(profile, instance),
+                    'op $username',
+                    'Enter',
+                  ])).exitCode ==
+                  0;
+        if (!opEnabled) {
           throw _NativeCommandException(
-            'Failed to grant operator status to $username: ${opResult.stderr}',
+            'Failed to grant operator status to $username',
             1,
           );
         }
@@ -651,7 +654,11 @@ class NativeCommandService {
     }
 
     if (!everywhere) {
-      _instanceDeleteAll(profile, interactive: io.stream && !force);
+      await _instanceDeleteAll(
+        profile,
+        interactive: io.stream && !force,
+        io: io,
+      );
       io.write('[OK] Deleted all instances');
       return 0;
     }
@@ -680,7 +687,7 @@ class NativeCommandService {
     ];
     for (final p in profiles) {
       try {
-        _instanceDeleteAll(p, interactive: false);
+        await _instanceDeleteAll(p, interactive: false, io: io);
         io.write('[OK] Deleted all instances in ${p.shortName}');
       } catch (e) {
         io.error('[WARN] Failed wiping ${p.shortName}: $e');
@@ -965,7 +972,9 @@ class NativeCommandService {
     final type = (options['type'] ?? source['type'] ?? 'purpur').toLowerCase();
     final jarOverride = options['jar'];
 
-    if (await _runtimeRunning(profile, name)) {
+    final bool windowsHostRunning =
+        Platform.isWindows && await _runtimeWindowsHostOwned(profile, name);
+    if (windowsHostRunning || await _runtimeRunning(profile, name)) {
       io.write('[INFO] Stopping $name before update');
       await _runtimeStop(profile, name, io);
     }
@@ -1192,7 +1201,7 @@ class NativeCommandService {
         if (await _runtimeRunning(profile, staging)) {
           await _runtimeStop(profile, staging, io);
         }
-        _instanceDelete(profile, staging);
+        await _instanceDelete(profile, staging, io: io);
         io.write('[OK] Removed staging instance: $staging');
       } else {
         io.write('[INFO] Staging instance kept: $staging');
@@ -1482,6 +1491,18 @@ class NativeCommandService {
     final profile = _activeConsumer;
 
     switch (sub) {
+      case 'host':
+        if (!Platform.isWindows || rest.length != 2) {
+          throw _NativeCommandException('Internal runtime host misuse', 2);
+        }
+        await _runtimeWindowsHost(profile, rest[0], rest[1]);
+        return 0;
+      case 'restart-worker':
+        if (!Platform.isWindows || rest.length != 2) {
+          throw _NativeCommandException('Internal restart worker misuse', 2);
+        }
+        await _runtimeWindowsRestartWorker(profile, rest[0], rest[1], io);
+        return 0;
       case 'start':
         final parsed = _parseRuntimeTargetArgs(rest, allowNoConsole: true);
         await _runtimeStart(profile, parsed.instance, io);
@@ -2109,7 +2130,9 @@ class NativeCommandService {
     await requireTool('dart', const <String>['--version']);
     await requireTool('java', const <String>['-version']);
     await requireTool('git', const <String>['--version']);
-    await requireTool('tmux', const <String>['-V']);
+    if (!Platform.isWindows) {
+      await requireTool('tmux', const <String>['-V']);
+    }
     await requireTool('node', const <String>['--version']);
     await requireTool('npm', const <String>['--version']);
     final GameplayTestService gameplayHarness = GameplayTestService(
@@ -2604,7 +2627,23 @@ class NativeCommandService {
         2,
       );
     }
+    if (Platform.isWindows && _isWindowsReservedFileName(name)) {
+      throw _NativeCommandException(
+        '$label name is reserved by Windows: $name',
+        2,
+      );
+    }
     return name;
+  }
+
+  bool _isWindowsReservedFileName(String value) {
+    final String stem = value.split('.').first.toUpperCase();
+    return stem == 'CON' ||
+        stem == 'PRN' ||
+        stem == 'AUX' ||
+        stem == 'NUL' ||
+        RegExp(r'^COM[1-9]$').hasMatch(stem) ||
+        RegExp(r'^LPT[1-9]$').hasMatch(stem);
   }
 
   String _uniqueInstanceName(ConsumerProfile profile, String base) {
@@ -3918,6 +3957,53 @@ class NativeCommandService {
     final commandName = mods ? 'mods' : 'plugins';
     final session = _pluginsWatchSessionName(profile, mods: mods);
 
+    if (Platform.isWindows) {
+      final String pidFilePath = _pluginsWatchPidFile(profile, mods: mods);
+      final int? existingPid = _readPid(pidFilePath);
+      if (existingPid != null && await _windowsWatcherOwned(profile, mods)) {
+        io.write(
+          '[WARN] ${mods ? 'Mods' : 'Plugins'} watcher already running '
+          '(pid $existingPid)',
+        );
+        return 0;
+      }
+      File(pidFilePath).deleteSyncSafe();
+      File(_pluginsWatchTokenFile(profile, mods: mods)).deleteSyncSafe();
+      File(logFilePath).createSync(recursive: true);
+      final String ownerToken = _newPinSalt();
+      final _SelfInvocation invocation = _selfInvocation(
+        profile: profile,
+        args: <String>[commandName, 'watch-daemon', ownerToken],
+      );
+      final Process process = await Process.start(
+        invocation.executable,
+        invocation.arguments,
+        workingDirectory: context.rootDir,
+        mode: ProcessStartMode.detached,
+        runInShell: false,
+      );
+      File(_pluginsWatchTokenFile(profile, mods: mods))
+        ..createSync(recursive: true)
+        ..writeAsStringSync('$ownerToken\n');
+      for (var attempt = 0; attempt < 30; attempt++) {
+        final int? daemonPid = _readPid(pidFilePath);
+        if (daemonPid != null && await _windowsWatcherOwned(profile, mods)) {
+          io.write('[OK] ${mods ? 'Mods' : 'Plugins'} watcher started');
+          io.write('[INFO] pid: $daemonPid');
+          io.write('[INFO] source: ${_dropinsSource(profile, mods: mods)}');
+          return 0;
+        }
+        if (!await _pidRunning(process.pid)) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      throw _NativeCommandException(
+        'Failed to start ${mods ? 'mods' : 'plugins'} watcher',
+        1,
+      );
+    }
+
     if (!await _tmuxInstalled()) {
       throw _NativeCommandException(
         'tmux is required for watcher start/stop/status. Install tmux and retry.',
@@ -3982,6 +4068,34 @@ class NativeCommandService {
     required bool mods,
   }) async {
     final session = _pluginsWatchSessionName(profile, mods: mods);
+    if (Platform.isWindows) {
+      final String pidFilePath = _pluginsWatchPidFile(profile, mods: mods);
+      final int? daemonPid = _readPid(pidFilePath);
+      if (daemonPid == null) {
+        File(pidFilePath).deleteSyncSafe();
+        File(_pluginsWatchTokenFile(profile, mods: mods)).deleteSyncSafe();
+        io.write('[WARN] ${mods ? 'Mods' : 'Plugins'} watcher is not running');
+        return 0;
+      }
+      if (!await _windowsWatcherOwned(profile, mods)) {
+        throw _NativeCommandException(
+          'Refusing to stop unverified Windows watcher pid $daemonPid. '
+          'The ownership files were preserved for inspection.',
+          1,
+        );
+      }
+      if (!await _killWindowsProcessTree(daemonPid)) {
+        throw _NativeCommandException(
+          'Failed to stop Windows watcher pid $daemonPid. '
+          'The ownership files were preserved for retry.',
+          1,
+        );
+      }
+      File(pidFilePath).deleteSyncSafe();
+      File(_pluginsWatchTokenFile(profile, mods: mods)).deleteSyncSafe();
+      io.write('[OK] ${mods ? 'Mods' : 'Plugins'} watcher stopped');
+      return 0;
+    }
     if (!await _tmuxSessionExists(session)) {
       io.write('[WARN] ${mods ? 'Mods' : 'Plugins'} watcher is not running');
       return 0;
@@ -4011,10 +4125,19 @@ class NativeCommandService {
     final logFilePath = _pluginsWatchLogFile(profile, mods: mods);
     final source = _dropinsSource(profile, mods: mods);
     final session = _pluginsWatchSessionName(profile, mods: mods);
-    final running = await _tmuxSessionExists(session);
+    final int? daemonPid = Platform.isWindows
+        ? _readPid(_pluginsWatchPidFile(profile, mods: mods))
+        : null;
+    final bool running = Platform.isWindows
+        ? daemonPid != null && await _windowsWatcherOwned(profile, mods)
+        : await _tmuxSessionExists(session);
 
     io.write('watch:   ${running ? 'running' : 'stopped'}');
-    io.write('session: ${running ? session : 'none'}');
+    if (Platform.isWindows) {
+      io.write('pid:     ${running ? daemonPid : 'none'}');
+    } else {
+      io.write('session: ${running ? session : 'none'}');
+    }
     io.write('source:  $source');
     io.write('log:     $logFilePath');
     return 0;
@@ -4025,6 +4148,12 @@ class NativeCommandService {
     _NativeIoBuffer io, {
     required bool mods,
   }) async {
+    final _NativeIoBuffer daemonIo = Platform.isWindows
+        ? _NativeIoBuffer(
+            stream: false,
+            logFile: File(_pluginsWatchLogFile(profile, mods: mods)),
+          )
+        : io;
     final pidFilePath = _pluginsWatchPidFile(profile, mods: mods);
     File(pidFilePath)
       ..createSync(recursive: true)
@@ -4032,15 +4161,15 @@ class NativeCommandService {
 
     final source = _dropinsSource(profile, mods: mods);
     final sourceDir = Directory(source)..createSync(recursive: true);
-    io.write(
+    daemonIo.write(
       '[INFO] ${mods ? 'Mods' : 'Plugins'} watcher daemon started (pid $pid)',
     );
-    io.write('[INFO] Watching: $source');
+    daemonIo.write('[INFO] Watching: $source');
 
     Future<void> syncAll() async {
       final instances = _instanceNames(profile);
       if (instances.isEmpty) {
-        io.write('[INFO] No instances available for watcher sync');
+        daemonIo.write('[INFO] No instances available for watcher sync');
         return;
       }
 
@@ -4055,7 +4184,7 @@ class NativeCommandService {
             preserveLocalChanges: true,
           );
           if (report.copiedJars.isNotEmpty) {
-            io.write(
+            daemonIo.write(
               '[SYNC] $instance copied ${report.copiedJars.length} jar(s): ${report.copiedJars.join(', ')}',
             );
             await _announceDropinSync(
@@ -4066,21 +4195,21 @@ class NativeCommandService {
           }
           if (report.failedJars.isNotEmpty) {
             for (final failed in report.failedJars) {
-              io.error('[WARN] Watch sync failed for $instance: $failed');
+              daemonIo.error('[WARN] Watch sync failed for $instance: $failed');
             }
           }
           if (report.preservedJars.isNotEmpty) {
-            io.error(
+            daemonIo.error(
               '[WARN] Watch sync preserved local jar(s) in $instance: ${report.preservedJars.join(', ')}',
             );
-            io.error(
+            daemonIo.error(
               '[WARN] Run ${mods ? 'mods' : 'plugins'} sync $instance to replace them from dropins.',
             );
           }
         } catch (e, st) {
-          io.error('[WARN] Watch sync failed for $instance: $e');
+          daemonIo.error('[WARN] Watch sync failed for $instance: $e');
           if (context.verbose) {
-            io.error('$st');
+            daemonIo.error('$st');
           }
         }
       }
@@ -4102,7 +4231,9 @@ class NativeCommandService {
             preserveLocalChanges: true,
           );
           if (report.copiedJars.isNotEmpty) {
-            io.write('[SYNC] $instance copied ${report.copiedJars.join(', ')}');
+            daemonIo.write(
+              '[SYNC] $instance copied ${report.copiedJars.join(', ')}',
+            );
             await _announceDropinSync(
               profile,
               instance,
@@ -4111,21 +4242,21 @@ class NativeCommandService {
           }
           if (report.failedJars.isNotEmpty) {
             for (final failed in report.failedJars) {
-              io.error('[WARN] Watch sync failed for $instance: $failed');
+              daemonIo.error('[WARN] Watch sync failed for $instance: $failed');
             }
           }
           if (report.preservedJars.isNotEmpty) {
-            io.error(
+            daemonIo.error(
               '[WARN] Watch sync preserved local jar(s) in $instance: ${report.preservedJars.join(', ')}',
             );
-            io.error(
+            daemonIo.error(
               '[WARN] Run ${mods ? 'mods' : 'plugins'} sync $instance to replace them from dropins.',
             );
           }
         } catch (e, st) {
-          io.error('[WARN] Watch sync failed for $instance: $e');
+          daemonIo.error('[WARN] Watch sync failed for $instance: $e');
           if (context.verbose) {
-            io.error('$st');
+            daemonIo.error('$st');
           }
         }
       }
@@ -4248,7 +4379,9 @@ class NativeCommandService {
     await sigtermSub?.cancel();
     await sighupSub?.cancel();
     File(pidFilePath).deleteSyncSafe();
-    io.write('[INFO] ${mods ? 'Mods' : 'Plugins'} watcher daemon stopped');
+    daemonIo.write(
+      '[INFO] ${mods ? 'Mods' : 'Plugins'} watcher daemon stopped',
+    );
     return 0;
   }
 
@@ -4906,12 +5039,27 @@ class NativeCommandService {
       // Fall through to rm -rf.
     }
 
-    final result = Process.runSync('rm', <String>['-rf', resolved]);
-    if (result.exitCode != 0 || Directory(resolved).existsSync()) {
+    if (Platform.isWindows) {
       io.error(
-        '[WARN] Could not remove BuildTools work dir $resolved: '
-        '${result.stderr.toString().trim()}',
+        '[WARN] Could not remove BuildTools work dir $resolved; '
+        'close processes using it and remove it manually.',
       );
+      return;
+    }
+
+    try {
+      final ProcessResult result = Process.runSync('rm', <String>[
+        '-rf',
+        resolved,
+      ]);
+      if (result.exitCode != 0 || Directory(resolved).existsSync()) {
+        io.error(
+          '[WARN] Could not remove BuildTools work dir $resolved: '
+          '${result.stderr.toString().trim()}',
+        );
+      }
+    } on ProcessException catch (error) {
+      io.error('[WARN] Could not remove BuildTools work dir $resolved: $error');
     }
   }
 
@@ -6340,8 +6488,11 @@ class NativeCommandService {
 
     final argsRel = _findInstalledServerArgsFile(instanceDir);
     if (argsRel == null) {
+      final String expected = Platform.isWindows
+          ? 'win_args.txt'
+          : 'unix_args.txt';
       throw _NativeCommandException(
-        'Installer completed but no unix_args.txt was found for $instance',
+        'Installer completed but no $expected was found for $instance',
         1,
       );
     }
@@ -6359,14 +6510,25 @@ class NativeCommandService {
   }
 
   String? _findInstalledServerArgsFile(String instanceDir) {
-    final runSh = File(p.join(instanceDir, 'run.sh'));
-    if (runSh.existsSync()) {
-      final text = runSh.readAsStringSync();
-      final match = RegExp(r"""@([^\s"'`]*unix_args\.txt)""").firstMatch(text);
+    final String argsFileName = Platform.isWindows
+        ? 'win_args.txt'
+        : 'unix_args.txt';
+    final File launcher = File(
+      p.join(instanceDir, Platform.isWindows ? 'run.bat' : 'run.sh'),
+    );
+    if (launcher.existsSync()) {
+      final String text = launcher.readAsStringSync();
+      final RegExpMatch? match = RegExp(
+        '@([^\\s"\'`]*${RegExp.escape(argsFileName)})',
+        caseSensitive: false,
+      ).firstMatch(text);
       if (match != null) {
         final candidate = match.group(1);
         if (candidate != null && candidate.trim().isNotEmpty) {
-          final normalized = candidate.trim();
+          final String normalized = candidate.trim().replaceAll(
+            Platform.isWindows ? '\\' : '/',
+            p.separator,
+          );
           final candidatePath = p.join(instanceDir, normalized);
           if (File(candidatePath).existsSync()) {
             return normalized;
@@ -6382,7 +6544,7 @@ class NativeCommandService {
       if (entity is! File) {
         continue;
       }
-      if (p.basename(entity.path) == 'unix_args.txt') {
+      if (p.basename(entity.path).toLowerCase() == argsFileName.toLowerCase()) {
         candidates.add(p.relative(entity.path, from: instanceDir));
       }
     }
@@ -6416,7 +6578,7 @@ class NativeCommandService {
     }
     _instanceEnsureRestartScript(profile, instance);
 
-    if (!await _tmuxInstalled()) {
+    if (!Platform.isWindows && !await _tmuxInstalled()) {
       throw _NativeCommandException(
         'tmux is required for runtime start/console. Install tmux and retry.',
         2,
@@ -6460,6 +6622,7 @@ class NativeCommandService {
 
     await _runtimePrepareInstancePort(profile, instance, io);
     _ensureRconConfigured(profile, instance);
+    await _runtimePrepareRconPort(profile, instance, io);
 
     final launch = _runtimeLaunchTarget(profile, instance);
     if (!File(launch.path).existsSync()) {
@@ -6491,6 +6654,12 @@ class NativeCommandService {
         log4jConfigPath: log4jPath,
       ),
     ];
+
+    if (Platform.isWindows) {
+      await _runtimeStartWindowsHost(profile, instance, logFile, io);
+      return;
+    }
+
     final javaCommand = javaCommandParts.map(_shellQuote).join(' ');
     final serverPidFile = _runtimeServerPidFile(profile, instance);
 
@@ -6512,7 +6681,7 @@ class NativeCommandService {
     File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
     File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
 
-    if (await _tmuxSessionExists(tmuxSession)) {
+    if (!Platform.isWindows && await _tmuxSessionExists(tmuxSession)) {
       await _runProcess('tmux', <String>['kill-session', '-t', tmuxSession]);
     }
 
@@ -6558,6 +6727,178 @@ class NativeCommandService {
     io.write('[INFO] Log: ${logFile.path}');
   }
 
+  Future<void> _runtimeStartWindowsHost(
+    ConsumerProfile profile,
+    String instance,
+    File logFile,
+    _NativeIoBuffer io,
+  ) async {
+    final String serverPidFile = _runtimeServerPidFile(profile, instance);
+    File(serverPidFile).deleteSyncSafe();
+    File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
+    File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
+    File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
+
+    final String ownerToken = _newPinSalt();
+    final _SelfInvocation invocation = _selfInvocation(
+      profile: profile,
+      args: <String>['runtime', 'host', instance, ownerToken],
+    );
+    final Process host = await Process.start(
+      invocation.executable,
+      invocation.arguments,
+      workingDirectory: context.rootDir,
+      mode: ProcessStartMode.detached,
+      runInShell: false,
+    );
+    File(_runtimeHostPidFile(profile, instance))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('${host.pid}\n');
+    File(_runtimeHostTokenFile(profile, instance))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('$ownerToken\n');
+
+    int? serverPid;
+    for (var attempt = 0; attempt < 40; attempt++) {
+      serverPid = _readPid(serverPidFile);
+      if (serverPid != null && await _pidRunning(serverPid)) {
+        break;
+      }
+      if (!await _runtimeWindowsHostOwned(profile, instance)) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (serverPid != null) {
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    }
+    final bool hostOwned = await _runtimeWindowsHostOwned(profile, instance);
+    if (serverPid == null || !hostOwned || !await _pidRunning(serverPid)) {
+      if (!hostOwned) {
+        File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
+        File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
+      }
+      if (serverPid == null || !await _pidRunning(serverPid)) {
+        File(serverPidFile).deleteSyncSafe();
+      }
+      throw _NativeCommandException(
+        'Failed to start runtime for $instance. Check log: ${logFile.path}',
+        1,
+      );
+    }
+
+    File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
+    io.write('[OK] Runtime started: $instance');
+    io.write('[INFO] mode: Windows background host');
+    io.write('[INFO] server pid: $serverPid');
+    io.write('[INFO] Log: ${logFile.path}');
+  }
+
+  Future<void> _runtimeWindowsHost(
+    ConsumerProfile profile,
+    String instance,
+    String ownerToken,
+  ) async {
+    if (!RegExp(r'^[0-9a-f]{32,128}$').hasMatch(ownerToken)) {
+      throw _NativeCommandException('Invalid Windows runtime owner token', 2);
+    }
+    final File logFile = File(_runtimeLogFile(profile, instance));
+    logFile.createSync(recursive: true);
+    final IOSink log = logFile.openWrite(mode: FileMode.append);
+    Process? server;
+    try {
+      final _LaunchTarget launch = _runtimeLaunchTarget(profile, instance);
+      final _RuntimeSettingsData settings = _runtimeSettingsLoad(profile);
+      final String workingDirectory = _runtimeLaunchWorkingDir(
+        profile,
+        instance,
+      );
+      String? log4jPath;
+      if (settings.consoleLogFormat == 'minimal') {
+        log4jPath = _ensureMinimalLog4jConfig(profile, instance);
+      }
+      server = await Process.start(
+        'java',
+        _javaArgsForLaunch(
+          launch,
+          settings,
+          workingDirectory: workingDirectory,
+          log4jConfigPath: log4jPath,
+        ),
+        workingDirectory: workingDirectory,
+        runInShell: false,
+      );
+      File(_runtimeServerPidFile(profile, instance))
+        ..createSync(recursive: true)
+        ..writeAsStringSync('${server.pid}\n');
+
+      final Future<void> stdoutDone = server.stdout.forEach(log.add);
+      final Future<void> stderrDone = server.stderr.forEach(log.add);
+      final int exitCode = await server.exitCode;
+      await Future.wait<void>(<Future<void>>[stdoutDone, stderrDone]);
+      log.writeln('[Multiplexor] Java exited with code $exitCode.');
+    } catch (error, stackTrace) {
+      log.writeln('[Multiplexor] Windows runtime host failed: $error');
+      if (context.verbose) {
+        log.writeln(stackTrace);
+      }
+      rethrow;
+    } finally {
+      final int? recordedPid = _readPid(
+        _runtimeServerPidFile(profile, instance),
+      );
+      await log.flush();
+      await log.close();
+      if (server == null || recordedPid == server.pid) {
+        File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
+      }
+      final File tokenFile = File(_runtimeHostTokenFile(profile, instance));
+      if (tokenFile.existsSync() &&
+          tokenFile.readAsStringSync().trim() == ownerToken) {
+        File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
+        tokenFile.deleteSyncSafe();
+      }
+    }
+  }
+
+  Future<void> _runtimeWindowsRestartWorker(
+    ConsumerProfile profile,
+    String instance,
+    String ownerToken,
+    _NativeIoBuffer io,
+  ) async {
+    final File tokenFile = File(_runtimeRestartTokenFile(profile, instance));
+    if (!RegExp(r'^[0-9a-f]{32,128}$').hasMatch(ownerToken) ||
+        !tokenFile.existsSync() ||
+        tokenFile.readAsStringSync().trim() != ownerToken) {
+      throw _NativeCommandException('Invalid Windows restart owner token', 2);
+    }
+    final File restartLog = File(_runtimeRestartLogFile(profile, instance));
+    restartLog.createSync(recursive: true);
+    restartLog.writeAsStringSync(
+      '${DateTime.now().toIso8601String()} Restart requested for '
+      '${profile.shortName}/$instance\n',
+      mode: FileMode.append,
+    );
+    File(_runtimeRestartPendingFile(profile, instance))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('${DateTime.now().toIso8601String()}\n');
+
+    for (var attempt = 0; attempt < 180; attempt++) {
+      if (!await _runtimeWindowsHostOwned(profile, instance)) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    if (await _runtimeWindowsHostOwned(profile, instance)) {
+      throw _NativeCommandException(
+        'Timed out waiting for the previous Windows runtime host to exit',
+        1,
+      );
+    }
+    await _runtimeStart(profile, instance, io);
+  }
+
   Future<void> _tmuxEnablePaneLogging(
     String tmuxSession,
     String logFilePath,
@@ -6585,7 +6926,14 @@ class NativeCommandService {
     final bool mods = !_isPluginConsumer(profile);
 
     final session = _pluginsWatchSessionName(profile, mods: mods);
-    if (await _tmuxSessionExists(session)) {
+    if (Platform.isWindows) {
+      final int? watcherPid = _readPid(
+        _pluginsWatchPidFile(profile, mods: mods),
+      );
+      if (watcherPid != null && await _windowsWatcherOwned(profile, mods)) {
+        return;
+      }
+    } else if (await _tmuxSessionExists(session)) {
       return;
     }
 
@@ -6604,6 +6952,9 @@ class NativeCommandService {
     int updatedCount,
   ) async {
     if (updatedCount <= 0) {
+      return;
+    }
+    if (Platform.isWindows) {
       return;
     }
     final session = _tmuxSessionName(profile, instance);
@@ -6652,6 +7003,22 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
+    if (Platform.isWindows) {
+      if (!await _runtimeRunning(profile, instance)) {
+        io.write('[INFO] Runtime is not running. Starting $instance...');
+        await _runtimeStart(profile, instance, io);
+      }
+      io.write(
+        '[INFO] Windows runs the server in the background; interactive tmux '
+        'attachment is unavailable.',
+      );
+      io.write(
+        '[INFO] Server log: ${p.join(_instanceDir(profile, instance), 'logs', 'latest.log')}',
+      );
+      io.write('[INFO] Multiplexor log: ${_runtimeLogFile(profile, instance)}');
+      return;
+    }
+
     if (!await _tmuxInstalled()) {
       throw _NativeCommandException(
         'tmux is required for runtime start/console. Install tmux and retry.',
@@ -6683,6 +7050,24 @@ class NativeCommandService {
     _NativeIoBuffer io, {
     required String layout,
   }) async {
+    if (Platform.isWindows) {
+      final List<String> running = await _runtimeListRunning(profile);
+      if (running.isEmpty) {
+        io.write('[WARN] No running servers.');
+        return;
+      }
+      running.sort();
+      for (final String instance in running) {
+        io.write(
+          '$instance\t${p.join(_instanceDir(profile, instance), 'logs', 'latest.log')}',
+        );
+      }
+      io.write(
+        '[INFO] Windows background runtimes do not support a combined '
+        'interactive console.',
+      );
+      return;
+    }
     if (!await _tmuxInstalled()) {
       throw _NativeCommandException(
         'tmux is required for runtime consoles. Install tmux and retry.',
@@ -7120,7 +7505,7 @@ class NativeCommandService {
 
     final tmuxSession = _tmuxSessionName(profile, instance);
     var stopped = false;
-    if (await _tmuxSessionExists(tmuxSession)) {
+    if (!Platform.isWindows && await _tmuxSessionExists(tmuxSession)) {
       final killResult = await _runProcess('tmux', <String>[
         'kill-session',
         '-t',
@@ -7129,6 +7514,48 @@ class NativeCommandService {
       if (killResult.exitCode == 0) {
         stopped = true;
       }
+    }
+
+    if (Platform.isWindows) {
+      final int? hostPid = _readPid(_runtimeHostPidFile(profile, instance));
+      if (hostPid != null) {
+        if (!await _runtimeWindowsHostOwned(profile, instance)) {
+          throw _NativeCommandException(
+            'Refusing to stop unverified Windows runtime host pid $hostPid. '
+            'The ownership files were preserved for inspection.',
+            1,
+          );
+        }
+        if (!await _killWindowsProcessTree(hostPid)) {
+          throw _NativeCommandException(
+            'Failed to stop Windows runtime host pid $hostPid. '
+            'The ownership files were preserved for retry.',
+            1,
+          );
+        }
+        stopped = true;
+      } else {
+        final int? unownedServerPid = _readPid(
+          _runtimeServerPidFile(profile, instance),
+        );
+        if (unownedServerPid != null && await _pidRunning(unownedServerPid)) {
+          throw _NativeCommandException(
+            'Refusing to stop unowned Windows server pid $unownedServerPid. '
+            'Restart Multiplexor after verifying the process manually.',
+            1,
+          );
+        }
+      }
+      File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
+      File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
+      File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
+      File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
+      io.write(
+        stopped
+            ? '[OK] Runtime stopped: $instance'
+            : '[WARN] Runtime stopped: $instance',
+      );
+      return;
     }
 
     final pids = <int>{};
@@ -7142,13 +7569,13 @@ class NativeCommandService {
     }
 
     if (pids.isNotEmpty) {
-      for (final pid in pids) {
+      for (final int pid in pids) {
         Process.killPid(pid, ProcessSignal.sigterm);
       }
 
       for (var i = 0; i < 20; i++) {
         var allStopped = true;
-        for (final pid in pids) {
+        for (final int pid in pids) {
           if (await _pidRunning(pid)) {
             allStopped = false;
             break;
@@ -7160,7 +7587,7 @@ class NativeCommandService {
         await Future<void>.delayed(const Duration(milliseconds: 150));
       }
 
-      for (final pid in pids) {
+      for (final int pid in pids) {
         if (await _pidRunning(pid)) {
           Process.killPid(pid, ProcessSignal.sigkill);
         }
@@ -7192,6 +7619,33 @@ class NativeCommandService {
     }
 
     final tmuxSession = _tmuxSessionName(profile, instance);
+    if (Platform.isWindows) {
+      final bool requested = await _instanceSendRconCommand(
+        profile,
+        instance,
+        'stop',
+      );
+      if (!requested) {
+        io.write('[WARN] RCON is unavailable; forcing: $instance');
+        await _runtimeStop(profile, instance, io);
+        return;
+      }
+      final int? serverPid = _readPid(_runtimeServerPidFile(profile, instance));
+      final DateTime deadline = DateTime.now().add(const Duration(seconds: 60));
+      while (serverPid != null &&
+          DateTime.now().isBefore(deadline) &&
+          await _pidRunning(serverPid)) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+      if (serverPid != null && await _pidRunning(serverPid)) {
+        io.write('[WARN] Graceful stop timed out; forcing: $instance');
+        await _runtimeStop(profile, instance, io);
+        return;
+      }
+      File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
+      io.write('[OK] Runtime stopped (graceful): $instance');
+      return;
+    }
     if (!await _tmuxSessionExists(tmuxSession)) {
       // No live console to talk to; defer to the hard path so pid files are
       // cleaned up and the result is reported once.
@@ -7250,7 +7704,8 @@ class NativeCommandService {
     }
 
     final tmuxSession = _tmuxSessionName(profile, instance);
-    var tmuxRunning = await _tmuxSessionExists(tmuxSession);
+    var tmuxRunning =
+        !Platform.isWindows && await _tmuxSessionExists(tmuxSession);
     if (tmuxRunning && !await _tmuxSessionHasLivePane(tmuxSession)) {
       await _runProcess('tmux', <String>['kill-session', '-t', tmuxSession]);
       tmuxRunning = false;
@@ -7258,7 +7713,11 @@ class NativeCommandService {
     final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
     final consolePid = _readPid(_runtimeConsolePidFile(profile, instance));
     final serverRunning =
-        serverPid != null && await _pidRunning(serverPid) && !tmuxRunning;
+        serverPid != null &&
+        await _pidRunning(serverPid) &&
+        !tmuxRunning &&
+        (!Platform.isWindows ||
+            await _runtimeWindowsHostOwned(profile, instance));
     final consoleRunning =
         consolePid != null && await _pidRunning(consolePid) && !tmuxRunning;
 
@@ -7471,7 +7930,7 @@ class NativeCommandService {
     String instance,
   ) async {
     final session = _tmuxSessionName(profile, instance);
-    if (await _tmuxSessionExists(session)) {
+    if (!Platform.isWindows && await _tmuxSessionExists(session)) {
       final result = await _runProcess('tmux', <String>[
         'display-message',
         '-p',
@@ -7520,8 +7979,14 @@ class NativeCommandService {
   }
 
   Future<bool> _runtimeRunning(ConsumerProfile profile, String instance) async {
+    if (Platform.isWindows) {
+      final int? serverPid = _readPid(_runtimeServerPidFile(profile, instance));
+      return serverPid != null &&
+          await _runtimeWindowsHostOwned(profile, instance) &&
+          await _pidRunning(serverPid);
+    }
     final session = _tmuxSessionName(profile, instance);
-    if (await _tmuxSessionExists(session)) {
+    if (!Platform.isWindows && await _tmuxSessionExists(session)) {
       if (await _tmuxSessionHasLivePane(session)) {
         return true;
       }
@@ -7529,7 +7994,10 @@ class NativeCommandService {
     }
 
     final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
-    if (serverPid != null && await _pidRunning(serverPid)) {
+    if (serverPid != null &&
+        await _pidRunning(serverPid) &&
+        (!Platform.isWindows ||
+            await _runtimeWindowsHostOwned(profile, instance))) {
       return true;
     }
 
@@ -7611,7 +8079,7 @@ class NativeCommandService {
   ) async {
     final restartPending = _runtimeRestartPending(profile, instance);
     final session = _tmuxSessionName(profile, instance);
-    if (await _tmuxSessionExists(session)) {
+    if (!Platform.isWindows && await _tmuxSessionExists(session)) {
       if (await _tmuxSessionHasLivePane(session)) {
         final fromLog = classifyRuntimeLogTail(
           _runtimeLogTail(profile, instance),
@@ -7638,8 +8106,20 @@ class NativeCommandService {
     }
 
     final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
-    if (serverPid != null && await _pidRunning(serverPid)) {
-      return RuntimeState.running;
+    if (serverPid != null &&
+        await _pidRunning(serverPid) &&
+        (!Platform.isWindows ||
+            await _runtimeWindowsHostOwned(profile, instance))) {
+      final RuntimeState fromLog = classifyRuntimeLogTail(
+        _runtimeLogTail(profile, instance),
+      );
+      if (fromLog == RuntimeState.running ||
+          (fromLog == RuntimeState.starting &&
+              _runtimeLogHasReadyMarker(profile, instance))) {
+        File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
+        return RuntimeState.running;
+      }
+      return restartPending ? RuntimeState.restarting : fromLog;
     }
     final consolePid = _readPid(_runtimeConsolePidFile(profile, instance));
     if (consolePid != null && await _pidRunning(consolePid)) {
@@ -7712,11 +8192,112 @@ class NativeCommandService {
 
   Future<bool> _pidRunning(int pid) async {
     try {
+      if (Platform.isWindows) {
+        final ProcessResult result = await Process.run('tasklist.exe', <String>[
+          '/FI',
+          'PID eq $pid',
+          '/FO',
+          'CSV',
+          '/NH',
+        ], runInShell: false);
+        if (result.exitCode != 0) {
+          return false;
+        }
+        return RegExp(
+          '^"[^"]+","$pid",',
+          multiLine: true,
+        ).hasMatch(result.stdout.toString());
+      }
       final result = await Process.run('kill', <String>['-0', '$pid']);
       return result.exitCode == 0;
     } catch (_) {
       return false;
     }
+  }
+
+  Future<bool> _runtimeWindowsHostOwned(
+    ConsumerProfile profile,
+    String instance,
+  ) async {
+    if (!Platform.isWindows) {
+      return false;
+    }
+    final int? hostPid = _readPid(_runtimeHostPidFile(profile, instance));
+    final File tokenFile = File(_runtimeHostTokenFile(profile, instance));
+    if (hostPid == null || !tokenFile.existsSync()) {
+      return false;
+    }
+    final String token = tokenFile.readAsStringSync().trim();
+    if (!RegExp(r'^[0-9a-f]{32,128}$').hasMatch(token)) {
+      return false;
+    }
+    return _windowsProcessCommandLineContains(hostPid, token);
+  }
+
+  Future<bool> _windowsWatcherOwned(ConsumerProfile profile, bool mods) async {
+    if (!Platform.isWindows) {
+      return false;
+    }
+    final int? watcherPid = _readPid(_pluginsWatchPidFile(profile, mods: mods));
+    final File tokenFile = File(_pluginsWatchTokenFile(profile, mods: mods));
+    if (watcherPid == null || !tokenFile.existsSync()) {
+      return false;
+    }
+    final String token = tokenFile.readAsStringSync().trim();
+    if (!RegExp(r'^[0-9a-f]{32,128}$').hasMatch(token)) {
+      return false;
+    }
+    return _windowsProcessCommandLineContains(watcherPid, token);
+  }
+
+  Future<bool> _windowsProcessCommandLineContains(
+    int pid,
+    String marker,
+  ) async {
+    try {
+      final ProcessResult result = await Process.run('powershell.exe', <String>[
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        r'$p = Get-CimInstance Win32_Process -Filter '
+            r'("ProcessId = " + $args[0]) -ErrorAction SilentlyContinue; '
+            r'if ($null -ne $p -and $null -ne $p.CommandLine -and '
+            r'$p.CommandLine.Contains($args[1])) { exit 0 } else { exit 1 }',
+        '$pid',
+        marker,
+      ], runInShell: false);
+      return result.exitCode == 0;
+    } on ProcessException {
+      return false;
+    }
+  }
+
+  Future<bool> _killWindowsProcessTree(int pid) async {
+    try {
+      final ProcessResult result = await Process.run('taskkill.exe', <String>[
+        '/PID',
+        '$pid',
+        '/T',
+        '/F',
+      ], runInShell: false);
+      if (result.exitCode != 0) {
+        return false;
+      }
+    } on ProcessException {
+      try {
+        if (!Process.killPid(pid, ProcessSignal.sigkill)) {
+          return false;
+        }
+      } catch (_) {}
+    }
+    for (var attempt = 0; attempt < 20; attempt++) {
+      if (!await _pidRunning(pid)) {
+        return true;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return !await _pidRunning(pid);
   }
 
   String _runtimeSettingsFile(ConsumerProfile profile) {
@@ -8002,7 +8583,8 @@ class NativeCommandService {
 
   String _runtimeLaunchWorkingDir(ConsumerProfile profile, String instance) {
     final instanceDir = _instanceDir(profile, instance);
-    if (!instanceDir.contains('[') && !instanceDir.contains(']')) {
+    if (Platform.isWindows ||
+        (!instanceDir.contains('[') && !instanceDir.contains(']'))) {
       return instanceDir;
     }
 
@@ -8048,7 +8630,11 @@ class NativeCommandService {
   }
 
   String _externalInstanceStoreRoot() {
-    final home = Platform.environment['HOME'];
+    final String? home = Platform.isWindows
+        ? Platform.environment['USERPROFILE'] ??
+              Platform.environment['LOCALAPPDATA'] ??
+              Platform.environment['HOME']
+        : Platform.environment['HOME'];
     if (home != null && home.trim().isNotEmpty) {
       return p.join(home, '.multiplexor');
     }
@@ -8173,6 +8759,60 @@ class NativeCommandService {
     }
 
     return false;
+  }
+
+  Future<void> _runtimePrepareRconPort(
+    ConsumerProfile profile,
+    String instance,
+    _NativeIoBuffer io,
+  ) async {
+    if (_instanceGetProperty(profile, instance, 'enable-rcon') != 'true') {
+      return;
+    }
+    final int serverPort = _instanceGetServerPort(profile, instance);
+    final int configured =
+        int.tryParse(
+          _instanceGetProperty(profile, instance, 'rcon.port') ?? '',
+        ) ??
+        (serverPort + 10000 <= 65535 ? serverPort + 10000 : serverPort - 10000);
+
+    Future<bool> available(int candidate) async {
+      if (candidate < 1 || candidate > 65535 || candidate == serverPort) {
+        return false;
+      }
+      for (final ConsumerProfile candidateProfile in ConsumerProfile.values) {
+        for (final String other in _instanceNames(candidateProfile)) {
+          if (candidateProfile == profile && other == instance) {
+            continue;
+          }
+          if (_instanceGetServerPort(candidateProfile, other) == candidate) {
+            return false;
+          }
+          final int? otherRcon = int.tryParse(
+            _instanceGetProperty(candidateProfile, other, 'rcon.port') ?? '',
+          );
+          if (otherRcon == candidate) {
+            return false;
+          }
+        }
+      }
+      return !await _runtimeSocketPortInUse(candidate);
+    }
+
+    int candidate = configured.clamp(1, 65535);
+    for (var attempt = 0; attempt < 65535; attempt++) {
+      if (await available(candidate)) {
+        if (candidate != configured) {
+          _instanceSetProperties(profile, instance, <String, String>{
+            'rcon.port': '$candidate',
+          });
+          io.write('[INFO] Auto-assigned RCON port for $instance: $candidate');
+        }
+        return;
+      }
+      candidate = candidate == 65535 ? 1024 : candidate + 1;
+    }
+    throw _NativeCommandException('No available RCON port found', 2);
   }
 
   Future<bool> _runtimeSocketPortInUse(int port) async {
@@ -9087,6 +9727,15 @@ class NativeCommandService {
     );
     if (!instanceOpsLinkedToShared) {
       _replaceWithSymlink(instanceOpsPath, sharedOpsPath);
+      if (Platform.isWindows &&
+          !FileSystemEntity.identicalSync(instanceOpsPath, sharedOpsPath)) {
+        File(instanceOpsPath).deleteSyncSafe();
+        throw _NativeCommandException(
+          'Windows could not create the shared ops hard link. '
+          'Place the workspace on an NTFS volume and retry.',
+          1,
+        );
+      }
     }
   }
 
@@ -9097,10 +9746,47 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
-    final scriptName = 'multiplexor-restart.sh';
+    final String scriptName = Platform.isWindows
+        ? 'multiplexor-restart.cmd'
+        : 'multiplexor-restart.sh';
     final scriptPath = p.join(instanceDir, scriptName);
     final restartLog = _runtimeRestartLogFile(profile, instance);
     Directory(p.dirname(restartLog)).createSync(recursive: true);
+
+    if (Platform.isWindows) {
+      final String restartOwnerToken = _newPinSalt();
+      File(_runtimeRestartTokenFile(profile, instance))
+        ..createSync(recursive: true)
+        ..writeAsStringSync('$restartOwnerToken\n');
+      final _SelfInvocation invocation = _selfInvocation(
+        profile: profile,
+        args: <String>[
+          'runtime',
+          'restart-worker',
+          instance,
+          restartOwnerToken,
+        ],
+      );
+      final String command = <String>[
+        invocation.executable,
+        ...invocation.arguments,
+      ].map(_windowsBatchQuote).join(' ');
+      File(scriptPath).writeAsStringSync(
+        <String>[
+          '@echo off',
+          'rem Generated by Multiplexor. Used by Minecraft /restart.',
+          '$command >> ${_windowsBatchQuote(restartLog)} 2>&1',
+          '',
+        ].join('\r\n'),
+      );
+      File(p.join(instanceDir, 'multiplexor-restart.sh')).deleteSyncSafe();
+      final File spigotConfig = File(p.join(instanceDir, 'spigot.yml'));
+      if (_isPluginConsumer(profile) || spigotConfig.existsSync()) {
+        _instanceConfigureSpigotRestartScript(spigotConfig, scriptName);
+      }
+      return;
+    }
+    File(p.join(instanceDir, 'multiplexor-restart.cmd')).deleteSyncSafe();
 
     final restartCommand = _selfInvocationCommand(
       profile: profile,
@@ -9137,7 +9823,10 @@ class NativeCommandService {
     ].join('\n');
 
     File(scriptPath).writeAsStringSync(script);
-    final chmod = Process.runSync('chmod', <String>['755', scriptPath]);
+    final ProcessResult chmod = Process.runSync('chmod', <String>[
+      '755',
+      scriptPath,
+    ]);
     if (chmod.exitCode != 0) {
       throw _NativeCommandException(
         'Failed to make restart script executable: ${chmod.stderr}',
@@ -9204,6 +9893,15 @@ class NativeCommandService {
         name == '.' ||
         name == '..') {
       throw _NativeCommandException('Instance name required', 2);
+    }
+    if (Platform.isWindows &&
+        (_isWindowsReservedFileName(name) ||
+            name.endsWith('.') ||
+            name.endsWith(' '))) {
+      throw _NativeCommandException(
+        'Instance name is not valid on Windows: $name',
+        2,
+      );
     }
 
     final instancePath = _instanceDir(profile, name);
@@ -9322,7 +10020,11 @@ class NativeCommandService {
     }
   }
 
-  void _instanceDelete(ConsumerProfile profile, String name) {
+  Future<void> _instanceDelete(
+    ConsumerProfile profile,
+    String name, {
+    _NativeIoBuffer? io,
+  }) async {
     final instancePath = _instanceDir(profile, name);
     final existingType = FileSystemEntity.typeSync(
       instancePath,
@@ -9333,44 +10035,30 @@ class NativeCommandService {
     }
     _ensureUnlocked(profile, name, action: 'deleted');
 
-    final serverPid = _readPid(_runtimeServerPidFile(profile, name));
-    if (serverPid != null) {
-      try {
-        Process.killPid(serverPid, ProcessSignal.sigkill);
-      } catch (_) {}
+    if (await _runtimeRunning(profile, name)) {
+      await _runtimeStop(profile, name, io ?? _NativeIoBuffer(stream: false));
     }
-
-    final consolePid = _readPid(_runtimeConsolePidFile(profile, name));
-    if (consolePid != null) {
-      try {
-        Process.killPid(consolePid, ProcessSignal.sigkill);
-      } catch (_) {}
-    }
-
-    try {
-      Process.runSync('tmux', <String>[
-        'kill-session',
-        '-t',
-        _tmuxSessionName(profile, name),
-      ], runInShell: true);
-    } catch (_) {}
 
     _deletePathEntity(instancePath, recursive: true);
     File(_runtimeServerPidFile(profile, name)).deleteSyncSafe();
     File(_runtimeConsolePidFile(profile, name)).deleteSyncSafe();
+    File(_runtimeHostPidFile(profile, name)).deleteSyncSafe();
+    File(_runtimeHostTokenFile(profile, name)).deleteSyncSafe();
+    File(_runtimeRestartTokenFile(profile, name)).deleteSyncSafe();
 
     final active = _currentInstance(profile);
     if (active == name) {
       File(_activeInstanceFile(profile)).deleteSyncSafe();
-      File(_activeInstanceLink(profile)).deleteSyncSafe();
-      File(_rootActiveInstanceLink()).deleteSyncSafe();
+      _deletePathEntity(_activeInstanceLink(profile), recursive: false);
+      _deletePathEntity(_rootActiveInstanceLink(), recursive: false);
     }
   }
 
-  void _instanceDeleteAll(
+  Future<void> _instanceDeleteAll(
     ConsumerProfile profile, {
     required bool interactive,
-  }) {
+    _NativeIoBuffer? io,
+  }) async {
     final entriesDir = Directory(_instancesDir(profile));
     if (!entriesDir.existsSync()) {
       return;
@@ -9400,7 +10088,7 @@ class NativeCommandService {
         stdout.writeln('[SKIP] $instance is locked; left untouched');
         continue;
       }
-      _instanceDelete(profile, instance);
+      await _instanceDelete(profile, instance, io: io);
       if (instance == active) {
         activeDeleted = true;
       }
@@ -9410,8 +10098,8 @@ class NativeCommandService {
     // removed; a surviving locked instance keeps its active status.
     if (active == null || activeDeleted) {
       File(_activeInstanceFile(profile)).deleteSyncSafe();
-      File(_activeInstanceLink(profile)).deleteSyncSafe();
-      File(_rootActiveInstanceLink()).deleteSyncSafe();
+      _deletePathEntity(_activeInstanceLink(profile), recursive: false);
+      _deletePathEntity(_rootActiveInstanceLink(), recursive: false);
     }
   }
 
@@ -9725,13 +10413,11 @@ class NativeCommandService {
     file.writeAsStringSync('${next.join('\n')}\n');
   }
 
-  /// Enables RCON in server.properties for Paper-family instances so the
-  /// dashboard can read live TPS. No-op for modded consumers (Forge/Fabric/
-  /// NeoForge expose no `tps` command) and for already-configured keys. Runs on
-  /// the start path; changes take effect on the next launch. A user-set
-  /// rcon.port / rcon.password is preserved.
+  /// Enables RCON in server.properties so Windows can issue lifecycle and
+  /// gameplay commands without tmux. Paper-family instances also use it for
+  /// dashboard TPS. A user-set rcon.port / rcon.password is preserved.
   void _ensureRconConfigured(ConsumerProfile profile, String instance) {
-    if (!_isPluginConsumer(profile)) {
+    if (!_isPluginConsumer(profile) && !Platform.isWindows) {
       return;
     }
     _ensureLocalServerProperties(profile, instance);
@@ -9805,6 +10491,47 @@ class NativeCommandService {
     final rng = Random.secure();
     final bytes = List<int>.generate(12, (_) => rng.nextInt(256));
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  Future<bool> _instanceSendRconCommand(
+    ConsumerProfile profile,
+    String instance,
+    String command,
+  ) async {
+    final String? portRaw = _instanceGetProperty(
+      profile,
+      instance,
+      'rcon.port',
+    );
+    final String? password = _instanceGetProperty(
+      profile,
+      instance,
+      'rcon.password',
+    );
+    final String? enabled = _instanceGetProperty(
+      profile,
+      instance,
+      'enable-rcon',
+    );
+    final int? port = portRaw == null ? null : int.tryParse(portRaw);
+    if (enabled?.toLowerCase() != 'true' ||
+        port == null ||
+        password == null ||
+        password.isEmpty) {
+      return false;
+    }
+    final String configuredHost = _instanceGetServerIp(profile, instance);
+    final String host = configuredHost == '0.0.0.0' || configuredHost == '::'
+        ? '127.0.0.1'
+        : configuredHost;
+    final String? response = await _rconPool.command(
+      host,
+      port,
+      password,
+      command,
+      timeout: const Duration(seconds: 2),
+    );
+    return response != null;
   }
 
   /// Queries live TPS over RCON. Null when RCON is unreachable, the server is
@@ -10153,6 +10880,9 @@ class NativeCommandService {
   }
 
   void _replaceWithSymlink(String linkPath, String targetPath) {
+    if (_windowsDeleteReparsePointIfPresent(linkPath)) {
+      // Removed without traversing its target.
+    }
     final type = FileSystemEntity.typeSync(linkPath, followLinks: false);
     switch (type) {
       case FileSystemEntityType.file:
@@ -10171,10 +10901,69 @@ class NativeCommandService {
     }
 
     Directory(p.dirname(linkPath)).createSync(recursive: true);
-    Link(linkPath).createSync(targetPath, recursive: true);
+    final bool forceWindowsFallback =
+        Platform.isWindows &&
+        Platform.environment['MULTIPLEXOR_FORCE_WINDOWS_LINK_FALLBACK'] == '1';
+    if (!forceWindowsFallback) {
+      try {
+        Link(linkPath).createSync(targetPath, recursive: true);
+        return;
+      } on FileSystemException {
+        if (!Platform.isWindows) {
+          rethrow;
+        }
+      }
+    }
+
+    final String absoluteTarget = p.isAbsolute(targetPath)
+        ? p.normalize(targetPath)
+        : p.normalize(p.join(p.dirname(linkPath), targetPath));
+    final FileSystemEntityType targetType = FileSystemEntity.typeSync(
+      absoluteTarget,
+    );
+    if (targetType == FileSystemEntityType.directory) {
+      final ProcessResult junction = Process.runSync('cmd.exe', <String>[
+        '/d',
+        '/c',
+        'mklink',
+        '/J',
+        linkPath,
+        absoluteTarget,
+      ], runInShell: false);
+      if (junction.exitCode == 0) {
+        return;
+      }
+      throw _NativeCommandException(
+        'Could not create Windows directory junction $linkPath -> '
+        '$absoluteTarget: ${junction.stderr}',
+        1,
+      );
+    }
+    if (targetType == FileSystemEntityType.file) {
+      final ProcessResult hardLink = Process.runSync('cmd.exe', <String>[
+        '/d',
+        '/c',
+        'mklink',
+        '/H',
+        linkPath,
+        absoluteTarget,
+      ], runInShell: false);
+      if (hardLink.exitCode == 0) {
+        return;
+      }
+      File(absoluteTarget).copySync(linkPath);
+      return;
+    }
+    throw _NativeCommandException(
+      'Link target does not exist: $absoluteTarget',
+      1,
+    );
   }
 
   void _deletePathEntity(String path, {required bool recursive}) {
+    if (_windowsDeleteReparsePointIfPresent(path)) {
+      return;
+    }
     final type = FileSystemEntity.typeSync(path, followLinks: false);
     switch (type) {
       case FileSystemEntityType.file:
@@ -10232,8 +11021,60 @@ class NativeCommandService {
   }
 
   bool _isLink(String path) {
-    return FileSystemEntity.typeSync(path, followLinks: false) ==
-        FileSystemEntityType.link;
+    if (FileSystemEntity.typeSync(path, followLinks: false) ==
+        FileSystemEntityType.link) {
+      return true;
+    }
+    return Platform.isWindows && _windowsIsReparsePoint(path);
+  }
+
+  bool _windowsIsReparsePoint(String path) {
+    if (!Platform.isWindows ||
+        FileSystemEntity.typeSync(path, followLinks: false) ==
+            FileSystemEntityType.notFound) {
+      return false;
+    }
+    try {
+      final ProcessResult result = Process.runSync('powershell.exe', <String>[
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        r'$item = Get-Item -LiteralPath $args[0] -Force '
+            r'-ErrorAction SilentlyContinue; '
+            r'if ($null -ne $item -and (($item.Attributes -band '
+            r'[IO.FileAttributes]::ReparsePoint) -ne 0)) '
+            r'{ exit 0 } else { exit 1 }',
+        path,
+      ], runInShell: false);
+      return result.exitCode == 0;
+    } on ProcessException {
+      return false;
+    }
+  }
+
+  bool _windowsDeleteReparsePointIfPresent(String path) {
+    if (!_windowsIsReparsePoint(path)) {
+      return false;
+    }
+    final FileSystemEntityType followedType = FileSystemEntity.typeSync(path);
+    final List<String> command = followedType == FileSystemEntityType.directory
+        ? <String>['/d', '/c', 'rmdir', path]
+        : <String>['/d', '/c', 'del', '/f', '/q', path];
+    final ProcessResult result = Process.runSync(
+      'cmd.exe',
+      command,
+      runInShell: false,
+    );
+    if (result.exitCode != 0 ||
+        FileSystemEntity.typeSync(path, followLinks: false) !=
+            FileSystemEntityType.notFound) {
+      throw _NativeCommandException(
+        'Could not remove Windows link $path: ${result.stderr}',
+        1,
+      );
+    }
+    return true;
   }
 
   String? _resolveLinkTargetAbsolute(String linkPath) {
@@ -10259,27 +11100,52 @@ class NativeCommandService {
     required ConsumerProfile profile,
     required List<String> args,
   }) {
-    final executable = Platform.resolvedExecutable;
-    final base = p.basename(executable).toLowerCase();
-    final coreArgs = <String>['--consumer', profile.shortName, ...args];
-    final commandParts = <String>[_shellQuote(executable)];
+    final _SelfInvocation invocation = _selfInvocation(
+      profile: profile,
+      args: args,
+    );
+    return <String>[
+      invocation.executable,
+      ...invocation.arguments,
+    ].map(_shellQuote).join(' ');
+  }
 
+  _SelfInvocation _selfInvocation({
+    required ConsumerProfile profile,
+    required List<String> args,
+  }) {
+    final String executable = Platform.resolvedExecutable;
+    final String base = p.basename(executable).toLowerCase();
+    final List<String> arguments = <String>[];
     if (base == 'dart' || base == 'dart.exe' || base.startsWith('dart')) {
-      final script = p.join(
+      arguments.add('run');
+      final String workspaceScript = p.join(
         context.rootDir,
         'MultiplexorApp',
         'bin',
         'main.dart',
       );
-      commandParts.add('run');
-      commandParts.add(_shellQuote(script));
+      final String runningScript = Platform.script.scheme == 'file'
+          ? Platform.script.toFilePath()
+          : '';
+      arguments.add(
+        p.basename(runningScript).toLowerCase() == 'main.dart'
+            ? runningScript
+            : workspaceScript,
+      );
     }
+    arguments.addAll(<String>[
+      '--root',
+      context.rootDir,
+      '--consumer',
+      profile.shortName,
+      ...args,
+    ]);
+    return _SelfInvocation(executable: executable, arguments: arguments);
+  }
 
-    for (final arg in coreArgs) {
-      commandParts.add(_shellQuote(arg));
-    }
-
-    return commandParts.join(' ');
+  String _windowsBatchQuote(String value) {
+    return '"${value.replaceAll('%', '%%').replaceAll('"', '""')}"';
   }
 
   String _requireValue(List<String> args, String usage) {
@@ -10377,6 +11243,14 @@ class NativeCommandService {
     return p.join(_runtimeDir(profile), '$instance.console.pid');
   }
 
+  String _runtimeHostPidFile(ConsumerProfile profile, String instance) {
+    return p.join(_runtimeDir(profile), '$instance.host.pid');
+  }
+
+  String _runtimeHostTokenFile(ConsumerProfile profile, String instance) {
+    return p.join(_runtimeDir(profile), '$instance.host.token');
+  }
+
   String _runtimeLogFile(ConsumerProfile profile, String instance) {
     return p.join(_runtimeDir(profile), '$instance.log');
   }
@@ -10387,6 +11261,10 @@ class NativeCommandService {
 
   String _runtimeRestartPendingFile(ConsumerProfile profile, String instance) {
     return p.join(_runtimeDir(profile), '$instance.restart-pending');
+  }
+
+  String _runtimeRestartTokenFile(ConsumerProfile profile, String instance) {
+    return p.join(_runtimeDir(profile), '$instance.restart.token');
   }
 
   String _pluginsWatchPidFile(ConsumerProfile profile, {required bool mods}) {
@@ -10400,6 +11278,13 @@ class NativeCommandService {
     return p.join(
       _stateDir(profile),
       mods ? 'mods-watch.log' : 'plugins-watch.log',
+    );
+  }
+
+  String _pluginsWatchTokenFile(ConsumerProfile profile, {required bool mods}) {
+    return p.join(
+      _stateDir(profile),
+      mods ? 'mods-watch.token' : 'plugins-watch.token',
     );
   }
 
@@ -10561,6 +11446,13 @@ class _NativeCommandException implements Exception {
 }
 
 enum _LaunchKind { jar, argsFile }
+
+class _SelfInvocation {
+  const _SelfInvocation({required this.executable, required this.arguments});
+
+  final String executable;
+  final List<String> arguments;
+}
 
 class _LaunchTarget {
   _LaunchTarget({required this.kind, required this.path});

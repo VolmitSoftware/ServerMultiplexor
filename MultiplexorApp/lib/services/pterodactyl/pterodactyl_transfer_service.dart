@@ -186,8 +186,11 @@ final class PterodactylTransferService {
       );
       final List<String> warnings = <String>[];
       if (!_writeLaunchMetadata(local, target)) {
+        final String argsFileName = Platform.isWindows
+            ? 'win_args.txt'
+            : 'unix_args.txt';
         warnings.add(
-          'No safe server jar or unix_args.txt was found; choose the Local '
+          'No safe server jar or $argsFileName was found; choose the Local '
           'launch target before starting this instance.',
         );
       }
@@ -1867,7 +1870,23 @@ final class PterodactylTransferService {
     }
     final File destination = File(p.join(local.path, '.server-source'));
     String? argsFile = target.launchArgsFile?.trim();
-    if (!_safeRelativeLaunchFile(local.path, argsFile, 'unix_args.txt')) {
+    final String preferredArgsName = Platform.isWindows
+        ? 'win_args.txt'
+        : 'unix_args.txt';
+    if (Platform.isWindows && argsFile != null) {
+      final String windowsCandidate = p.posix.join(
+        p.posix.dirname(argsFile.replaceAll('\\', '/')),
+        preferredArgsName,
+      );
+      if (_safeRelativeLaunchFile(
+        local.path,
+        windowsCandidate,
+        preferredArgsName,
+      )) {
+        argsFile = windowsCandidate;
+      }
+    }
+    if (!_safeRelativeLaunchFile(local.path, argsFile, preferredArgsName)) {
       argsFile = null;
     }
     if (jar == null && argsFile == null) {
@@ -1876,7 +1895,7 @@ final class PterodactylTransferService {
           .whereType<File>()
           .where(
             (File file) =>
-                p.basename(file.path).toLowerCase() == 'unix_args.txt',
+                p.basename(file.path).toLowerCase() == preferredArgsName,
           )
           .toList(growable: false);
       if (argsFiles.length == 1) {

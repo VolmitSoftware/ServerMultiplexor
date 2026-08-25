@@ -22,6 +22,7 @@ final class PterodactylTransferPathPolicy {
         base == linkMetadataFileName ||
         base == '.server-source' ||
         base == 'multiplexor-restart.sh' ||
+        base == 'multiplexor-restart.cmd' ||
         _generatedPart.hasMatch(base);
   }
 
@@ -40,6 +41,8 @@ final class PterodactylTransferPathPolicy {
     '--exclude=/**/.server-source',
     '--exclude=/multiplexor-restart.sh',
     '--exclude=/**/multiplexor-restart.sh',
+    '--exclude=/multiplexor-restart.cmd',
+    '--exclude=/**/multiplexor-restart.cmd',
     '--exclude=/.multiplexor-transfer',
     '--exclude=/.multiplexor-transfer/**',
     '--exclude=/**/.multiplexor-transfer',

@@ -78,10 +78,12 @@ void main() {
         final File managed = File('$consumerRoot/builds/custom/$digest.jar');
         final String instance = '$consumerRoot/instances/managed-custom';
         expect(managed.readAsStringSync(), 'custom jar bytes');
-        expect(
-          File('$instance/server.jar').resolveSymbolicLinksSync(),
-          managed.resolveSymbolicLinksSync(),
-        );
+        if (!Platform.isWindows) {
+          expect(
+            File('$instance/server.jar').resolveSymbolicLinksSync(),
+            managed.resolveSymbolicLinksSync(),
+          );
+        }
         expect(
           File('$instance/.server-source').readAsStringSync(),
           contains('jar=${managed.path}'),
@@ -90,6 +92,53 @@ void main() {
         expect(
           File('$instance/server.jar').readAsStringSync(),
           'custom jar bytes',
+        );
+      },
+    );
+
+    test(
+      'shared server creation writes a host-native restart script and activates',
+      () async {
+        final File serverJar = File('${root.path}/server.jar')
+          ..writeAsStringSync('server');
+        final CapturedResult created = await service.execute(<String>[
+          'server',
+          'create',
+          'shared-native',
+          '--type',
+          'custom',
+          '--jar',
+          serverJar.path,
+        ], stream: false);
+
+        expect(created.exitCode, 0, reason: created.stderr);
+        final String consumerRoot = consumerService.rootFor(
+          ConsumerProfile.plugin,
+        );
+        final String instance = '$consumerRoot/instances/shared-native';
+        final String scriptName = Platform.isWindows
+            ? 'multiplexor-restart.cmd'
+            : 'multiplexor-restart.sh';
+        expect(File('$instance/$scriptName').existsSync(), isTrue);
+        expect(
+          File('$instance/spigot.yml').readAsStringSync(),
+          contains(
+            'restart-script: ${Platform.isWindows ? scriptName : './$scriptName'}',
+          ),
+        );
+        expect(File('$instance/server.jar').readAsStringSync(), 'server');
+        expect(File('$instance/ops.json').existsSync(), isTrue);
+        expect(Directory('$instance/plugins/iris/packs').existsSync(), isTrue);
+
+        final CapturedResult activated = await service.execute(<String>[
+          'instance',
+          'activate',
+          'shared-native',
+        ], stream: false);
+        expect(activated.exitCode, 0, reason: activated.stderr);
+        expect(
+          File('$consumerRoot/state/active-instance.txt').readAsStringSync(),
+          'shared-native\n',
         );
       },
     );
@@ -323,12 +372,16 @@ void main() {
       );
       final File managed = File('$consumerRoot/builds/custom/$digest.jar');
       expect(managed.readAsStringSync(), 'second jar');
-      expect(
-        File(
-          '$consumerRoot/instances/managed-update/server.jar',
-        ).resolveSymbolicLinksSync(),
-        managed.resolveSymbolicLinksSync(),
+      final File instanceJar = File(
+        '$consumerRoot/instances/managed-update/server.jar',
       );
+      expect(instanceJar.readAsStringSync(), 'second jar');
+      if (!Platform.isWindows) {
+        expect(
+          instanceJar.resolveSymbolicLinksSync(),
+          managed.resolveSymbolicLinksSync(),
+        );
+      }
     });
 
     test('blank create preserves every pre-existing entity type', () async {
