@@ -86,50 +86,6 @@ Future<void> handleBuildTarget(String type, Map<String, dynamic> args) async {
   await _runAndExit(cmd);
 }
 
-Future<void> handleServerCreate(
-  Map<String, dynamic> args,
-  Map<String, dynamic> flags,
-) async {
-  final name = _arg(args, 'name');
-  if (name == null) {
-    stderr.writeln('Usage: server create <name> [--type ...] [--isolated]');
-    exit(2);
-  }
-
-  final type = _arg(args, 'type');
-  final mc = _arg(args, 'mc');
-  final loader = _arg(args, 'loader');
-  final installer = _arg(args, 'installer');
-  final jar = _arg(args, 'jar');
-  final autoBuild = _flag(flags, 'auto-build');
-  final isolated = _flag(flags, 'isolated');
-
-  final cmd = <String>['server', 'create', name];
-  if (type != null) {
-    cmd.addAll(<String>['--type', type]);
-  }
-  if (mc != null) {
-    cmd.addAll(<String>['--mc', mc]);
-  }
-  if (loader != null) {
-    cmd.addAll(<String>['--loader', loader]);
-  }
-  if (installer != null) {
-    cmd.addAll(<String>['--installer', installer]);
-  }
-  if (jar != null) {
-    cmd.addAll(<String>['--jar', jar]);
-  }
-  if (autoBuild) {
-    cmd.add('--auto-build');
-  }
-  if (isolated) {
-    cmd.add('--isolated');
-  }
-
-  await _runAndExit(cmd);
-}
-
 Future<void> handleInstanceList() async =>
     _runAndExit(<String>['instance', 'list']);
 Future<void> handleInstanceCurrent() async =>

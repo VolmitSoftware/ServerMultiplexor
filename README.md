@@ -70,7 +70,7 @@ The Remote connection card is the guided account surface. It can add, select, re
 
 Remote cards show every configured advertised allocation and every bind allocation. DNS A/AAAA results are shown beside configured aliases when resolution succeeds. These are intentionally separate: Pterodactyl does not know an upstream NAT port mapping, so Multiplexor never guesses that a private bind address, node FQDN, and public game endpoint are interchangeable.
 
-The workspace card (`[ MORE ]` on the workspace bar) holds the actions that are not per-instance: Build & tuning, Pull latest builds, Create many, Start all stopped, Stop all running, and Wipe everything. Destructive prompts (wipe, delete, factory reset) default to no and show that default in red. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
+The workspace card (`[ MORE ]` on the workspace bar) holds the actions that are not per-instance: Build & tuning, Pull latest builds, Create many, Start all stopped, Stop all running, and Wipe everything. An isolated server's instance card includes **Copy drop-ins**, which opens the same per-artifact checklist for one-time local plugin or mod copies without subscribing the server to future syncs. Destructive prompts (wipe, delete, factory reset) default to no and show that default in red. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
 
 Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `build spigot --force`.
 
@@ -252,6 +252,7 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 |---------|--------------|
 | `plugins show-source` (or `mods show-source`) | Print the absolute dropin folder. |
 | `plugins sync [instance\|--all] [--clean]` | Authoritatively copy dropins into one instance or every instance, replacing same-name local jars. `--clean` clears existing jars first. Isolated instances are skipped with `[SKIP]`. |
+| `plugins copy <isolated-instance> --artifact <dropin.jar> [...]` | Copy only the selected drop-in jars into an existing isolated instance without subscribing it to automatic sync. The `mods` form behaves the same way for mod consumers. |
 | `plugins watch-start` | Start a background daemon that re-syncs whenever a dropin jar changes. Untouched previously synchronized jars update automatically; locally modified jars are preserved with a warning. |
 | `plugins watch-stop` | Stop the watcher daemon. |
 | `plugins watch-status` | Print whether the watcher is running. |
@@ -345,6 +346,9 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 
 # Create an isolated test server (won't pick up your dropins)
 ./start.sh server create vanilla-test --type purpur --isolated
+
+# Later, copy selected drop-ins into it once without enabling shared sync
+./start.sh plugins copy vanilla-test --artifact Spark.jar --artifact ViaVersion.jar
 
 # Create a Leaf server (high-performance Paper fork) on the latest stable build
 ./start.sh server create leaf --type leaf --auto-build

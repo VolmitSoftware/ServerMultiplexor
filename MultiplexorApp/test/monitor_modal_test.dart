@@ -151,6 +151,7 @@ void main() {
         InstanceModalAction.unlock,
         InstanceModalAction.isolated,
         InstanceModalAction.shared,
+        InstanceModalAction.copyDropins,
         InstanceModalAction.folder,
         InstanceModalAction.update,
         InstanceModalAction.factoryReset,
@@ -658,11 +659,17 @@ void main() {
         final MonitorFrame isolatedFrame = instanceOverlay(isolated: true);
         expect(buttonIds(isolatedFrame), contains('im:shared'));
         expect(buttonIds(isolatedFrame), isNot(contains('im:isolated')));
+        expect(buttonIds(isolatedFrame), contains('im:copyDropins'));
         expect(plainRows(isolatedFrame).join('\n'), contains('[ SHARE ]'));
+        expect(
+          plainRows(isolatedFrame).join('\n'),
+          contains('[ COPY DROP-INS ]'),
+        );
 
         final MonitorFrame sharedFrame = instanceOverlay();
         expect(buttonIds(sharedFrame), contains('im:isolated'));
         expect(buttonIds(sharedFrame), isNot(contains('im:shared')));
+        expect(buttonIds(sharedFrame), isNot(contains('im:copyDropins')));
         expect(plainRows(sharedFrame).join('\n'), contains('[ ISOLATE ]'));
       },
     );

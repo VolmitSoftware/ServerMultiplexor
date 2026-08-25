@@ -148,6 +148,146 @@ void main() {
       expect(Directory('$consumerRoot/instances/shared').existsSync(), isFalse);
     });
 
+    test('isolated server can copy selected drop-ins after creation', () async {
+      final String consumerRoot = consumerService.rootFor(
+        ConsumerProfile.plugin,
+      );
+      final Directory dropins = Directory('$consumerRoot/dropins/plugins')
+        ..createSync(recursive: true);
+      File('${dropins.path}/First.jar').writeAsStringSync('first');
+      File('${dropins.path}/Second.jar').writeAsStringSync('second');
+      final File serverJar = File('${root.path}/server.jar')
+        ..writeAsStringSync('server');
+
+      final CapturedResult created = await service.execute(<String>[
+        'server',
+        'create',
+        'isolated-copy',
+        '--type',
+        'custom',
+        '--jar',
+        serverJar.path,
+        '--isolated',
+      ], stream: false);
+      expect(created.exitCode, 0, reason: created.stderr);
+
+      final CapturedResult copied = await service.execute(<String>[
+        'plugins',
+        'copy',
+        'isolated-copy',
+        '--artifact',
+        'Second.jar',
+      ], stream: false);
+
+      expect(copied.exitCode, 0, reason: copied.stderr);
+      final Directory plugins = Directory(
+        '$consumerRoot/instances/isolated-copy/plugins',
+      );
+      expect(File('${plugins.path}/Second.jar').readAsStringSync(), 'second');
+      expect(File('${plugins.path}/First.jar').existsSync(), isFalse);
+      expect(copied.stdout, contains('1 selected drop-in artifact'));
+    });
+
+    test('selected drop-in copy refuses subscribed instances', () async {
+      final String consumerRoot = consumerService.rootFor(
+        ConsumerProfile.plugin,
+      );
+      final Directory dropins = Directory('$consumerRoot/dropins/plugins')
+        ..createSync(recursive: true);
+      File('${dropins.path}/Example.jar').writeAsStringSync('plugin');
+      final Directory instance = Directory('$consumerRoot/instances/subscribed')
+        ..createSync(recursive: true);
+
+      final CapturedResult copied = await service.execute(<String>[
+        'plugins',
+        'copy',
+        'subscribed',
+        '--artifact',
+        'Example.jar',
+      ], stream: false);
+
+      expect(copied.exitCode, 2);
+      expect(copied.stderr, contains('use plugins sync subscribed instead'));
+      expect(
+        File('${instance.path}/plugins/Example.jar').existsSync(),
+        isFalse,
+      );
+    });
+
+    test('selected mod drop-ins copy into an isolated mod server', () async {
+      service.setConsumerOverride(ConsumerProfile.fabric);
+      final String consumerRoot = consumerService.rootFor(
+        ConsumerProfile.fabric,
+      );
+      final Directory dropins = Directory('$consumerRoot/dropins/mods')
+        ..createSync(recursive: true);
+      File('${dropins.path}/Example.jar').writeAsStringSync('mod');
+      final CapturedResult created = await service.execute(<String>[
+        'instance',
+        'create',
+        'fabric-copy',
+        '--isolated',
+      ], stream: false);
+      expect(created.exitCode, 0, reason: created.stderr);
+
+      final CapturedResult copied = await service.execute(<String>[
+        'mods',
+        'copy',
+        'fabric-copy',
+        '--artifact',
+        'Example.jar',
+      ], stream: false);
+
+      expect(copied.exitCode, 0, reason: copied.stderr);
+      expect(
+        File(
+          '$consumerRoot/instances/fabric-copy/mods/Example.jar',
+        ).readAsStringSync(),
+        'mod',
+      );
+    });
+
+    test(
+      'selected drop-in copy validates every artifact before writing',
+      () async {
+        final String consumerRoot = consumerService.rootFor(
+          ConsumerProfile.plugin,
+        );
+        final Directory dropins = Directory('$consumerRoot/dropins/plugins')
+          ..createSync(recursive: true);
+        File('${dropins.path}/Present.jar').writeAsStringSync('present');
+        final CapturedResult created = await service.execute(<String>[
+          'instance',
+          'create',
+          'all-or-nothing',
+          '--isolated',
+        ], stream: false);
+        expect(created.exitCode, 0, reason: created.stderr);
+
+        final CapturedResult copied = await service.execute(<String>[
+          'plugins',
+          'copy',
+          'all-or-nothing',
+          '--artifact',
+          'Present.jar',
+          '--artifact',
+          'Missing.jar',
+        ], stream: false);
+
+        expect(copied.exitCode, 2);
+        expect(
+          copied.stderr,
+          contains('Drop-in artifact not found: Missing.jar'),
+        );
+        expect(
+          File(
+            '$consumerRoot/instances/all-or-nothing/plugins/Present.jar',
+          ).existsSync(),
+          isFalse,
+        );
+      },
+    );
+
     test('instance update imports a replacement custom jar', () async {
       final File first = File('${root.path}/external/first.jar');
       final File second = File('${root.path}/external/second.jar');

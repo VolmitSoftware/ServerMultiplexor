@@ -38,6 +38,24 @@ void main() {
       expect(lines.join('\n'), contains('Commands:'));
     });
 
+    test('documents one-time copies into isolated instances', () {
+      final List<String> lines = <String>[];
+      final int code = printCliHelpForArgs(
+        <String>['plugins', '--help'],
+        write: lines.add,
+        error: lines.add,
+      );
+
+      expect(code, 0);
+      expect(
+        lines.join('\n'),
+        contains(
+          'copy <isolated-instance> --artifact <dropin.jar> '
+          '[--artifact <dropin.jar> ...]',
+        ),
+      );
+    });
+
     test('reports unknown help topics', () {
       final lines = <String>[];
       final code = printCliHelpForArgs(

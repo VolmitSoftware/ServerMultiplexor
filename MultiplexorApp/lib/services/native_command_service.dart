@@ -1690,13 +1690,13 @@ class NativeCommandService {
 
     if (mods && _isPluginConsumer(profile)) {
       throw _NativeCommandException(
-        'The plugin consumer uses plugin drop-ins. Use: plugins <show-source|sync|watch-start|watch-stop|watch-status>',
+        'The plugin consumer uses plugin drop-ins. Use: plugins <show-source|sync|copy|watch-start|watch-stop|watch-status>',
         2,
       );
     }
     if (!mods && !_isPluginConsumer(profile)) {
       throw _NativeCommandException(
-        'The ${profile.shortName} consumer uses mod drop-ins. Use: mods <show-source|sync|watch-start|watch-stop|watch-status>',
+        'The ${profile.shortName} consumer uses mod drop-ins. Use: mods <show-source|sync|copy|watch-start|watch-stop|watch-status>',
         2,
       );
     }
@@ -1704,6 +1704,48 @@ class NativeCommandService {
     switch (sub) {
       case 'show-source':
         io.write(_dropinsSource(profile, mods: mods));
+        return 0;
+      case 'copy':
+        if (rest.isEmpty) {
+          throw _NativeCommandException(
+            'Usage: ${mods ? 'mods' : 'plugins'} copy <isolated-instance> --artifact <dropin.jar> [--artifact <dropin.jar> ...]',
+            2,
+          );
+        }
+        final String target = rest.first;
+        final List<String> artifacts = <String>[];
+        for (int index = 1; index < rest.length; index++) {
+          if (rest[index] != '--artifact') {
+            throw _NativeCommandException(
+              'Unknown ${mods ? 'mods' : 'plugins'} copy arg: ${rest[index]}',
+              2,
+            );
+          }
+          if (index + 1 >= rest.length) {
+            throw _NativeCommandException('Missing value for --artifact', 2);
+          }
+          artifacts.add(rest[++index]);
+        }
+        if (artifacts.isEmpty) {
+          throw _NativeCommandException(
+            'Select at least one drop-in with --artifact',
+            2,
+          );
+        }
+        if (!_instanceExists(profile, target)) {
+          throw _NativeCommandException('Instance not found: $target', 2);
+        }
+        if (!_instanceIsolated(profile, target)) {
+          throw _NativeCommandException(
+            '$target is subscribed to shared drop-ins; use ${mods ? 'mods' : 'plugins'} sync $target instead',
+            2,
+          );
+        }
+        final List<File> artifactSources = _resolveSelectedDropinArtifacts(
+          profile,
+          artifacts,
+        );
+        _copySelectedDropinArtifacts(profile, target, artifactSources, io);
         return 0;
       case 'sync':
         var clean = false;
@@ -1822,8 +1864,8 @@ class NativeCommandService {
       default:
         throw _NativeCommandException(
           mods
-              ? 'Usage: mods <show-source|sync|watch-start|watch-stop|watch-status>'
-              : 'Usage: plugins <show-source|sync|iris-packs-path|iris-packs-link|watch-start|watch-stop|watch-status>',
+              ? 'Usage: mods <show-source|sync|copy|watch-start|watch-stop|watch-status>'
+              : 'Usage: plugins <show-source|sync|copy|iris-packs-path|iris-packs-link|watch-start|watch-stop|watch-status>',
           2,
         );
     }

@@ -211,26 +211,15 @@ Future<int> _runBuild(List<String> rest) async {
 
 Future<int> _runServer(List<String> rest) async {
   final sub = rest.isEmpty ? '' : rest.first;
-  final parsed = _parse(rest.skip(1).toList(growable: false));
 
   switch (sub) {
     case 'create':
-      await handleServerCreate(
-        <String, dynamic>{
-          'name': parsed.option('name') ?? parsed.positionalOrNull(0),
-          'type': parsed.option('type'),
-          'mc': parsed.option('mc'),
-          'loader': parsed.option('loader'),
-          'installer': parsed.option('installer'),
-          'jar': parsed.option('jar'),
-        },
-        <String, dynamic>{
-          'auto-build': parsed.flag('auto-build'),
-          'isolated': parsed.flag('isolated'),
-        },
-      );
+      // Preserve repeated --artifact options for one-time isolated-server
+      // copies. The native parser owns this command's complete validation.
+      await handleNativePassthrough(<String>['server', ...rest]);
       return 0;
     case 'create-many':
+      final _ParsedTokens parsed = _parse(rest.skip(1).toList(growable: false));
       await handleServerCreateMany(
         <String, dynamic>{
           'types': parsed.option('types') ?? parsed.positionalOrNull(0),
@@ -472,6 +461,9 @@ Future<int> _runPlugins(List<String> rest) async {
         },
       );
       return 0;
+    case 'copy':
+      await handleNativePassthrough(<String>['plugins', ...rest]);
+      return 0;
     case 'iris-packs-path':
       await handlePluginsIrisPath();
       return 0;
@@ -497,7 +489,7 @@ Future<int> _runPlugins(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: plugins <show-source|sync|iris-packs-path|iris-packs-link|watch-status|watch-start|watch-stop>',
+        'Usage: plugins <show-source|sync|copy|iris-packs-path|iris-packs-link|watch-status|watch-start|watch-stop>',
       );
       return 2;
   }
@@ -523,6 +515,9 @@ Future<int> _runMods(List<String> rest) async {
         mods: true,
       );
       return 0;
+    case 'copy':
+      await handleNativePassthrough(<String>['mods', ...rest]);
+      return 0;
     case 'watch-status':
       await handlePluginsWatchStatus(mods: true);
       return 0;
@@ -537,7 +532,7 @@ Future<int> _runMods(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: mods <show-source|sync|watch-status|watch-start|watch-stop>',
+        'Usage: mods <show-source|sync|copy|watch-status|watch-start|watch-stop>',
       );
       return 2;
   }

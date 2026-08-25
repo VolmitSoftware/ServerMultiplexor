@@ -118,6 +118,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
   CommandHelpGroup('plugins', <String>[
     'show-source',
     'sync [instance|--all] [--clean]',
+    'copy <isolated-instance> --artifact <dropin.jar> [--artifact <dropin.jar> ...]',
     'watch-status',
     'watch-start',
     'watch-stop',
@@ -127,6 +128,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
   CommandHelpGroup('mods', <String>[
     'show-source',
     'sync [instance|--all] [--clean]',
+    'copy <isolated-instance> --artifact <dropin.jar> [--artifact <dropin.jar> ...]',
     'watch-status',
     'watch-start',
     'watch-stop',

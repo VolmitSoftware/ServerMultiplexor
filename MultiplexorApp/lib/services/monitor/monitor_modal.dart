@@ -61,6 +61,7 @@ enum InstanceModalAction {
   unlock,
   isolated,
   shared,
+  copyDropins,
   folder,
   update,
   factoryReset,
@@ -238,6 +239,8 @@ int _cardWidth(int columns, List<List<ButtonSpec>> rows) {
 ///   operation the transfer engine will refuse.
 /// - SET PORT, MAKE ACTIVE, MOTD, FOLDER, the lock pair and the isolation
 ///   pair are always live.
+/// - Isolated instances offer a one-time COPY DROP-INS action. Shared
+///   instances continue to receive their consumer's drop-ins through sync.
 List<List<ButtonSpec>> _instanceRows({
   required MetricSample? latest,
   required bool locked,
@@ -312,6 +315,13 @@ List<List<ButtonSpec>> _instanceRows({
               label: 'ISOLATE',
             ),
     ],
+    if (isolated)
+      <ButtonSpec>[
+        ButtonSpec(
+          id: instanceModalHitId(InstanceModalAction.copyDropins),
+          label: 'COPY DROP-INS',
+        ),
+      ],
     <ButtonSpec>[
       ButtonSpec(
         id: instanceModalHitId(InstanceModalAction.folder),

@@ -1027,6 +1027,8 @@ class InteractiveWizard {
         await _toggleIsolated(name, currentlyIsolated: false);
       case InstanceModalAction.shared:
         await _toggleIsolated(name, currentlyIsolated: true);
+      case InstanceModalAction.copyDropins:
+        await _copyDropinsIntoIsolated(name);
       case InstanceModalAction.folder:
         await _shellRun(<String>['instance', 'open', name]);
       case InstanceModalAction.update:
@@ -1207,6 +1209,7 @@ class InteractiveWizard {
       case InstanceModalAction.unlock:
       case InstanceModalAction.isolated:
       case InstanceModalAction.shared:
+      case InstanceModalAction.copyDropins:
       case InstanceModalAction.update:
       case InstanceModalAction.factoryReset:
         Ui.note('That action is Local-only.');
@@ -4276,7 +4279,9 @@ class InteractiveWizard {
     );
     final bool isolated = !subscribe;
     final List<String> artifacts = isolated
-        ? await _selectIsolatedDropinArtifacts()
+        ? await _selectDropinArtifacts(
+            'Copy artifacts into this isolated server',
+          )
         : const <String>[];
 
     Ui.doing('Creating ${_serverTypeLabel(type)} $version server "$name"');
@@ -4318,7 +4323,7 @@ class InteractiveWizard {
     }
   }
 
-  Future<List<String>> _selectIsolatedDropinArtifacts() async {
+  Future<List<String>> _selectDropinArtifacts(String prompt) async {
     final String command = _isPluginConsumer() ? 'plugins' : 'mods';
     final String? source = await Ui.shielded(
       () => passthrough.captureStdoutLine(<String>[command, 'show-source']),
@@ -4351,14 +4356,34 @@ class InteractiveWizard {
       return const <String>[];
     }
 
-    final Set<int> selected = await Ui.checklist(
-      'Copy artifacts into this isolated server',
-      artifacts,
-    );
+    final Set<int> selected = await Ui.checklist(prompt, artifacts);
     return <String>[
       for (int index = 0; index < artifacts.length; index++)
         if (selected.contains(index)) artifacts[index],
     ];
+  }
+
+  Future<void> _copyDropinsIntoIsolated(String name) async {
+    final List<String> artifacts = await _selectDropinArtifacts(
+      'Copy drop-ins into $name',
+    );
+    if (artifacts.isEmpty) {
+      Ui.note('No drop-ins selected.');
+      await Ui.pause();
+      return;
+    }
+
+    final String command = _isPluginConsumer() ? 'plugins' : 'mods';
+    await _shellRun(<String>[
+      command,
+      'copy',
+      name,
+      for (final String artifact in artifacts) ...<String>[
+        '--artifact',
+        artifact,
+      ],
+    ]);
+    await Ui.pause();
   }
 
   Future<void> _createMany() async {
