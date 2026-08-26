@@ -79,6 +79,7 @@ MonitorFrame instanceOverlay({
   bool remote = false,
   String? operationBlockReason,
   MonitorTheme? theme,
+  String? selectedId,
   String? hoveredId,
   String? pressedId,
   int columns = 100,
@@ -92,6 +93,7 @@ MonitorFrame instanceOverlay({
   remote: remote,
   operationBlockReason: operationBlockReason,
   theme: theme ?? MonitorTheme.plain(),
+  selectedId: selectedId,
   hoveredId: hoveredId,
   pressedId: pressedId,
   columns: columns,
@@ -102,6 +104,7 @@ MonitorFrame instanceOverlay({
 MonitorFrame workspaceOverlay({
   bool remote = false,
   MonitorTheme? theme,
+  String? selectedId,
   String? hoveredId,
   String? pressedId,
   int columns = 100,
@@ -114,6 +117,7 @@ MonitorFrame workspaceOverlay({
   isolated: false,
   remote: remote,
   theme: theme ?? MonitorTheme.plain(),
+  selectedId: selectedId,
   hoveredId: hoveredId,
   pressedId: pressedId,
   columns: columns,
@@ -227,6 +231,47 @@ void main() {
       expect(workspaceModalActionForId('wm:'), isNull);
       expect(workspaceModalActionForId('wm:bogus'), isNull);
       expect(workspaceModalActionForId(''), isNull);
+    });
+  });
+
+  group('modal hotkeys', () {
+    test('resolves visible instance actions case-insensitively', () {
+      final MonitorFrame stopped = instanceOverlay(state: RuntimeState.stopped);
+      expect(modalActionIdForHotkey(stopped.hitboxes, 's'), 'im:start');
+      expect(modalActionIdForHotkey(stopped.hitboxes, 'S'), 'im:start');
+      expect(modalActionIdForHotkey(stopped.hitboxes, 'p'), 'im:pushToRemote');
+
+      final MonitorFrame running = instanceOverlay();
+      expect(modalActionIdForHotkey(running.hitboxes, 's'), 'im:stop');
+      expect(modalActionIdForHotkey(running.hitboxes, 'r'), 'im:restart');
+    });
+
+    test('does not resolve disabled, unknown, or malformed keys', () {
+      final MonitorFrame stopped = instanceOverlay(state: RuntimeState.stopped);
+      expect(modalActionIdForHotkey(stopped.hitboxes, 'r'), isNull);
+      expect(modalActionIdForHotkey(stopped.hitboxes, 'z'), isNull);
+      expect(modalActionIdForHotkey(stopped.hitboxes, ''), isNull);
+      expect(modalActionIdForHotkey(stopped.hitboxes, 'ss'), isNull);
+    });
+
+    test('keeps every visible card hotkey unique', () {
+      for (final MonitorFrame frame in <MonitorFrame>[
+        instanceOverlay(),
+        instanceOverlay(state: RuntimeState.stopped),
+        instanceOverlay(state: RuntimeState.stopped, locked: true),
+        instanceOverlay(remote: true),
+        instanceOverlay(remote: true, state: RuntimeState.stopped),
+        workspaceOverlay(),
+        workspaceOverlay(remote: true),
+      ]) {
+        final List<String> keys = frame.hitboxes
+            .where(
+              (MonitorHitbox hitbox) => hitbox.kind == MonitorHitKind.button,
+            )
+            .map((MonitorHitbox hitbox) => modalHotkeyForId(hitbox.id)!)
+            .toList(growable: false);
+        expect(keys.toSet().length, keys.length, reason: keys.join(','));
+      }
     });
   });
 
@@ -391,14 +436,14 @@ void main() {
     test('offsets button spans by the card left edge and its border', () {
       final MonitorFrame frame = instanceOverlay();
       final MonitorHitbox stop = boxFor(frame, 'im:stop')!;
-      // card left 27 + border/pad 2 + row indent 2, chip width 4 + 4.
+      // card left 27 + border/pad 2 + row indent 2, then hotkey + label.
       expect(stop.row, 11);
       expect(stop.colStart, 31);
-      expect(stop.colEnd, 39);
+      expect(stop.colEnd, 41);
       final MonitorHitbox restart = boxFor(frame, 'im:restart')!;
       expect(restart.row, 11);
-      expect(restart.colStart, 41);
-      expect(restart.colEnd, 52);
+      expect(restart.colStart, 43);
+      expect(restart.colEnd, 56);
     });
 
     test('emits scrim, then card, then buttons so the topmost layer wins', () {
@@ -442,7 +487,7 @@ void main() {
       expect(hitTest(frame.hitboxes, row: 10, col: 31), modalCardHitId);
       expect(hitTest(frame.hitboxes, row: 11, col: 28), modalCardHitId);
       // The gap between the two chips, and the bottom border.
-      expect(hitTest(frame.hitboxes, row: 11, col: 39), modalCardHitId);
+      expect(hitTest(frame.hitboxes, row: 11, col: 41), modalCardHitId);
       expect(hitTest(frame.hitboxes, row: 19, col: 72), modalCardHitId);
     });
 
@@ -452,6 +497,63 @@ void main() {
       expect(hitTest(frame.hitboxes, row: 10, col: 73), modalScrimHitId);
       expect(hitTest(frame.hitboxes, row: 9, col: 40), modalScrimHitId);
       expect(hitTest(frame.hitboxes, row: 20, col: 40), modalScrimHitId);
+    });
+  });
+
+  group('modal keyboard navigation', () {
+    test('moves horizontally within a row and clamps at its edges', () {
+      final MonitorFrame frame = instanceOverlay();
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:stop', ModalMove.right),
+        'im:restart',
+      );
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:restart', ModalMove.left),
+        'im:stop',
+      );
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:stop', ModalMove.left),
+        'im:stop',
+      );
+    });
+
+    test('moves vertically to the closest button on the nearest row', () {
+      final MonitorFrame frame = instanceOverlay();
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:stop', ModalMove.down),
+        'im:console',
+      );
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:restart', ModalMove.down),
+        'im:setPort',
+      );
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:setPort', ModalMove.up),
+        'im:restart',
+      );
+    });
+
+    test('skips disabled buttons and recovers a missing selection', () {
+      final MonitorFrame frame = instanceOverlay(state: RuntimeState.stopped);
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:start', ModalMove.right),
+        'im:start',
+      );
+      expect(
+        moveModalSelection(frame.hitboxes, 'im:start', ModalMove.down),
+        'im:setPort',
+      );
+      expect(
+        moveModalSelection(frame.hitboxes, 'missing', ModalMove.down),
+        'im:setPort',
+      );
+    });
+
+    test('returns null when a modal has no enabled button hitboxes', () {
+      expect(
+        moveModalSelection(const <MonitorHitbox>[], null, ModalMove.down),
+        isNull,
+      );
     });
   });
 
@@ -465,9 +567,9 @@ void main() {
 
       expect(text, contains('BLOCKED'));
       expect(text, contains('node is under maintenance'));
-      expect(text, contains('[ STOP ]'));
-      expect(text, contains('[ RESTART ]'));
-      expect(text, contains('[ CONSOLE ]'));
+      expect(text, contains('[ S STOP ]'));
+      expect(text, contains('[ R RESTART ]'));
+      expect(text, contains('[ C CONSOLE ]'));
       expect(
         buttonIds(frame),
         isNot(containsAll(<String>['im:stop', 'im:restart', 'im:console'])),
@@ -503,12 +605,12 @@ void main() {
         );
         final String text = plainRows(frame).join('\n');
         for (final String label in <String>[
-          'SETTINGS',
-          'HISTORY',
-          'PULL TO LOCAL',
-          'OPEN FOLDER',
-          'REINSTALL',
-          'DELETE',
+          'E SETTINGS',
+          'H HISTORY',
+          'P PULL TO LOCAL',
+          'F OPEN FOLDER',
+          'N REINSTALL',
+          'D DELETE',
         ]) {
           expect(text, contains('[ $label ]'));
         }
@@ -543,7 +645,7 @@ void main() {
       );
 
       expect(buttonIds(frame), isNot(contains('im:pullToLocal')));
-      expect(plainRows(frame).join('\n'), contains('[ PULL TO LOCAL ]'));
+      expect(plainRows(frame).join('\n'), contains('[ P PULL TO LOCAL ]'));
     });
 
     test('withholds Remote pull from every sampled live state', () {
@@ -561,7 +663,7 @@ void main() {
         );
         expect(
           plainRows(frame).join('\n'),
-          contains('[ PULL TO LOCAL ]'),
+          contains('[ P PULL TO LOCAL ]'),
           reason: state.name,
         );
       }
@@ -613,8 +715,8 @@ void main() {
       final List<String> rows = plainRows(
         instanceOverlay(state: RuntimeState.stopped),
       );
-      expect(rows.join('\n'), contains('[ RESTART ]'));
-      expect(rows.join('\n'), contains('[ CONSOLE ]'));
+      expect(rows.join('\n'), contains('[ R RESTART ]'));
+      expect(rows.join('\n'), contains('[ C CONSOLE ]'));
     });
 
     test('treats a mid-flight state as live, not stopped', () {
@@ -660,17 +762,17 @@ void main() {
         expect(buttonIds(isolatedFrame), contains('im:shared'));
         expect(buttonIds(isolatedFrame), isNot(contains('im:isolated')));
         expect(buttonIds(isolatedFrame), contains('im:copyDropins'));
-        expect(plainRows(isolatedFrame).join('\n'), contains('[ SHARE ]'));
+        expect(plainRows(isolatedFrame).join('\n'), contains('[ I SHARE ]'));
         expect(
           plainRows(isolatedFrame).join('\n'),
-          contains('[ COPY DROP-INS ]'),
+          contains('[ Y COPY DROP-INS ]'),
         );
 
         final MonitorFrame sharedFrame = instanceOverlay();
         expect(buttonIds(sharedFrame), contains('im:isolated'));
         expect(buttonIds(sharedFrame), isNot(contains('im:shared')));
         expect(buttonIds(sharedFrame), isNot(contains('im:copyDropins')));
-        expect(plainRows(sharedFrame).join('\n'), contains('[ ISOLATE ]'));
+        expect(plainRows(sharedFrame).join('\n'), contains('[ I ISOLATE ]'));
       },
     );
 
@@ -721,10 +823,10 @@ void main() {
         'wm:bulkActions',
       });
       final String text = plainRows(frame).join('\n');
-      expect(text, contains('[ CONNECTION ]'));
-      expect(text, contains('[ FILES ]'));
-      expect(text, contains('[ CREATE MANY ]'));
-      expect(text, contains('[ BULK ACTIONS ]'));
+      expect(text, contains('[ C CONNECTION ]'));
+      expect(text, contains('[ F FILES ]'));
+      expect(text, contains('[ M CREATE MANY ]'));
+      expect(text, contains('[ B BULK ACTIONS ]'));
     });
   });
 
@@ -767,6 +869,20 @@ void main() {
           reason: 'row $index',
         );
       }
+    });
+
+    test('paints the keyboard-selected chip in the accent tone', () {
+      final MonitorTheme theme = truecolor();
+      final MonitorFrame frame = instanceOverlay(
+        theme: theme,
+        selectedId: 'im:restart',
+      );
+      final int selected = rowWith(frame, 'RESTART');
+      expect(frame.rows[selected], contains(theme.accent));
+      expect(
+        frame.rows[rowWith(frame, 'CONSOLE')],
+        isNot(contains(theme.accent)),
+      );
     });
 
     test('paints the pressed chip in the uniform press flash', () {
@@ -819,53 +935,56 @@ void main() {
         columns: 40,
       );
       final String text = plainRows(frame).join('\n');
-      expect(text, contains('[ FACTORY RESET ]'));
-      expect(text, contains('[ DELETE ]'));
+      expect(text, contains('[ X FACTORY RESET ]'));
+      expect(text, contains('[ D DELETE ]'));
       expect(
         buttonIds(frame),
         containsAll(<String>['im:factoryReset', 'im:delete']),
       );
     });
 
-    test('renders every enabled instance chip at the content floor', () {
-      // 35 columns is exactly what the widest row (FACTORY RESET + DELETE)
-      // needs once the card's own border and padding are paid for.
-      final MonitorFrame frame = instanceOverlay(
-        state: RuntimeState.stopped,
-        columns: 35,
-      );
-      expect(Ansi.visibleLength(frame.rows[10]), 35);
-      expect(buttonIds(frame), <String>{
-        'im:start',
-        'im:setPort',
-        'im:pushToRemote',
-        'im:makeActive',
-        'im:motd',
-        'im:lock',
-        'im:isolated',
-        'im:folder',
-        'im:update',
-        'im:factoryReset',
-        'im:delete',
-      });
-      for (final String label in <String>[
-        '[ START ]',
-        '[ RESTART ]',
-        '[ CONSOLE ]',
-        '[ SET PORT ]',
-        '[ PUSH TO REMOTE ]',
-        '[ MAKE ACTIVE ]',
-        '[ MOTD ]',
-        '[ LOCK ]',
-        '[ ISOLATE ]',
-        '[ FOLDER ]',
-        '[ UPDATE ]',
-        '[ FACTORY RESET ]',
-        '[ DELETE ]',
-      ]) {
-        expect(plainRows(frame).join('\n'), contains(label), reason: label);
-      }
-    });
+    test(
+      'keeps every action while suppressing only hotkeys that do not fit',
+      () {
+        // The destructive row needs all 35 columns without its shortcut
+        // prefixes, while the shorter rows can still show theirs.
+        final MonitorFrame frame = instanceOverlay(
+          state: RuntimeState.stopped,
+          columns: 35,
+        );
+        expect(Ansi.visibleLength(frame.rows[10]), 35);
+        expect(buttonIds(frame), <String>{
+          'im:start',
+          'im:setPort',
+          'im:pushToRemote',
+          'im:makeActive',
+          'im:motd',
+          'im:lock',
+          'im:isolated',
+          'im:folder',
+          'im:update',
+          'im:factoryReset',
+          'im:delete',
+        });
+        for (final String label in <String>[
+          '[ S START ]',
+          '[ R RESTART ]',
+          '[ C CONSOLE ]',
+          '[ T SET PORT ]',
+          '[ P PUSH TO REMOTE ]',
+          '[ A MAKE ACTIVE ]',
+          '[ M MOTD ]',
+          '[ L LOCK ]',
+          '[ I ISOLATE ]',
+          '[ F FOLDER ]',
+          '[ U UPDATE ]',
+          '[ FACTORY RESET ]',
+          '[ DELETE ]',
+        ]) {
+          expect(plainRows(frame).join('\n'), contains(label), reason: label);
+        }
+      },
+    );
 
     test('renders every workspace chip at the content floor', () {
       // BUILD & TUNING + PULL BUILDS is the widest workspace row: 41 columns.

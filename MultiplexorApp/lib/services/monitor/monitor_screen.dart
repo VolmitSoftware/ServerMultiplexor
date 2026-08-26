@@ -265,9 +265,14 @@ class MonitorScreen {
   String? _pressedId;
 
   /// The modal card on screen, or null when there is none. While it is
-  /// non-null it owns the pointer and Escape outright: nothing behind it is
-  /// clickable, and no key but Escape and quit does anything.
+  /// non-null it owns pointer and keyboard input outright: nothing behind it
+  /// is clickable and global bindings cannot leak through the card.
   MonitorModalState? _modal;
+
+  /// The enabled modal button carrying keyboard focus. Null means the first
+  /// enabled button, which lets a newly opened card render focus immediately
+  /// before its hitboxes have been published.
+  String? _modalSelectedId;
 
   int _selectedIndex = 0;
   Duration _range = monitorRanges.first;
@@ -347,6 +352,7 @@ class MonitorScreen {
     _logLines = const <String>[];
     _logReadAt = null;
     _modal = null;
+    _modalSelectedId = null;
     _clearPointer();
     _dataTime = _latestDataTime(_dataTime);
     _clampSelection();
@@ -491,6 +497,14 @@ class MonitorScreen {
         ? base
         : _overlay(modal, base, columns, lines);
     _hitboxes = frame.hitboxes;
+    if (modal != null) {
+      final List<String> ids = _modalButtonIds();
+      if (!ids.contains(_modalSelectedId)) {
+        _modalSelectedId = ids.isEmpty ? null : ids.first;
+      }
+    } else {
+      _modalSelectedId = null;
+    }
     // A hovered or pressed id that this frame does not carry names a region
     // that is no longer on screen — a chip the selection's state swapped out,
     // a row a sweep dropped. Holding on to it would light whatever chip
@@ -544,6 +558,7 @@ class MonitorScreen {
           ? null
           : _snapshot.operationBlockReasonFor(instance),
       theme: theme,
+      selectedId: _modalSelectedId,
       hoveredId: _hoveredId,
       pressedId: _pressedId,
       columns: columns,
@@ -715,6 +730,9 @@ class MonitorScreen {
     if (event.kind == TermEventKind.mouseUp) {
       return _handleMouseUp(event);
     }
+    if (_modal != null) {
+      return _handleModalKeyboard(event);
+    }
     final MonitorAction action = monitorActionForEvent(event);
     if (event.kind == TermEventKind.wheelUp ||
         event.kind == TermEventKind.wheelDown) {
@@ -743,7 +761,58 @@ class MonitorScreen {
     final String? id = _hitAt(event);
     _hoveredId = id;
     _pressedId = id;
+    if (_modal != null &&
+        _hitboxes.any(
+          (MonitorHitbox hitbox) =>
+              hitbox.kind == MonitorHitKind.button && hitbox.id == id,
+        )) {
+      _modalSelectedId = id;
+    }
   }
+
+  /// Keyboard and wheel handling while a card is open. It is deliberately
+  /// resolved before the dashboard keymap so modal hotkeys win over global
+  /// bindings and no action behind the card can fire.
+  Future<MonitorResult?> _handleModalKeyboard(TermEvent event) async {
+    final MonitorModalState? modal = _modal;
+    if (modal == null) {
+      return null;
+    }
+    final ModalMove? move = switch (event.kind) {
+      TermEventKind.arrowUp || TermEventKind.wheelUp => ModalMove.up,
+      TermEventKind.arrowDown || TermEventKind.wheelDown => ModalMove.down,
+      TermEventKind.arrowLeft => ModalMove.left,
+      TermEventKind.arrowRight => ModalMove.right,
+      _ => null,
+    };
+    if (move != null) {
+      _modalSelectedId = moveModalSelection(_hitboxes, _modalSelectedId, move);
+      _clearPointer();
+      return null;
+    }
+    if (event.kind == TermEventKind.enter) {
+      final List<String> ids = _modalButtonIds();
+      final String? selected = ids.contains(_modalSelectedId)
+          ? _modalSelectedId
+          : ids.isEmpty
+          ? null
+          : ids.first;
+      return selected == null ? null : _activateModal(modal, selected);
+    }
+    if (event.kind == TermEventKind.char) {
+      final String? id = modalActionIdForHotkey(_hitboxes, event.char);
+      if (id != null) {
+        _modalSelectedId = id;
+        return _activateModal(modal, id);
+      }
+    }
+    return _handleAction(monitorActionForEvent(event));
+  }
+
+  List<String> _modalButtonIds() => _hitboxes
+      .where((MonitorHitbox hitbox) => hitbox.kind == MonitorHitKind.button)
+      .map((MonitorHitbox hitbox) => hitbox.id)
+      .toList(growable: false);
 
   /// Releases the armed region, and activates it when the pointer came back
   /// up over the same one.
@@ -854,6 +923,7 @@ class MonitorScreen {
         return _runWorkspaceAction(WorkspaceModalAction.connect);
       case wsMoreHitId:
         _modal = const WorkspaceModal();
+        _modalSelectedId = null;
         _clearPointer();
       case rangeHitId:
         _range = nextRange(_range);
@@ -950,11 +1020,13 @@ class MonitorScreen {
       return;
     }
     _modal = InstanceModal(instance);
+    _modalSelectedId = null;
     _clearPointer();
   }
 
   void _closeModal() {
     _modal = null;
+    _modalSelectedId = null;
     _clearPointer();
   }
 
@@ -992,10 +1064,9 @@ class MonitorScreen {
       }
     }
     if (_modal != null) {
-      // A modal is mouse-first: its buttons have no keys of their own yet
-      // (keyboard navigation of the card is future work). Escape takes the
-      // card down, quit still quits, and everything else is inert rather
-      // than reaching the dashboard underneath it.
+      // Modal button input is handled before this method. Escape takes the
+      // card down, quit still quits, and every other unmatched global action
+      // stays inert rather than reaching the dashboard underneath it.
       return action == MonitorAction.quit ? const MonitorQuit() : null;
     }
     switch (action) {
@@ -1033,6 +1104,7 @@ class MonitorScreen {
         // offers no way to reach it by mouse.
         if (!_detailMode) {
           _modal = const WorkspaceModal();
+          _modalSelectedId = null;
           _clearPointer();
         }
         return null;

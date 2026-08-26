@@ -1,4 +1,4 @@
-/// Hitbox model for the mouse-first monitor dashboard: a rendered frame
+/// Hitbox model for the interactive monitor dashboard: a rendered frame
 /// (rows of text) paired with the clickable regions layered over it.
 ///
 /// Everything in this library is pure: no clock reads, no IO, no mutation.

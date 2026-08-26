@@ -37,15 +37,17 @@ The landing view is a `MULTIPLEXOR` header, a KPI strip (`FLEET` servers-up and 
 
 Everything on those bars is a button. Pressing lights a chip in the accent tone; a click activates on release, so a press that drifts onto another chip before it lifts does nothing. Chips that cannot apply — `RESTART` on a stopped server, `DELETE` on a locked one — are drawn faint and are not clickable at all. `START`, on the bar or on the card, is a background start: the dashboard stays up and watches the server come alive, and `CONSOLE` is one click away once it is running. The range badge on the selected panel (`running · 15m`) is a button too, and cycles the chart window.
 
-Clicking a row in `SERVERS` selects it; clicking the selected row again opens its **card**, as do `enter` and `[ MORE ]`. `[ MORE ]` on the workspace bar, or `w`, opens the workspace card instead: build & tuning, pull builds, create many, start all, stop all, wipe. A card is modal — click a button to run it, click elsewhere on the card for nothing, click outside it or press `esc` to dismiss. Nothing behind a card is clickable while it is up.
+Clicking a row in `SERVERS` selects it; clicking the selected row again opens its **card**, as do `enter` and `[ MORE ]`. `[ MORE ]` on the workspace bar, or `w`, opens the workspace card instead: build & tuning, pull builds, create many, start all, stop all, wipe. A card is modal: buttons print their single-letter hotkeys when space permits, all four arrow keys move keyboard focus through the button grid, and `enter` runs the focused action. Clicking a button still runs it; clicking elsewhere on the card does nothing, while clicking outside it or pressing `esc` dismisses it. Disabled actions cannot receive focus or fire by hotkey, and nothing behind a card is clickable or keyboard-active while it is up.
 
 Mouse support needs a terminal that reports SGR mouse events, which every current one does (Terminal.app, iTerm2, kitty, WezTerm, tmux, the VS Code terminal). The monitor uses click-only reporting (`?1000` with `?1006` SGR coordinates), so passive pointer movement does not repaint the screen. Reporting is turned off again on exit, so the terminal is left as it was found.
 
 | Key | What it does |
 |-----|--------------|
 | `tab` | Switch between Local and Pterodactyl Remote fleets. |
-| `↑` `↓`, wheel | Move the selection. The wheel outside the servers panel cycles the chart window instead. |
-| `enter`, click | Open the selected server's card (a second click on the selected row, or `[ MORE ]`, does the same). |
+| `↑` `↓`, wheel | Move the server selection. Inside a modal card, arrows and the wheel move button focus instead. |
+| `←` `→` | Move horizontally between buttons in an open modal card. |
+| `enter`, click | Open the selected server's card; inside a card, run the focused button. A second click on the selected row, or `[ MORE ]`, also opens the card. |
+| button letter | Run that button directly while its modal card is open; the hotkey is printed at the start of each button when space permits. |
 | `d` | Detail screen for the selected server. |
 | `R` `S` `X` `O` | Restart, stop (graceful), kill (force), open console — on the selected server. Uppercase on purpose, so a slipped key can never fire one. |
 | `g` | Open every running console in a tmux grid. |

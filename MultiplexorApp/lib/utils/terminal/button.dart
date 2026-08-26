@@ -1,4 +1,4 @@
-/// Button-chip rendering for the mouse-first monitor dashboard: a single
+/// Button-chip rendering for the interactive monitor dashboard: a single
 /// `[ LABEL ]` chip in any of its interaction states, and a row layout that
 /// packs chips left to right and reports where each one landed.
 ///
@@ -17,14 +17,22 @@ class ButtonSpec {
   const ButtonSpec({
     required this.id,
     required this.label,
+    this.shortcut,
     this.danger = false,
     this.enabled = true,
   });
 
   final String id;
   final String label;
+  final String? shortcut;
   final bool danger;
   final bool enabled;
+
+  String get displayLabel =>
+      shortcut == null ? label : '${shortcut!.toUpperCase()} $label';
+
+  String labelFor({required bool showShortcut}) =>
+      showShortcut ? displayLabel : label;
 }
 
 /// Renders [label] as a `[ LABEL ]` chip in [state], with zero background
@@ -128,6 +136,7 @@ ButtonRowRender layoutButtonRow({
   required MonitorTheme theme,
   String? hoveredId,
   String? pressedId,
+  bool showShortcuts = true,
   int gap = 1,
   int indent = 1,
 }) {
@@ -141,7 +150,8 @@ ButtonRowRender layoutButtonRow({
   bool first = true;
 
   for (final ButtonSpec button in buttons) {
-    final int chipWidth = button.label.length + 4;
+    final String label = button.labelFor(showShortcut: showShortcuts);
+    final int chipWidth = label.length + 4;
     final int gapBefore = first ? 0 : safeGap;
     final int start = cursor + gapBefore;
     final int end = start + chipWidth;
@@ -155,7 +165,7 @@ ButtonRowRender layoutButtonRow({
     final ButtonState state = _stateFor(button, hoveredId, pressedId);
     buffer.write(
       renderButton(
-        label: button.label,
+        label: label,
         theme: theme,
         state: state,
         danger: button.danger,

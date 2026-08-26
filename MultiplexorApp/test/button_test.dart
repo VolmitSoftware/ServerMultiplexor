@@ -14,19 +14,24 @@ void main() {
   group('ButtonSpec', () {
     test('defaults danger to false and enabled to true', () {
       const ButtonSpec spec = ButtonSpec(id: 'a', label: 'OK');
+      expect(spec.shortcut, isNull);
       expect(spec.danger, isFalse);
       expect(spec.enabled, isTrue);
+      expect(spec.displayLabel, 'OK');
     });
 
     test('stores every field', () {
       const ButtonSpec spec = ButtonSpec(
         id: 'kill',
         label: 'KILL',
+        shortcut: 'x',
         danger: true,
         enabled: false,
       );
       expect(spec.id, 'kill');
       expect(spec.label, 'KILL');
+      expect(spec.shortcut, 'x');
+      expect(spec.displayLabel, 'X KILL');
       expect(spec.danger, isTrue);
       expect(spec.enabled, isFalse);
     });
@@ -210,6 +215,37 @@ void main() {
   });
 
   group('layoutButtonRow', () {
+    test('prints a shortcut prefix and includes it in the hitbox', () {
+      final ButtonRowRender rendered = layoutButtonRow(
+        buttons: const <ButtonSpec>[
+          ButtonSpec(id: 'start', label: 'START', shortcut: 's'),
+        ],
+        width: 20,
+        theme: MonitorTheme.plain(),
+        indent: 0,
+      );
+      expect(rendered.row, '[ S START ]${' ' * 9}');
+      expect(rendered.spans.single.colStart, 0);
+      expect(rendered.spans.single.colEnd, 11);
+    });
+
+    test(
+      'can suppress shortcut prefixes when a narrow row needs the space',
+      () {
+        final ButtonRowRender rendered = layoutButtonRow(
+          buttons: const <ButtonSpec>[
+            ButtonSpec(id: 'start', label: 'START', shortcut: 's'),
+          ],
+          width: 9,
+          theme: MonitorTheme.plain(),
+          indent: 0,
+          showShortcuts: false,
+        );
+        expect(rendered.row, '[ START ]');
+        expect(rendered.spans.single.colEnd, 9);
+      },
+    );
+
     test('row is exactly `width` visible columns', () {
       final MonitorTheme theme = _truecolor();
       final ButtonRowRender rendered = layoutButtonRow(

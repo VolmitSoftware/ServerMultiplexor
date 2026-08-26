@@ -1,4 +1,4 @@
-/// Modal cards for the mouse-first monitor dashboard: the two daily-driver
+/// Modal cards for the interactive monitor dashboard: the two daily-driver
 /// menus — the per-instance action card and the workspace action card —
 /// drawn as a centered panel over an already-rendered base frame.
 ///
@@ -147,6 +147,186 @@ WorkspaceModalAction? workspaceModalActionForId(String id) {
   return null;
 }
 
+/// Single-key bindings for instance-card actions. Complementary actions use
+/// the same key because they are never available on the card together.
+String instanceModalActionHotkey(InstanceModalAction action) =>
+    switch (action) {
+      InstanceModalAction.start || InstanceModalAction.stop => 's',
+      InstanceModalAction.restart => 'r',
+      InstanceModalAction.console => 'c',
+      InstanceModalAction.pullToLocal ||
+      InstanceModalAction.pushToRemote => 'p',
+      InstanceModalAction.settings => 'e',
+      InstanceModalAction.history => 'h',
+      InstanceModalAction.reinstall => 'n',
+      InstanceModalAction.setPort => 't',
+      InstanceModalAction.makeActive => 'a',
+      InstanceModalAction.motd => 'm',
+      InstanceModalAction.lock || InstanceModalAction.unlock => 'l',
+      InstanceModalAction.isolated || InstanceModalAction.shared => 'i',
+      InstanceModalAction.copyDropins => 'y',
+      InstanceModalAction.folder => 'f',
+      InstanceModalAction.update => 'u',
+      InstanceModalAction.factoryReset => 'x',
+      InstanceModalAction.delete => 'd',
+    };
+
+/// Single-key bindings for workspace-card actions.
+String workspaceModalActionHotkey(WorkspaceModalAction action) =>
+    switch (action) {
+      WorkspaceModalAction.buildTuning ||
+      WorkspaceModalAction.bulkActions => 'b',
+      WorkspaceModalAction.pullBuilds => 'p',
+      WorkspaceModalAction.createMany => 'm',
+      WorkspaceModalAction.startAll => 'a',
+      WorkspaceModalAction.stopAll => 's',
+      WorkspaceModalAction.wipe => 'x',
+      WorkspaceModalAction.newInstance => 'n',
+      WorkspaceModalAction.connect => 'c',
+      WorkspaceModalAction.files => 'f',
+    };
+
+/// The hotkey carried by a modal button id, or null for a non-button id.
+String? modalHotkeyForId(String id) {
+  final InstanceModalAction? instance = instanceModalActionForId(id);
+  if (instance != null) {
+    return instanceModalActionHotkey(instance);
+  }
+  final WorkspaceModalAction? workspace = workspaceModalActionForId(id);
+  return workspace == null ? null : workspaceModalActionHotkey(workspace);
+}
+
+/// Resolves [char] against the enabled, visible modal buttons in [hitboxes].
+/// Case is ignored; disabled and height-clipped buttons have no hitbox and
+/// therefore cannot be triggered from the keyboard.
+String? modalActionIdForHotkey(List<MonitorHitbox> hitboxes, String char) {
+  if (char.length != 1) {
+    return null;
+  }
+  final String key = char.toLowerCase();
+  for (final MonitorHitbox hitbox in hitboxes) {
+    if (hitbox.kind == MonitorHitKind.button &&
+        modalHotkeyForId(hitbox.id) == key) {
+      return hitbox.id;
+    }
+  }
+  return null;
+}
+
+/// Direction of keyboard focus movement inside a modal card.
+enum ModalMove { up, down, left, right }
+
+/// Moves keyboard focus spatially through the enabled modal [hitboxes].
+/// Horizontal movement stays on the current row; vertical movement selects
+/// the closest button center on the nearest row above or below. Boundaries
+/// clamp, and a missing selection begins at the first enabled button.
+String? moveModalSelection(
+  List<MonitorHitbox> hitboxes,
+  String? selectedId,
+  ModalMove move,
+) {
+  final List<MonitorHitbox> buttons = hitboxes
+      .where((MonitorHitbox hitbox) => hitbox.kind == MonitorHitKind.button)
+      .toList(growable: false);
+  if (buttons.isEmpty) {
+    return null;
+  }
+  final int currentIndex = buttons.indexWhere(
+    (MonitorHitbox hitbox) => hitbox.id == selectedId,
+  );
+  final MonitorHitbox current = currentIndex < 0
+      ? buttons.first
+      : buttons[currentIndex];
+  final double currentCenter = (current.colStart + current.colEnd) / 2;
+
+  Iterable<MonitorHitbox> candidates;
+  switch (move) {
+    case ModalMove.left:
+      candidates = buttons.where(
+        (MonitorHitbox hitbox) =>
+            hitbox.row == current.row && hitbox.colEnd <= current.colStart,
+      );
+      if (candidates.isEmpty) {
+        return current.id;
+      }
+      return candidates
+          .reduce(
+            (MonitorHitbox left, MonitorHitbox right) =>
+                left.colEnd > right.colEnd ? left : right,
+          )
+          .id;
+    case ModalMove.right:
+      candidates = buttons.where(
+        (MonitorHitbox hitbox) =>
+            hitbox.row == current.row && hitbox.colStart >= current.colEnd,
+      );
+      if (candidates.isEmpty) {
+        return current.id;
+      }
+      return candidates
+          .reduce(
+            (MonitorHitbox left, MonitorHitbox right) =>
+                left.colStart < right.colStart ? left : right,
+          )
+          .id;
+    case ModalMove.up:
+    case ModalMove.down:
+      final bool up = move == ModalMove.up;
+      candidates = buttons.where(
+        (MonitorHitbox hitbox) =>
+            up ? hitbox.row < current.row : hitbox.row > current.row,
+      );
+      if (candidates.isEmpty) {
+        return current.id;
+      }
+      final int targetRow = candidates
+          .map((MonitorHitbox hitbox) => hitbox.row)
+          .reduce(
+            up
+                ? (int a, int b) => a > b ? a : b
+                : (int a, int b) => a < b ? a : b,
+          );
+      final List<MonitorHitbox> rowButtons = candidates
+          .where((MonitorHitbox hitbox) => hitbox.row == targetRow)
+          .toList(growable: false);
+      rowButtons.sort((MonitorHitbox left, MonitorHitbox right) {
+        final double leftDistance =
+            ((left.colStart + left.colEnd) / 2 - currentCenter).abs();
+        final double rightDistance =
+            ((right.colStart + right.colEnd) / 2 - currentCenter).abs();
+        final int distanceOrder = leftDistance.compareTo(rightDistance);
+        return distanceOrder != 0
+            ? distanceOrder
+            : left.colStart.compareTo(right.colStart);
+      });
+      return rowButtons.first.id;
+  }
+}
+
+ButtonSpec _instanceButton(
+  InstanceModalAction action,
+  String label, {
+  bool danger = false,
+  bool enabled = true,
+}) => ButtonSpec(
+  id: instanceModalHitId(action),
+  label: label,
+  shortcut: instanceModalActionHotkey(action),
+  danger: danger,
+  enabled: enabled,
+);
+
+ButtonSpec _workspaceButton(
+  WorkspaceModalAction action,
+  String label, {
+  bool danger = false,
+}) => ButtonSpec(
+  id: workspaceModalHitId(action),
+  label: label,
+  shortcut: workspaceModalActionHotkey(action),
+  danger: danger,
+);
+
 /// The card's preferred width.
 const int _cardMaxWidth = 46;
 
@@ -169,7 +349,7 @@ const int _chipPadding = 4;
 const int _cardChrome = 4;
 
 /// The dismiss hint on the last content row of the card.
-const String _modalHint = 'esc closes';
+const String _modalHint = 'arrows move · enter runs · esc closes';
 
 /// The columns a card row's content is offset by within the card: the left
 /// border rule plus the one space of padding [renderPanel] adds.
@@ -177,13 +357,15 @@ const int _contentOffset = 2;
 
 /// The visible columns one card row needs to render every one of [buttons]
 /// whole: the row indent, each chip, and a gap between consecutive chips.
-int _rowWidth(List<ButtonSpec> buttons) {
+int _rowWidth(List<ButtonSpec> buttons, {bool showShortcuts = true}) {
   int width = _rowIndent;
   for (int index = 0; index < buttons.length; index++) {
     if (index > 0) {
       width += _rowGap;
     }
-    width += buttons[index].label.length + _chipPadding;
+    width +=
+        buttons[index].labelFor(showShortcut: showShortcuts).length +
+        _chipPadding;
   }
   return width;
 }
@@ -253,96 +435,59 @@ List<List<ButtonSpec>> _instanceRows({
   return <List<ButtonSpec>>[
     <ButtonSpec>[
       stopped
-          ? ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.start),
-              label: 'START',
-            )
-          : ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.stop),
-              label: 'STOP',
-            ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.restart),
-        label: 'RESTART',
+          ? _instanceButton(InstanceModalAction.start, 'START')
+          : _instanceButton(InstanceModalAction.stop, 'STOP'),
+      _instanceButton(
+        InstanceModalAction.restart,
+        'RESTART',
         enabled: !stopped,
       ),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.console),
-        label: 'CONSOLE',
+      _instanceButton(
+        InstanceModalAction.console,
+        'CONSOLE',
         enabled: !stopped,
       ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.setPort),
-        label: 'SET PORT',
-      ),
+      _instanceButton(InstanceModalAction.setPort, 'SET PORT'),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.pushToRemote),
-        label: 'PUSH TO REMOTE',
+      _instanceButton(
+        InstanceModalAction.pushToRemote,
+        'PUSH TO REMOTE',
         enabled: stopped,
       ),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.makeActive),
-        label: 'MAKE ACTIVE',
-      ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.motd),
-        label: 'MOTD',
-      ),
+      _instanceButton(InstanceModalAction.makeActive, 'MAKE ACTIVE'),
+      _instanceButton(InstanceModalAction.motd, 'MOTD'),
     ],
     <ButtonSpec>[
       locked
-          ? ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.unlock),
-              label: 'UNLOCK',
-            )
-          : ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.lock),
-              label: 'LOCK',
-            ),
+          ? _instanceButton(InstanceModalAction.unlock, 'UNLOCK')
+          : _instanceButton(InstanceModalAction.lock, 'LOCK'),
       isolated
-          ? ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.shared),
-              label: 'SHARE',
-            )
-          : ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.isolated),
-              label: 'ISOLATE',
-            ),
+          ? _instanceButton(InstanceModalAction.shared, 'SHARE')
+          : _instanceButton(InstanceModalAction.isolated, 'ISOLATE'),
     ],
     if (isolated)
       <ButtonSpec>[
-        ButtonSpec(
-          id: instanceModalHitId(InstanceModalAction.copyDropins),
-          label: 'COPY DROP-INS',
-        ),
+        _instanceButton(InstanceModalAction.copyDropins, 'COPY DROP-INS'),
       ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.folder),
-        label: 'FOLDER',
-      ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.update),
-        label: 'UPDATE',
-        enabled: stopped,
-      ),
+      _instanceButton(InstanceModalAction.folder, 'FOLDER'),
+      _instanceButton(InstanceModalAction.update, 'UPDATE', enabled: stopped),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.factoryReset),
-        label: 'FACTORY RESET',
+      _instanceButton(
+        InstanceModalAction.factoryReset,
+        'FACTORY RESET',
         danger: true,
         enabled: destructive,
       ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.delete),
-        label: 'DELETE',
+      _instanceButton(
+        InstanceModalAction.delete,
+        'DELETE',
         danger: true,
         enabled: destructive,
       ),
@@ -354,35 +499,16 @@ List<List<ButtonSpec>> _instanceRows({
 /// is always available; only WIPE carries the danger tone.
 List<List<ButtonSpec>> _workspaceRows() => <List<ButtonSpec>>[
   <ButtonSpec>[
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.buildTuning),
-      label: 'BUILD & TUNING',
-    ),
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.pullBuilds),
-      label: 'PULL BUILDS',
-    ),
+    _workspaceButton(WorkspaceModalAction.buildTuning, 'BUILD & TUNING'),
+    _workspaceButton(WorkspaceModalAction.pullBuilds, 'PULL BUILDS'),
   ],
   <ButtonSpec>[
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.createMany),
-      label: 'CREATE MANY',
-    ),
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.startAll),
-      label: 'START ALL',
-    ),
+    _workspaceButton(WorkspaceModalAction.createMany, 'CREATE MANY'),
+    _workspaceButton(WorkspaceModalAction.startAll, 'START ALL'),
   ],
   <ButtonSpec>[
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.stopAll),
-      label: 'STOP ALL',
-    ),
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.wipe),
-      label: 'WIPE',
-      danger: true,
-    ),
+    _workspaceButton(WorkspaceModalAction.stopAll, 'STOP ALL'),
+    _workspaceButton(WorkspaceModalAction.wipe, 'WIPE', danger: true),
   ],
 ];
 
@@ -395,85 +521,56 @@ List<List<ButtonSpec>> _remoteInstanceRows({
   return <List<ButtonSpec>>[
     <ButtonSpec>[
       stopped
-          ? ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.start),
-              label: 'START',
+          ? _instanceButton(
+              InstanceModalAction.start,
+              'START',
               enabled: !operationsBlocked,
             )
-          : ButtonSpec(
-              id: instanceModalHitId(InstanceModalAction.stop),
-              label: 'STOP',
+          : _instanceButton(
+              InstanceModalAction.stop,
+              'STOP',
               enabled: !operationsBlocked,
             ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.restart),
-        label: 'RESTART',
+      _instanceButton(
+        InstanceModalAction.restart,
+        'RESTART',
         enabled: !stopped && !operationsBlocked,
       ),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.console),
-        label: 'CONSOLE',
+      _instanceButton(
+        InstanceModalAction.console,
+        'CONSOLE',
         enabled: !stopped && !operationsBlocked,
       ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.history),
-        label: 'HISTORY',
-      ),
+      _instanceButton(InstanceModalAction.history, 'HISTORY'),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.pullToLocal),
-        label: 'PULL TO LOCAL',
+      _instanceButton(
+        InstanceModalAction.pullToLocal,
+        'PULL TO LOCAL',
         enabled: stopped && !operationsBlocked,
       ),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.settings),
-        label: 'SETTINGS',
-      ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.folder),
-        label: 'OPEN FOLDER',
-      ),
+      _instanceButton(InstanceModalAction.settings, 'SETTINGS'),
+      _instanceButton(InstanceModalAction.folder, 'OPEN FOLDER'),
     ],
     <ButtonSpec>[
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.reinstall),
-        label: 'REINSTALL',
-        danger: true,
-      ),
-      ButtonSpec(
-        id: instanceModalHitId(InstanceModalAction.delete),
-        label: 'DELETE',
-        danger: true,
-      ),
+      _instanceButton(InstanceModalAction.reinstall, 'REINSTALL', danger: true),
+      _instanceButton(InstanceModalAction.delete, 'DELETE', danger: true),
     ],
   ];
 }
 
 List<List<ButtonSpec>> _remoteWorkspaceRows() => <List<ButtonSpec>>[
   <ButtonSpec>[
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.connect),
-      label: 'CONNECTION',
-    ),
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.files),
-      label: 'FILES',
-    ),
+    _workspaceButton(WorkspaceModalAction.connect, 'CONNECTION'),
+    _workspaceButton(WorkspaceModalAction.files, 'FILES'),
   ],
   <ButtonSpec>[
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.createMany),
-      label: 'CREATE MANY',
-    ),
-    ButtonSpec(
-      id: workspaceModalHitId(WorkspaceModalAction.bulkActions),
-      label: 'BULK ACTIONS',
-    ),
+    _workspaceButton(WorkspaceModalAction.createMany, 'CREATE MANY'),
+    _workspaceButton(WorkspaceModalAction.bulkActions, 'BULK ACTIONS'),
   ],
 ];
 
@@ -510,8 +607,9 @@ String _hintRow(int innerWidth, MonitorTheme theme) {
 ///
 /// [latest] is the instance's most recent reading (it badges the card and
 /// gates the runtime actions), [locked] and [isolated] are its flags. Both
-/// are ignored by the workspace card. [hoveredId] and [pressedId] thread
-/// straight through to the chips.
+/// are ignored by the workspace card. [selectedId] is keyboard focus;
+/// [hoveredId] temporarily takes visual precedence when the pointer is over a
+/// button, and [pressedId] remains the active mouse press.
 ///
 /// The card never outgrows the frame: its width follows [_cardWidth], and
 /// when [lines] cannot hold every chip row the rows are dropped from the
@@ -526,6 +624,7 @@ MonitorFrame overlayModal({
   bool remote = false,
   String? operationBlockReason,
   required MonitorTheme theme,
+  String? selectedId,
   String? hoveredId,
   String? pressedId,
   required int columns,
@@ -571,15 +670,29 @@ MonitorFrame overlayModal({
   final bool showHint =
       lines >= buttonRows.length + (showReason ? reasonRows : 0) + 3;
 
+  final List<String> enabledIds = buttonRows
+      .expand((List<ButtonSpec> row) => row)
+      .where((ButtonSpec button) => button.enabled)
+      .map((ButtonSpec button) => button.id)
+      .toList(growable: false);
+  final String? keyboardFocusId = enabledIds.contains(selectedId)
+      ? selectedId
+      : enabledIds.isEmpty
+      ? null
+      : enabledIds.first;
+  final String? effectiveHoveredId = hoveredId ?? keyboardFocusId;
+
   final List<String> content = <String>[];
   final List<List<ButtonSpan>> rowSpans = <List<ButtonSpan>>[];
   for (final List<ButtonSpec> buttons in buttonRows) {
+    final bool showShortcuts = _rowWidth(buttons) + _cardChrome <= width;
     final ButtonRowRender render = layoutButtonRow(
       buttons: buttons,
       width: innerWidth,
       theme: theme,
-      hoveredId: hoveredId,
+      hoveredId: effectiveHoveredId,
       pressedId: pressedId,
+      showShortcuts: showShortcuts,
       gap: _rowGap,
       indent: _rowIndent,
     );
