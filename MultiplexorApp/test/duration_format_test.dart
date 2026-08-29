@@ -59,6 +59,22 @@ void main() {
     });
   });
 
+  group('formatBytesPerSecond', () {
+    test('formats throughput and preserves unavailable readings', () {
+      expect(formatBytesPerSecond(null), 'n/a');
+      expect(formatBytesPerSecond(1536), '1.5K/s');
+      expect(formatBytesPerSecond(0), '0B/s');
+    });
+  });
+
+  group('formatPacketsPerSecond', () {
+    test('formats packet rates and preserves unavailable readings', () {
+      expect(formatPacketsPerSecond(null), 'n/a');
+      expect(formatPacketsPerSecond(1234), '1.2kpps');
+      expect(formatPacketsPerSecond(0), '0pps');
+    });
+  });
+
   group('formatCpuPercent', () {
     test('renders n/a for null', () {
       expect(formatCpuPercent(null), 'n/a');

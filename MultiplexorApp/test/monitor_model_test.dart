@@ -27,6 +27,8 @@ List<MetricSample> runHistory(
   int? latencyMs = 14,
   double? cpuPercent = 62.5,
   int? rssBytes = 3221225472,
+  double? networkRxPacketsPerSecond = 120,
+  double? networkTxPacketsPerSecond = 80,
   int? uptimeSeconds = 9042,
   String? version = '1.21.4',
   String? logPath = '/srv/mc/alpha/logs/latest.log',
@@ -44,6 +46,12 @@ List<MetricSample> runHistory(
       latencyMs: latencyMs,
       cpuPercent: cpuPercent == null ? null : cpuPercent - wobble * 4,
       rssBytes: rssBytes == null ? null : rssBytes - index * 1048576,
+      networkRxPacketsPerSecond: networkRxPacketsPerSecond == null
+          ? null
+          : networkRxPacketsPerSecond + index % 5,
+      networkTxPacketsPerSecond: networkTxPacketsPerSecond == null
+          ? null
+          : networkTxPacketsPerSecond + index % 3,
       uptimeSeconds: uptimeSeconds == null ? null : uptimeSeconds + index * 30,
       version: version,
       logPath: logPath,
@@ -63,6 +71,8 @@ List<MetricSample> stoppedHistory(String instance) => runHistory(
   latencyMs: null,
   cpuPercent: null,
   rssBytes: null,
+  networkRxPacketsPerSecond: null,
+  networkTxPacketsPerSecond: null,
   uptimeSeconds: null,
   version: null,
   logPath: null,
@@ -618,6 +628,9 @@ void main() {
       expect(labels, contains('CPU %'));
       expect(labels, contains('MEM MiB'));
       expect(card, contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
+      expect(card, contains('NETWORK PPS'));
+      expect(card, contains('RX'));
+      expect(card, contains('TX'));
       expect(card, contains('100 ┤'), reason: 'forced 0..100 CPU gutter');
       expect(card, contains('PLAYERS'));
       expect(card, contains('PING'));
@@ -1389,27 +1402,32 @@ void main() {
       ).rows,
     );
 
-    test('keeps the labels, the chart, a blank and the facts when tall', () {
+    test('keeps labels, chart, facts, and the bottom network monitor', () {
       final List<String> rows = panel(9);
       expect(rows.length, 9);
       expect(rows[1], contains('TPS'), reason: 'the chart label row');
       expect(rows[2], contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
-      expect(rows[7], contains('PING'), reason: 'the facts row');
+      expect(rows[6], contains('PING'), reason: 'the facts row');
+      expect(rows[7], contains('NETWORK PPS'));
+      expect(rows[7], contains('RX'));
+      expect(rows[7], contains('TX'));
     });
 
-    test('gives up the blank row first when the body tightens', () {
+    test('keeps the network monitor when the body tightens', () {
       final List<String> rows = panel(8);
       expect(rows.length, 8);
       expect(rows[1], contains('TPS'));
-      expect(rows.join('\n'), contains('PING'));
+      expect(rows.join('\n'), isNot(contains('PING')));
+      expect(rows.join('\n'), contains('NETWORK PPS'));
     });
 
-    test('gives up the facts row next, never the chart', () {
+    test('gives up labels before the chart or network monitor', () {
       final List<String> rows = panel(7);
       expect(rows.length, 7);
       final String joined = rows.join('\n');
       expect(joined, isNot(contains('PING')));
       expect(joined, contains('20 ┤'), reason: 'the chart is what is left');
+      expect(joined, contains('NETWORK PPS'));
     });
 
     test('renders a stopped selection as its single idle line', () {
@@ -1429,6 +1447,41 @@ void main() {
       expect(stopped.length, 3);
       expect(stopped[0], contains('GAMMA'));
       expect(stopped[1], contains('stopped · START to launch'));
+    });
+
+    test('falls back to byte throughput when packet telemetry is absent', () {
+      final MonitorSnapshot snapshot = MonitorSnapshot(
+        instances: const <String>['remote'],
+        history: <String, List<MetricSample>>{
+          'remote': <MetricSample>[
+            MetricSample(
+              ts: now,
+              instance: 'remote',
+              state: RuntimeState.running,
+              networkRxBytesPerSecond: 1536,
+              networkTxBytesPerSecond: 512,
+            ),
+          ],
+        },
+        consumerName: 'remote',
+        view: MonitorView.remote,
+      );
+      final String joined = stripAll(
+        renderSelectedPanel(
+          snapshot: snapshot,
+          selectedIndex: 0,
+          rows: 9,
+          width: 80,
+          topRow: 0,
+          colOffset: 0,
+          theme: plain,
+          range: range,
+          now: now,
+        ).rows,
+      ).join('\n');
+      expect(joined, contains('NETWORK B/s'));
+      expect(joined, contains('RX 1.5K/s'));
+      expect(joined, contains('TX 512B/s'));
     });
   });
 
@@ -1460,7 +1513,7 @@ void main() {
       ).rows;
     }
 
-    test('renders four charts, a log panel and a footer at 132x40', () {
+    test('renders five charts, a log panel and a footer at 132x40', () {
       final List<String> rows = detail();
       expectExactFrame(rows, 132, 40);
 
@@ -1469,11 +1522,20 @@ void main() {
       expect(joined, contains('┌─ CPU % '));
       expect(joined, contains('┌─ MEM MiB '));
       expect(joined, contains('┌─ PLAYERS '));
+      expect(joined, contains('┌─ NETWORK PPS · RX/TX '));
       expect(joined, contains('┌─ LOG '));
       expect(joined, contains('latest.log'));
       expect(joined, contains('[esc] back'));
       expect(joined, contains('DETAIL · 15m'));
       expect(joined, contains('alpha'));
+      final String networkTop = stripAll(
+        rows,
+      ).firstWhere((String row) => row.contains('NETWORK PPS'));
+      expect(
+        networkTop.split('┌').length - 1,
+        1,
+        reason: 'the bottom network chart spans the full detail width',
+      );
     });
 
     test('stacks the charts full width at 90x32', () {
@@ -1499,6 +1561,7 @@ void main() {
       expect(narrow, contains('STATE running'));
       expect(narrow, contains('PLAYERS'));
       expect(narrow, isNot(contains('UP ')));
+      expect(narrow, contains('NETWORK PPS'));
     });
 
     test('renders the log-empty row when there are no log lines', () {

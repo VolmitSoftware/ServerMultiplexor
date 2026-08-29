@@ -260,4 +260,27 @@ void main() {
       expect(metrics, isNot(contains('unknown\t')));
     },
   );
+
+  test(
+    'emits the canonical resource row with packet counters unavailable',
+    () async {
+      final PterodactylMonitorFeed feed = PterodactylMonitorFeed.withCapture(
+        profileId: 'production',
+        captureFleet: (String _) async => <PterodactylFleetSample>[
+          PterodactylFleetSample(
+            server: server('alpha'),
+            resources: resources('running'),
+          ),
+        ],
+      );
+
+      final List<String> cells = (await feed.captureMetrics()).split('\t');
+      expect(cells, hasLength(21));
+      expect(cells[14], '2048');
+      expect(cells[15], '300');
+      expect(cells[16], '400');
+      expect(cells[19], '-');
+      expect(cells[20], '-');
+    },
+  );
 }

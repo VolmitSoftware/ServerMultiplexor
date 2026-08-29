@@ -32,6 +32,7 @@ class MetricsSampler {
   final DateTime Function() _clock;
 
   final Map<String, List<MetricSample>> _rings = <String, List<MetricSample>>{};
+  final Map<String, MetricSample> _networkBaselines = <String, MetricSample>{};
   List<String> _instances = <String>[];
   bool _sweeping = false;
 
@@ -68,9 +69,13 @@ class MetricsSampler {
         if (line.isEmpty) {
           continue;
         }
-        final MetricSample? sample = MetricSample.fromMetricsTsv(line, now);
-        if (sample != null) {
+        final MetricSample? captured = MetricSample.fromMetricsTsv(line, now);
+        if (captured != null) {
+          final MetricSample sample = captured.withNetworkRatesFrom(
+            _networkBaselines[captured.instance],
+          );
           parsed.add(sample);
+          _networkBaselines[captured.instance] = captured;
         }
       }
 

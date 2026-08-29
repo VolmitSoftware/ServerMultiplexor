@@ -21,6 +21,12 @@ void main() {
     int? diskBytes,
     int? networkRxBytes,
     int? networkTxBytes,
+    int? networkRxPackets,
+    int? networkTxPackets,
+    double? networkRxBytesPerSecond,
+    double? networkTxBytesPerSecond,
+    double? networkRxPacketsPerSecond,
+    double? networkTxPacketsPerSecond,
     int? memoryLimitBytes,
     int? diskLimitBytes,
     int? uptimeSeconds,
@@ -40,6 +46,12 @@ void main() {
     diskBytes: diskBytes,
     networkRxBytes: networkRxBytes,
     networkTxBytes: networkTxBytes,
+    networkRxPackets: networkRxPackets,
+    networkTxPackets: networkTxPackets,
+    networkRxBytesPerSecond: networkRxBytesPerSecond,
+    networkTxBytesPerSecond: networkTxBytesPerSecond,
+    networkRxPacketsPerSecond: networkRxPacketsPerSecond,
+    networkTxPacketsPerSecond: networkTxPacketsPerSecond,
     memoryLimitBytes: memoryLimitBytes,
     diskLimitBytes: diskLimitBytes,
     uptimeSeconds: uptimeSeconds,
@@ -82,6 +94,12 @@ void main() {
             diskBytes: 100,
             networkRxBytes: 1000,
             networkTxBytes: 400,
+            networkRxPackets: 100,
+            networkTxPackets: 40,
+            networkRxBytesPerSecond: 10,
+            networkTxBytesPerSecond: 4,
+            networkRxPacketsPerSecond: 1,
+            networkTxPacketsPerSecond: 0.4,
             memoryLimitBytes: 4000,
             diskLimitBytes: 8000,
             uptimeSeconds: 60,
@@ -98,6 +116,12 @@ void main() {
             diskBytes: 200,
             networkRxBytes: 2000,
             networkTxBytes: 800,
+            networkRxPackets: 200,
+            networkTxPackets: 80,
+            networkRxBytesPerSecond: 20,
+            networkTxBytesPerSecond: 8,
+            networkRxPacketsPerSecond: 2,
+            networkTxPacketsPerSecond: 0.8,
             memoryLimitBytes: 6000,
             diskLimitBytes: 10000,
             uptimeSeconds: 120,
@@ -114,6 +138,12 @@ void main() {
             diskBytes: 300,
             networkRxBytes: 3000,
             networkTxBytes: 1200,
+            networkRxPackets: 300,
+            networkTxPackets: 120,
+            networkRxBytesPerSecond: 30,
+            networkTxBytesPerSecond: 12,
+            networkRxPacketsPerSecond: 3,
+            networkTxPacketsPerSecond: 1.2,
             memoryLimitBytes: 8000,
             diskLimitBytes: 12000,
             uptimeSeconds: 180,
@@ -132,6 +162,12 @@ void main() {
         expect(rolled.diskBytes, 200);
         expect(rolled.networkRxBytes, 2000);
         expect(rolled.networkTxBytes, 800);
+        expect(rolled.networkRxPackets, 200);
+        expect(rolled.networkTxPackets, 80);
+        expect(rolled.networkRxBytesPerSecond, 20);
+        expect(rolled.networkTxBytesPerSecond, 8);
+        expect(rolled.networkRxPacketsPerSecond, 2);
+        expect(rolled.networkTxPacketsPerSecond, closeTo(0.8, 0.0001));
         expect(rolled.memoryLimitBytes, 6000);
         expect(rolled.diskLimitBytes, 10000);
         expect(rolled.uptimeSeconds, 120);

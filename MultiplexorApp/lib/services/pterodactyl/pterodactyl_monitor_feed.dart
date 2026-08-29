@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import '../runtime_state.dart';
+import '../monitor/metric_sample.dart';
 import 'pterodactyl_console_protocol.dart';
 import 'pterodactyl_models.dart';
 import 'pterodactyl_service.dart';
@@ -109,27 +110,22 @@ final class PterodactylMonitorFeed {
       }
       final PterodactylAllocation? allocation = sample.server.primaryAllocation;
       rows.add(
-        <String>[
-          sample.server.identifier,
-          state.name,
-          allocation == null ? '-' : '${allocation.port}',
-          'unlocked',
-          '-',
-          '-',
-          'Pterodactyl',
-          '-',
-          'shared',
-          '${resources.uptime.inSeconds}',
-          '${resources.cpuAbsolute}',
-          '${resources.memoryBytes}',
-          '-',
-          '-',
-          '${resources.diskBytes}',
-          '${resources.networkRxBytes}',
-          '${resources.networkTxBytes}',
-          '${sample.server.limits.memoryMiB * 1024 * 1024}',
-          '${sample.server.limits.diskMiB * 1024 * 1024}',
-        ].join('\t'),
+        metricsTsvRow(
+          name: sample.server.identifier,
+          state: state,
+          port: allocation?.port,
+          locked: false,
+          version: 'Pterodactyl',
+          isolated: false,
+          uptimeSeconds: resources.uptime.inSeconds,
+          cpuPercent: resources.cpuAbsolute,
+          rssBytes: resources.memoryBytes,
+          diskBytes: resources.diskBytes,
+          networkRxBytes: resources.networkRxBytes,
+          networkTxBytes: resources.networkTxBytes,
+          memoryLimitBytes: sample.server.limits.memoryMiB * 1024 * 1024,
+          diskLimitBytes: sample.server.limits.diskMiB * 1024 * 1024,
+        ),
       );
     }
     return rows.join('\n');

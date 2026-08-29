@@ -45,6 +45,24 @@ String formatBytes(int? bytes) {
   return '${_formatScaled(scaled)}${units[magnitude]}';
 }
 
+/// Formats a measured byte throughput with the same compact base-1024 scale
+/// as [formatBytes], followed by `/s`. Missing data remains `n/a`.
+String formatBytesPerSecond(double? bytesPerSecond) {
+  if (bytesPerSecond == null) {
+    return 'n/a';
+  }
+  return '${formatBytes(bytesPerSecond.round())}/s';
+}
+
+/// Formats a measured packet rate compactly (`840pps`, `1.2kpps`). Missing
+/// data remains `n/a`; zero is retained when two counters truly did not move.
+String formatPacketsPerSecond(double? packetsPerSecond) {
+  if (packetsPerSecond == null) {
+    return 'n/a';
+  }
+  return '${formatCompactNumber(packetsPerSecond)}pps';
+}
+
 /// Formats [percent] as a CPU-load string with one decimal place and a
 /// trailing `%`: `0.0%`, `4.2%`, `137.5%`. Values above 100 are legitimate
 /// (a multi-threaded process can exceed one core) and are never clamped.

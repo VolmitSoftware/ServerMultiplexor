@@ -164,6 +164,7 @@ List<String> _normalizePositionalArgs(List<String> args) {
         'leaf',
         'spigot',
         'forge',
+        'mohist',
         'fabric',
         'neoforge',
       };

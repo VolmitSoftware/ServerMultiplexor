@@ -51,6 +51,165 @@ void main() {
       expect(result.stderr, contains('--consumer fabric server create'));
     });
 
+    test('Mohist is owned by the Forge consumer', () async {
+      final CapturedResult result = await service.execute(<String>[
+        'server',
+        'create',
+        'hybrid',
+        '--type',
+        'mohist',
+        '--jar',
+        '/tmp/server.jar',
+      ], stream: false);
+
+      expect(result.exitCode, 2);
+      expect(
+        result.stderr,
+        contains('Server type "mohist" belongs to the forge consumer'),
+      );
+      expect(result.stderr, contains('--consumer forge server create'));
+    });
+
+    test('Mohist persistently tracks mod and plugin drop-ins', () async {
+      service.setConsumerOverride(ConsumerProfile.forge);
+      final String forgeRoot = consumerService.rootFor(ConsumerProfile.forge);
+      final String pluginRoot = consumerService.rootFor(ConsumerProfile.plugin);
+      final Directory modDropins = Directory('$forgeRoot/dropins/mods')
+        ..createSync(recursive: true);
+      final Directory pluginDropins = Directory('$pluginRoot/dropins/plugins')
+        ..createSync(recursive: true);
+      final File mod = File('${modDropins.path}/ExampleMod.jar')
+        ..writeAsStringSync('mod-v1');
+      final File plugin = File('${pluginDropins.path}/ExamplePlugin.jar')
+        ..writeAsStringSync('plugin-v1');
+      final File serverJar = File('${root.path}/mohist.jar')
+        ..writeAsStringSync('mohist server');
+
+      final CapturedResult created = await service.execute(<String>[
+        'server',
+        'create',
+        'hybrid',
+        '--type',
+        'mohist',
+        '--jar',
+        serverJar.path,
+      ], stream: false);
+
+      expect(created.exitCode, 0, reason: created.stderr);
+      final String instance = '$forgeRoot/instances/hybrid';
+      expect(
+        File('$instance/mods/ExampleMod.jar').readAsStringSync(),
+        'mod-v1',
+      );
+      expect(
+        File('$instance/plugins/ExamplePlugin.jar').readAsStringSync(),
+        'plugin-v1',
+      );
+      final String metadata = File(
+        '$instance/.server-source',
+      ).readAsStringSync();
+      expect(metadata, contains('type=mohist'));
+      expect(metadata, contains('launch=jar'));
+      expect(metadata, contains('dropin_sources=mods,plugins'));
+
+      mod.writeAsStringSync('mod-v2');
+      plugin.writeAsStringSync('plugin-v2');
+      final CapturedResult synced = await service.execute(<String>[
+        'mods',
+        'sync',
+        'hybrid',
+      ], stream: false);
+
+      expect(synced.exitCode, 0, reason: synced.stderr);
+      expect(
+        File('$instance/mods/ExampleMod.jar').readAsStringSync(),
+        'mod-v2',
+      );
+      expect(
+        File('$instance/plugins/ExamplePlugin.jar').readAsStringSync(),
+        'plugin-v2',
+      );
+      final Map<String, dynamic> state =
+          jsonDecode(
+                File('$instance/.multiplexor-dropins.json').readAsStringSync(),
+              )
+              as Map<String, dynamic>;
+      final Map<String, dynamic> hashes = state['jars'] as Map<String, dynamic>;
+      expect(hashes, containsPair('mods/ExampleMod.jar', isA<String>()));
+      expect(hashes, containsPair('plugins/ExamplePlugin.jar', isA<String>()));
+    });
+
+    test('Mohist can track only plugin drop-ins', () async {
+      service.setConsumerOverride(ConsumerProfile.forge);
+      final String forgeRoot = consumerService.rootFor(ConsumerProfile.forge);
+      final String pluginRoot = consumerService.rootFor(ConsumerProfile.plugin);
+      File('$forgeRoot/dropins/mods/SkippedMod.jar')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('mod');
+      File('$pluginRoot/dropins/plugins/TrackedPlugin.jar')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('plugin');
+      final File serverJar = File('${root.path}/mohist.jar')
+        ..writeAsStringSync('mohist server');
+
+      final CapturedResult created = await service.execute(<String>[
+        'server',
+        'create',
+        'plugins-only',
+        '--type',
+        'mohist',
+        '--jar',
+        serverJar.path,
+        '--plugin-dropins',
+      ], stream: false);
+
+      expect(created.exitCode, 0, reason: created.stderr);
+      final String instance = '$forgeRoot/instances/plugins-only';
+      expect(File('$instance/mods/SkippedMod.jar').existsSync(), isFalse);
+      expect(File('$instance/plugins/TrackedPlugin.jar').existsSync(), isTrue);
+      expect(
+        File('$instance/.server-source').readAsStringSync(),
+        contains('dropin_sources=plugins'),
+      );
+    });
+
+    test('Mohist source flags reject incompatible creation modes', () async {
+      service.setConsumerOverride(ConsumerProfile.forge);
+      final File serverJar = File('${root.path}/server.jar')
+        ..writeAsStringSync('server');
+
+      final CapturedResult isolated = await service.execute(<String>[
+        'server',
+        'create',
+        'invalid-isolated',
+        '--type',
+        'mohist',
+        '--jar',
+        serverJar.path,
+        '--isolated',
+        '--plugin-dropins',
+      ], stream: false);
+      expect(isolated.exitCode, 2);
+      expect(isolated.stderr, contains('cannot be combined'));
+
+      final CapturedResult forge = await service.execute(<String>[
+        'server',
+        'create',
+        'invalid-forge',
+        '--type',
+        'forge',
+        '--jar',
+        serverJar.path,
+        '--plugin-dropins',
+      ], stream: false);
+      expect(forge.exitCode, 2);
+      expect(forge.stderr, contains('only valid for Mohist'));
+      final String instances =
+          '${consumerService.rootFor(ConsumerProfile.forge)}/instances';
+      expect(Directory('$instances/invalid-isolated').existsSync(), isFalse);
+      expect(Directory('$instances/invalid-forge').existsSync(), isFalse);
+    });
+
     test(
       'custom jars are imported into content-addressed managed builds',
       () async {

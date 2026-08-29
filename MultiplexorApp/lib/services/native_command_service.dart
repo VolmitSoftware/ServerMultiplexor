@@ -1325,6 +1325,12 @@ class NativeCommandService {
     final profile = _activeConsumer;
     final isolated = options['isolated'] == 'true';
     final List<String> artifacts = createArguments.artifacts;
+    final Set<String> mohistDropinSources =
+        _resolveMohistDropinSourcesForCreate(
+          type: type,
+          isolated: isolated,
+          options: options,
+        );
 
     if (artifacts.isNotEmpty && !isolated) {
       throw _NativeCommandException(
@@ -1353,6 +1359,13 @@ class NativeCommandService {
         jarPath: jar,
         importJar: true,
         isolated: isolated,
+        io: io,
+      );
+      _configureMohistDropins(
+        profile,
+        name,
+        type: type,
+        sources: mohistDropinSources,
         io: io,
       );
       _copySelectedDropinArtifacts(profile, name, artifactSources, io);
@@ -1396,6 +1409,13 @@ class NativeCommandService {
       type: type,
       jarPath: jarPath,
       isolated: isolated,
+      io: io,
+    );
+    _configureMohistDropins(
+      profile,
+      name,
+      type: type,
+      sources: mohistDropinSources,
       io: io,
     );
     _copySelectedDropinArtifacts(profile, name, artifactSources, io);
@@ -1467,6 +1487,15 @@ class NativeCommandService {
           type: type,
           jarPath: jarPath,
           isolated: isolated,
+          io: io,
+        );
+        _configureMohistDropins(
+          profile,
+          name,
+          type: type,
+          sources: type == 'mohist' && !isolated
+              ? const <String>{'mods', 'plugins'}
+              : const <String>{},
           io: io,
         );
         io.write(
@@ -1795,14 +1824,23 @@ class NativeCommandService {
               io.write('[SKIP] $instance is isolated');
               continue;
             }
-            final report = _pluginsSyncInstance(
-              profile,
-              instance,
-              clean: clean,
-              sourceModsOverride: mods,
-              strict: true,
-              preserveLocalChanges: false,
-            );
+            final _DropinSyncReport report =
+                _instanceSourceType(profile, instance) == 'mohist'
+                ? _syncSubscribedDropinsInstance(
+                    profile,
+                    instance,
+                    clean: clean,
+                    strict: true,
+                    preserveLocalChanges: false,
+                  )
+                : _pluginsSyncInstance(
+                    profile,
+                    instance,
+                    clean: clean,
+                    sourceModsOverride: mods,
+                    strict: true,
+                    preserveLocalChanges: false,
+                  );
             io.write(
               '[OK] Copied ${report.copiedJars.length} jar(s) -> $instance',
             );
@@ -1821,14 +1859,23 @@ class NativeCommandService {
           io.write('[SKIP] $target is isolated; nothing to sync');
           return 0;
         }
-        final report = _pluginsSyncInstance(
-          profile,
-          target,
-          clean: clean,
-          sourceModsOverride: mods,
-          strict: true,
-          preserveLocalChanges: false,
-        );
+        final _DropinSyncReport report =
+            _instanceSourceType(profile, target) == 'mohist'
+            ? _syncSubscribedDropinsInstance(
+                profile,
+                target,
+                clean: clean,
+                strict: true,
+                preserveLocalChanges: false,
+              )
+            : _pluginsSyncInstance(
+                profile,
+                target,
+                clean: clean,
+                sourceModsOverride: mods,
+                strict: true,
+                preserveLocalChanges: false,
+              );
         io.write('[OK] Copied ${report.copiedJars.length} jar(s) -> $target');
         if (report.copiedJars.isNotEmpty) {
           io.write('[INFO] Copied jars: ${report.copiedJars.join(', ')}');
@@ -1960,7 +2007,7 @@ class NativeCommandService {
       case 'latest':
         if (rest.isEmpty) {
           throw _NativeCommandException(
-            'Usage: build latest <paper|purpur|folia|canvas|leaf|forge|fabric|neoforge|spigot>',
+            'Usage: build latest <paper|purpur|folia|canvas|leaf|forge|mohist|fabric|neoforge|spigot>',
             2,
           );
         }
@@ -1996,6 +2043,7 @@ class NativeCommandService {
       case 'leaf':
       case 'spigot':
       case 'forge':
+      case 'mohist':
       case 'fabric':
       case 'neoforge':
         final buildOptions = _parseOptions(rest);
@@ -2004,7 +2052,7 @@ class NativeCommandService {
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: build <paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge|latest|list|list-all|versions|cache-info|test-latest|prune>',
+          'Usage: build <paper|purpur|folia|canvas|leaf|spigot|forge|mohist|fabric|neoforge|latest|list|list-all|versions|cache-info|test-latest|prune>',
           2,
         );
     }
@@ -3911,7 +3959,10 @@ class NativeCommandService {
     final types = switch (target) {
       'all' => const <String>['paper', 'purpur', 'folia', 'canvas', 'leaf'],
       'paper' || 'purpur' || 'folia' || 'canvas' || 'leaf' => <String>[target],
-      'forge' || 'fabric' || 'neoforge' => throw _NativeCommandException(
+      'forge' ||
+      'mohist' ||
+      'fabric' ||
+      'neoforge' => throw _NativeCommandException(
         '$target resolves versions from upstream metadata APIs; there is no repo to sync. Use: build $target [--mc <version>]',
         2,
       ),
@@ -4204,53 +4255,64 @@ class NativeCommandService {
 
     final source = _dropinsSource(profile, mods: mods);
     final sourceDir = Directory(source)..createSync(recursive: true);
+    final String sourceKind = mods ? 'mods' : 'plugins';
     daemonIo.write(
       '[INFO] ${mods ? 'Mods' : 'Plugins'} watcher daemon started (pid $pid)',
     );
     daemonIo.write('[INFO] Watching: $source');
 
     Future<void> syncAll() async {
-      final instances = _instanceNames(profile);
-      if (instances.isEmpty) {
+      final List<({ConsumerProfile profile, String instance})> subscribers =
+          _dropinSubscribers(profile, sourceKind);
+      if (subscribers.isEmpty) {
         daemonIo.write('[INFO] No instances available for watcher sync');
         return;
       }
 
-      for (final instance in instances) {
+      for (final ({ConsumerProfile profile, String instance}) subscriber
+          in subscribers) {
+        final ConsumerProfile targetProfile = subscriber.profile;
+        final String instance = subscriber.instance;
+        final String targetLabel = targetProfile == profile
+            ? instance
+            : '${targetProfile.shortName}/$instance';
         try {
-          final report = _pluginsSyncInstance(
-            profile,
-            instance,
+          final _DropinSyncReport report = _syncDropinSourceToInstance(
+            targetProfile: targetProfile,
+            instance: instance,
+            sourceProfile: profile,
+            sourceKind: sourceKind,
             clean: false,
-            sourceModsOverride: mods,
             strict: false,
             preserveLocalChanges: true,
           );
           if (report.copiedJars.isNotEmpty) {
             daemonIo.write(
-              '[SYNC] $instance copied ${report.copiedJars.length} jar(s): ${report.copiedJars.join(', ')}',
+              '[SYNC] $targetLabel copied ${report.copiedJars.length} jar(s): ${report.copiedJars.join(', ')}',
             );
             await _announceDropinSync(
-              profile,
+              targetProfile,
               instance,
               report.copiedJars.length,
             );
           }
           if (report.failedJars.isNotEmpty) {
             for (final failed in report.failedJars) {
-              daemonIo.error('[WARN] Watch sync failed for $instance: $failed');
+              daemonIo.error(
+                '[WARN] Watch sync failed for $targetLabel: $failed',
+              );
             }
           }
           if (report.preservedJars.isNotEmpty) {
             daemonIo.error(
-              '[WARN] Watch sync preserved local jar(s) in $instance: ${report.preservedJars.join(', ')}',
+              '[WARN] Watch sync preserved local jar(s) in $targetLabel: ${report.preservedJars.join(', ')}',
             );
             daemonIo.error(
-              '[WARN] Run ${mods ? 'mods' : 'plugins'} sync $instance to replace them from dropins.',
+              '[WARN] Run drop-in sync for $targetLabel to replace them from the tracked source.',
             );
           }
         } catch (e, st) {
-          daemonIo.error('[WARN] Watch sync failed for $instance: $e');
+          daemonIo.error('[WARN] Watch sync failed for $targetLabel: $e');
           if (context.verbose) {
             daemonIo.error('$st');
           }
@@ -4259,45 +4321,56 @@ class NativeCommandService {
     }
 
     Future<void> syncChangedJar(String sourceJarPath) async {
-      final instances = _instanceNames(profile);
-      if (instances.isEmpty) {
+      final List<({ConsumerProfile profile, String instance})> subscribers =
+          _dropinSubscribers(profile, sourceKind);
+      if (subscribers.isEmpty) {
         return;
       }
 
-      for (final instance in instances) {
+      for (final ({ConsumerProfile profile, String instance}) subscriber
+          in subscribers) {
+        final ConsumerProfile targetProfile = subscriber.profile;
+        final String instance = subscriber.instance;
+        final String targetLabel = targetProfile == profile
+            ? instance
+            : '${targetProfile.shortName}/$instance';
         try {
-          final report = _pluginsSyncOneJarToInstance(
-            profile,
-            instance,
-            sourceJarPath,
+          final _DropinSyncReport report = _syncOneDropinJarToInstance(
+            targetProfile: targetProfile,
+            instance: instance,
+            sourceProfile: profile,
+            sourceKind: sourceKind,
+            sourceJarPath: sourceJarPath,
             strict: false,
             preserveLocalChanges: true,
           );
           if (report.copiedJars.isNotEmpty) {
             daemonIo.write(
-              '[SYNC] $instance copied ${report.copiedJars.join(', ')}',
+              '[SYNC] $targetLabel copied ${report.copiedJars.join(', ')}',
             );
             await _announceDropinSync(
-              profile,
+              targetProfile,
               instance,
               report.copiedJars.length,
             );
           }
           if (report.failedJars.isNotEmpty) {
             for (final failed in report.failedJars) {
-              daemonIo.error('[WARN] Watch sync failed for $instance: $failed');
+              daemonIo.error(
+                '[WARN] Watch sync failed for $targetLabel: $failed',
+              );
             }
           }
           if (report.preservedJars.isNotEmpty) {
             daemonIo.error(
-              '[WARN] Watch sync preserved local jar(s) in $instance: ${report.preservedJars.join(', ')}',
+              '[WARN] Watch sync preserved local jar(s) in $targetLabel: ${report.preservedJars.join(', ')}',
             );
             daemonIo.error(
-              '[WARN] Run ${mods ? 'mods' : 'plugins'} sync $instance to replace them from dropins.',
+              '[WARN] Run drop-in sync for $targetLabel to replace them from the tracked source.',
             );
           }
         } catch (e, st) {
-          daemonIo.error('[WARN] Watch sync failed for $instance: $e');
+          daemonIo.error('[WARN] Watch sync failed for $targetLabel: $e');
           if (context.verbose) {
             daemonIo.error('$st');
           }
@@ -4582,6 +4655,8 @@ class NativeCommandService {
         );
       case 'forge':
         return _buildDownloadForge(profile, mc, options['loader']?.trim(), io);
+      case 'mohist':
+        return _buildDownloadMohist(profile, mc, io);
       case 'neoforge':
         return _buildDownloadNeoForge(
           profile,
@@ -4901,6 +4976,76 @@ class NativeCommandService {
     await _downloadToFile(downloadUrl, output, io: io);
     _registerBuiltJar(profile, 'forge', output);
     io.write('[OK] Cached forge installer for mc=$mc loader=$loader');
+    io.write('[INFO] Jar: $output');
+    return output;
+  }
+
+  Future<String> _buildDownloadMohist(
+    ConsumerProfile profile,
+    String mc,
+    _NativeIoBuffer io,
+  ) async {
+    final Map<String, dynamic> payload = await _httpGetJsonObject(
+      'https://mohistmc.com/api/v2/projects/mohist/$mc/builds',
+    );
+    final Object? buildsValue = payload['builds'];
+    final List<dynamic> builds = buildsValue is List<dynamic>
+        ? buildsValue
+        : const <dynamic>[];
+    int latestBuild = -1;
+    String? expectedSha256;
+    for (final dynamic raw in builds) {
+      if (raw is! Map) {
+        continue;
+      }
+      // Mohist's newer GitHub-backed records currently return empty download
+      // bodies. Numeric Jenkins records are mirrored in builds-raw and remain
+      // directly downloadable, so select the newest of those.
+      final int? build = int.tryParse(raw['number']?.toString() ?? '');
+      if (build == null || build <= latestBuild) {
+        continue;
+      }
+      latestBuild = build;
+      final String checksum = raw['fileSha256']?.toString().trim() ?? '';
+      expectedSha256 = RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(checksum)
+          ? checksum.toLowerCase()
+          : null;
+    }
+    if (latestBuild <= 0) {
+      throw _NativeCommandException(
+        'No downloadable Mohist build found for mc=$mc',
+        1,
+      );
+    }
+
+    final String output = p.join(
+      _buildDir(profile, 'mohist'),
+      'mohist-$mc-$latestBuild.jar',
+    );
+    await _downloadToFile(
+      'https://mohistmc.com/builds-raw/Mohist-$mc/Mohist-$mc-$latestBuild.jar',
+      output,
+      io: io,
+    );
+    if (File(output).lengthSync() == 0) {
+      File(output).deleteSyncSafe();
+      throw _NativeCommandException(
+        'Mohist build $latestBuild returned an empty jar',
+        1,
+      );
+    }
+    if (expectedSha256 != null) {
+      final String actualSha256 = _sha256File(File(output));
+      if (actualSha256 != expectedSha256) {
+        File(output).deleteSyncSafe();
+        throw _NativeCommandException(
+          'Mohist build $latestBuild failed SHA-256 verification',
+          1,
+        );
+      }
+    }
+    _registerBuiltJar(profile, 'mohist', output);
+    io.write('[OK] Cached Mohist build $latestBuild for mc=$mc');
     io.write('[INFO] Jar: $output');
     return output;
   }
@@ -5566,7 +5711,7 @@ class NativeCommandService {
 
     if (!_allBuildTypes.contains(target)) {
       throw _NativeCommandException(
-        'Usage: build list-all [paper|purpur|spigot|folia|canvas|leaf|forge|fabric|neoforge]',
+        'Usage: build list-all [paper|purpur|spigot|folia|canvas|leaf|forge|mohist|fabric|neoforge]',
         2,
       );
     }
@@ -5612,7 +5757,7 @@ class NativeCommandService {
 
     if (!_allBuildTypes.contains(target)) {
       throw _NativeCommandException(
-        'Usage: build versions [paper|purpur|spigot|folia|canvas|leaf|forge|fabric|neoforge]',
+        'Usage: build versions [paper|purpur|spigot|folia|canvas|leaf|forge|mohist|fabric|neoforge]',
         2,
       );
     }
@@ -5639,7 +5784,7 @@ class NativeCommandService {
   ) {
     if (target != 'all' && !_allBuildTypes.contains(target)) {
       throw _NativeCommandException(
-        'Usage: build cache-info [all|paper|purpur|spigot|folia|canvas|leaf|forge|fabric|neoforge] [--mc <version>]',
+        'Usage: build cache-info [all|paper|purpur|spigot|folia|canvas|leaf|forge|mohist|fabric|neoforge] [--mc <version>]',
         2,
       );
     }
@@ -5739,6 +5884,8 @@ class NativeCommandService {
         return _resolveFabricMcVersions();
       case 'forge':
         return _resolveForgeMcVersions();
+      case 'mohist':
+        return _resolveMohistMcVersions();
       case 'neoforge':
         return _resolveNeoForgeMcVersions();
       case 'spigot':
@@ -5797,6 +5944,8 @@ class NativeCommandService {
           return _resolveLatestFabricMcVersion();
         case 'forge':
           return _resolveLatestForgeMcVersion();
+        case 'mohist':
+          return _resolveLatestMohistMcVersion();
         case 'neoforge':
           return _resolveLatestNeoForgeMcVersion();
         case 'spigot':
@@ -5969,6 +6118,44 @@ class NativeCommandService {
       }
     }
     return _stableSortedMcVersions(versions);
+  }
+
+  Future<String?> _resolveLatestMohistMcVersion() async {
+    final List<String> versions = await _resolveMohistMcVersions();
+    return versions.isEmpty ? null : versions.last;
+  }
+
+  Future<List<String>> _resolveMohistMcVersions() async {
+    final Map<String, dynamic> payload = await _httpGetJsonObject(
+      'https://mohistmc.com/api/v2/projects/mohist',
+    );
+    final Object? versionsValue = payload['versions'];
+    if (versionsValue is! List) {
+      return const <String>[];
+    }
+    final List<String> advertised = _stableSortedMcVersions(versionsValue);
+    final List<String> downloadable = <String>[];
+    for (final String version in advertised) {
+      try {
+        final Map<String, dynamic> buildsPayload = await _httpGetJsonObject(
+          'https://mohistmc.com/api/v2/projects/mohist/$version/builds',
+        );
+        final Object? buildsValue = buildsPayload['builds'];
+        if (buildsValue is! List) {
+          continue;
+        }
+        final bool hasDownloadableBuild = buildsValue.whereType<Map>().any(
+          (Map<dynamic, dynamic> raw) =>
+              int.tryParse(raw['number']?.toString() ?? '') != null,
+        );
+        if (hasDownloadableBuild) {
+          downloadable.add(version);
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+    return _stableSortedMcVersions(downloadable);
   }
 
   Future<String?> _resolveLatestNeoForgeMcVersion() async {
@@ -6158,7 +6345,12 @@ class NativeCommandService {
   _ServerCreateArguments _parseServerCreateArguments(List<String> args) {
     final List<String> optionArgs = <String>[];
     final List<String> artifacts = <String>[];
+    final Set<String> dropinFlags = <String>{};
     for (int index = 0; index < args.length; index++) {
+      if (args[index] == '--mod-dropins' || args[index] == '--plugin-dropins') {
+        dropinFlags.add(args[index].substring(2));
+        continue;
+      }
       if (args[index] != '--artifact') {
         optionArgs.add(args[index]);
         continue;
@@ -6168,8 +6360,12 @@ class NativeCommandService {
       }
       artifacts.add(args[++index]);
     }
+    final Map<String, String> options = _parseOptions(optionArgs);
+    for (final String flag in dropinFlags) {
+      options[flag] = 'true';
+    }
     return _ServerCreateArguments(
-      options: _parseOptions(optionArgs),
+      options: options,
       artifacts: List<String>.unmodifiable(artifacts),
     );
   }
@@ -6234,6 +6430,84 @@ class NativeCommandService {
     io.write(
       '[INFO] Local artifacts: ${artifacts.map((File file) => p.basename(file.path)).join(', ')}',
     );
+  }
+
+  Set<String> _resolveMohistDropinSourcesForCreate({
+    required String type,
+    required bool isolated,
+    required Map<String, String> options,
+  }) {
+    final bool requestedMods = options['mod-dropins'] == 'true';
+    final bool requestedPlugins = options['plugin-dropins'] == 'true';
+    final bool hasExplicitSources = requestedMods || requestedPlugins;
+    if (type != 'mohist') {
+      if (hasExplicitSources) {
+        throw _NativeCommandException(
+          '--mod-dropins and --plugin-dropins are only valid for Mohist servers',
+          2,
+        );
+      }
+      return const <String>{};
+    }
+    if (isolated && hasExplicitSources) {
+      throw _NativeCommandException(
+        '--isolated cannot be combined with Mohist drop-in subscriptions',
+        2,
+      );
+    }
+    if (isolated) {
+      return const <String>{};
+    }
+    if (!hasExplicitSources) {
+      return const <String>{'mods', 'plugins'};
+    }
+    return <String>{if (requestedMods) 'mods', if (requestedPlugins) 'plugins'};
+  }
+
+  void _configureMohistDropins(
+    ConsumerProfile profile,
+    String instance, {
+    required String type,
+    required Set<String> sources,
+    required _NativeIoBuffer io,
+  }) {
+    if (type != 'mohist') {
+      return;
+    }
+    final String instanceDir = _instanceDir(profile, instance);
+    Directory(p.join(instanceDir, 'mods')).createSync(recursive: true);
+    Directory(p.join(instanceDir, 'plugins')).createSync(recursive: true);
+
+    final Map<String, String> metadata = Map<String, String>.from(
+      _serverSource(profile, instance),
+    );
+    final List<String> orderedSources = <String>[
+      if (sources.contains('mods')) 'mods',
+      if (sources.contains('plugins')) 'plugins',
+    ];
+    metadata['dropin_sources'] = orderedSources.join(',');
+    _writeServerSource(instanceDir, fields: metadata);
+    if (orderedSources.isEmpty) {
+      io.write('[INFO] Mohist drop-in tracking disabled for $instance');
+      return;
+    }
+
+    final _DropinSyncReport report = _syncSubscribedDropinsInstance(
+      profile,
+      instance,
+      clean: false,
+      strict: false,
+      preserveLocalChanges: false,
+    );
+    io.write(
+      '[OK] Mohist tracking ${orderedSources.join(' + ')} drop-ins for $instance',
+    );
+    if (report.copiedJars.isNotEmpty) {
+      io.write('[SYNC] Initial import: ${report.copiedJars.join(', ')}');
+    }
+    for (final String failure in report.failedJars) {
+      io.error('[WARN] Initial Mohist drop-in import failed: $failure');
+    }
   }
 
   Map<String, String> _serverCreateBuildOptions(
@@ -6630,18 +6904,17 @@ class NativeCommandService {
       );
     }
 
-    await _runtimeEnsureDropinsWatcher(profile, io);
+    await _runtimeEnsureDropinsWatcher(profile, instance, io);
 
     if (await _runtimeRunning(profile, instance)) {
       io.write('[WARN] Already running: $instance');
       return;
     }
 
-    final startupSync = _pluginsSyncInstance(
+    final _DropinSyncReport startupSync = _syncSubscribedDropinsInstance(
       profile,
       instance,
       clean: false,
-      sourceModsOverride: false,
       strict: false,
       preserveLocalChanges: true,
     );
@@ -6992,28 +7265,39 @@ class NativeCommandService {
 
   Future<void> _runtimeEnsureDropinsWatcher(
     ConsumerProfile profile,
+    String instance,
     _NativeIoBuffer io,
   ) async {
-    final bool mods = !_isPluginConsumer(profile);
-
-    final session = _pluginsWatchSessionName(profile, mods: mods);
-    if (Platform.isWindows) {
-      final int? watcherPid = _readPid(
-        _pluginsWatchPidFile(profile, mods: mods),
+    for (final String sourceKind in _instanceDropinSources(profile, instance)) {
+      final ConsumerProfile sourceProfile = _dropinSourceProfile(
+        profile,
+        sourceKind,
       );
-      if (watcherPid != null && await _windowsWatcherOwned(profile, mods)) {
-        return;
+      final bool mods = sourceKind == 'mods';
+      final String session = _pluginsWatchSessionName(
+        sourceProfile,
+        mods: mods,
+      );
+      bool running = false;
+      if (Platform.isWindows) {
+        final int? watcherPid = _readPid(
+          _pluginsWatchPidFile(sourceProfile, mods: mods),
+        );
+        running =
+            watcherPid != null &&
+            await _windowsWatcherOwned(sourceProfile, mods);
+      } else {
+        running = await _tmuxSessionExists(session);
       }
-    } else if (await _tmuxSessionExists(session)) {
-      return;
-    }
+      if (running) {
+        continue;
+      }
 
-    try {
-      await _pluginsWatchStart(profile, io, mods: mods);
-    } catch (e) {
-      io.error(
-        '[WARN] Could not auto-start ${mods ? 'mods' : 'plugins'} watcher: $e',
-      );
+      try {
+        await _pluginsWatchStart(sourceProfile, io, mods: mods);
+      } catch (e) {
+        io.error('[WARN] Could not auto-start $sourceKind watcher: $e');
+      }
     }
   }
 
@@ -9074,12 +9358,39 @@ class NativeCommandService {
     required bool strict,
     required bool preserveLocalChanges,
   }) {
-    if (!_instanceExists(profile, instance)) {
+    final String sourceKind = sourceModsOverride || !_isPluginConsumer(profile)
+        ? 'mods'
+        : 'plugins';
+    return _syncDropinSourceToInstance(
+      targetProfile: profile,
+      instance: instance,
+      sourceProfile: profile,
+      sourceKind: sourceKind,
+      clean: clean,
+      strict: strict,
+      preserveLocalChanges: preserveLocalChanges,
+    );
+  }
+
+  _DropinSyncReport _syncDropinSourceToInstance({
+    required ConsumerProfile targetProfile,
+    required String instance,
+    required ConsumerProfile sourceProfile,
+    required String sourceKind,
+    required bool clean,
+    required bool strict,
+    required bool preserveLocalChanges,
+  }) {
+    if (!_instanceExists(targetProfile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
-    // Isolated instances opt out of dropin sync entirely.
-    if (_instanceIsolated(profile, instance)) {
+    if (!_instanceSubscribesToDropinSource(
+      targetProfile,
+      instance,
+      sourceProfile: sourceProfile,
+      sourceKind: sourceKind,
+    )) {
       return const _DropinSyncReport(
         copiedJars: <String>[],
         preservedJars: <String>[],
@@ -9087,13 +9398,16 @@ class NativeCommandService {
       );
     }
 
-    final source = _dropinsSource(profile, mods: sourceModsOverride);
+    final String source = _dropinsSource(
+      sourceProfile,
+      mods: sourceKind == 'mods',
+    );
     final sourceDir = Directory(source);
     sourceDir.createSync(recursive: true);
 
-    final targetSubdir = _instanceDropinTargetSubdir(profile, instance);
+    final String targetSubdir = sourceKind;
     final targetDir = Directory(
-      p.join(_instanceDir(profile, instance), targetSubdir),
+      p.join(_instanceDir(targetProfile, instance), targetSubdir),
     );
     targetDir.createSync(recursive: true);
 
@@ -9101,7 +9415,7 @@ class NativeCommandService {
     final List<String> preserved = <String>[];
     final List<String> failed = <String>[];
     try {
-      _withDropinSyncLock(profile, instance, () {
+      _withDropinSyncLock(targetProfile, instance, () {
         if (clean) {
           for (final FileSystemEntity entity in targetDir.listSync()) {
             if (entity is File && entity.path.endsWith('.jar')) {
@@ -9111,12 +9425,14 @@ class NativeCommandService {
         }
 
         final Map<String, String> synchronizedHashes = _loadDropinSyncHashes(
-          profile,
+          targetProfile,
           instance,
           failed,
         );
         if (clean) {
-          synchronizedHashes.clear();
+          synchronizedHashes.removeWhere(
+            (String key, String _) => key.startsWith('$targetSubdir/'),
+          );
         }
         final List<File> jars =
             sourceDir
@@ -9160,7 +9476,12 @@ class NativeCommandService {
           }
         }
 
-        _saveDropinSyncHashes(profile, instance, synchronizedHashes, failed);
+        _saveDropinSyncHashes(
+          targetProfile,
+          instance,
+          synchronizedHashes,
+          failed,
+        );
       });
     } catch (e) {
       failed.add('dropin sync transaction failed: $e');
@@ -9180,18 +9501,25 @@ class NativeCommandService {
     );
   }
 
-  _DropinSyncReport _pluginsSyncOneJarToInstance(
-    ConsumerProfile profile,
-    String instance,
-    String sourceJarPath, {
+  _DropinSyncReport _syncOneDropinJarToInstance({
+    required ConsumerProfile targetProfile,
+    required String instance,
+    required ConsumerProfile sourceProfile,
+    required String sourceKind,
+    required String sourceJarPath,
     required bool strict,
     required bool preserveLocalChanges,
   }) {
-    if (!_instanceExists(profile, instance)) {
+    if (!_instanceExists(targetProfile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
-    if (_instanceIsolated(profile, instance)) {
+    if (!_instanceSubscribesToDropinSource(
+      targetProfile,
+      instance,
+      sourceProfile: sourceProfile,
+      sourceKind: sourceKind,
+    )) {
       return const _DropinSyncReport(
         copiedJars: <String>[],
         preservedJars: <String>[],
@@ -9208,9 +9536,9 @@ class NativeCommandService {
       );
     }
 
-    final targetSubdir = _instanceDropinTargetSubdir(profile, instance);
+    final String targetSubdir = sourceKind;
     final targetDir = Directory(
-      p.join(_instanceDir(profile, instance), targetSubdir),
+      p.join(_instanceDir(targetProfile, instance), targetSubdir),
     );
     targetDir.createSync(recursive: true);
 
@@ -9219,9 +9547,9 @@ class NativeCommandService {
     final List<String> failed = <String>[];
     final String jarName = p.basename(sourceFile.path);
     try {
-      _withDropinSyncLock(profile, instance, () {
+      _withDropinSyncLock(targetProfile, instance, () {
         final Map<String, String> synchronizedHashes = _loadDropinSyncHashes(
-          profile,
+          targetProfile,
           instance,
           failed,
         );
@@ -9248,7 +9576,12 @@ class NativeCommandService {
           synchronizedHashes[syncKey] = sourceHash;
           copied.add(jarName);
         }
-        _saveDropinSyncHashes(profile, instance, synchronizedHashes, failed);
+        _saveDropinSyncHashes(
+          targetProfile,
+          instance,
+          synchronizedHashes,
+          failed,
+        );
       });
     } catch (e) {
       failed.add('could not sync $jarName: $e');
@@ -9447,12 +9780,115 @@ class NativeCommandService {
     return '$targetSubdir/$jarName';
   }
 
-  String _instanceDropinTargetSubdir(ConsumerProfile profile, String instance) {
-    final sourceType = _instanceSourceType(profile, instance);
-    if (_isModdedType(sourceType)) {
-      return 'mods';
+  List<String> _instanceDropinSources(
+    ConsumerProfile profile,
+    String instance,
+  ) {
+    if (_instanceIsolated(profile, instance)) {
+      return const <String>[];
     }
-    return _isPluginConsumer(profile) ? 'plugins' : 'mods';
+    final Map<String, String> metadata = _serverSource(profile, instance);
+    if (metadata.containsKey('dropin_sources')) {
+      final Set<String> parsed = metadata['dropin_sources']!
+          .split(',')
+          .map((String value) => value.trim().toLowerCase())
+          .where((String value) => value == 'mods' || value == 'plugins')
+          .toSet();
+      return <String>[
+        if (parsed.contains('mods')) 'mods',
+        if (parsed.contains('plugins')) 'plugins',
+      ];
+    }
+    if (_instanceSourceType(profile, instance) == 'mohist') {
+      return const <String>['mods', 'plugins'];
+    }
+    return <String>[_isPluginConsumer(profile) ? 'plugins' : 'mods'];
+  }
+
+  ConsumerProfile _dropinSourceProfile(
+    ConsumerProfile targetProfile,
+    String sourceKind,
+  ) {
+    return sourceKind == 'plugins' ? ConsumerProfile.plugin : targetProfile;
+  }
+
+  bool _instanceSubscribesToDropinSource(
+    ConsumerProfile targetProfile,
+    String instance, {
+    required ConsumerProfile sourceProfile,
+    required String sourceKind,
+  }) {
+    return _instanceDropinSources(
+          targetProfile,
+          instance,
+        ).contains(sourceKind) &&
+        _dropinSourceProfile(targetProfile, sourceKind) == sourceProfile;
+  }
+
+  _DropinSyncReport _syncSubscribedDropinsInstance(
+    ConsumerProfile profile,
+    String instance, {
+    required bool clean,
+    required bool strict,
+    required bool preserveLocalChanges,
+  }) {
+    final List<String> copied = <String>[];
+    final List<String> preserved = <String>[];
+    final List<String> failed = <String>[];
+    for (final String sourceKind in _instanceDropinSources(profile, instance)) {
+      final ConsumerProfile sourceProfile = _dropinSourceProfile(
+        profile,
+        sourceKind,
+      );
+      final _DropinSyncReport report = _syncDropinSourceToInstance(
+        targetProfile: profile,
+        instance: instance,
+        sourceProfile: sourceProfile,
+        sourceKind: sourceKind,
+        clean: clean,
+        strict: false,
+        preserveLocalChanges: preserveLocalChanges,
+      );
+      copied.addAll(report.copiedJars.map((String jar) => '$sourceKind/$jar'));
+      preserved.addAll(
+        report.preservedJars.map((String jar) => '$sourceKind/$jar'),
+      );
+      failed.addAll(
+        report.failedJars.map((String failure) => '$sourceKind: $failure'),
+      );
+    }
+    if (strict && failed.isNotEmpty) {
+      throw _NativeCommandException(
+        'Failed to sync ${failed.length} Mohist drop-in(s): ${failed.join('; ')}',
+        1,
+      );
+    }
+    return _DropinSyncReport(
+      copiedJars: copied,
+      preservedJars: preserved,
+      failedJars: failed,
+    );
+  }
+
+  List<({ConsumerProfile profile, String instance})> _dropinSubscribers(
+    ConsumerProfile sourceProfile,
+    String sourceKind,
+  ) {
+    final List<({ConsumerProfile profile, String instance})> subscribers =
+        <({ConsumerProfile profile, String instance})>[];
+    for (final ConsumerProfile targetProfile in ConsumerProfile.values) {
+      for (final String instance in _instanceNames(targetProfile)) {
+        if (_instanceSubscribesToDropinSource(
+          targetProfile,
+          instance,
+          sourceProfile: sourceProfile,
+          sourceKind: sourceKind,
+        )) {
+          subscribers.add((profile: targetProfile, instance: instance));
+        }
+      }
+    }
+    return subscribers;
   }
 
   String _instanceSourceType(ConsumerProfile profile, String instance) {
@@ -9469,6 +9905,7 @@ class NativeCommandService {
       'leaf' => 'Leaf',
       'spigot' => 'Spigot',
       'forge' => 'Forge',
+      'mohist' => 'Mohist',
       'fabric' => 'Fabric',
       'neoforge' => 'NeoForge',
       _ => 'Custom',
@@ -9484,6 +9921,7 @@ class NativeCommandService {
       'leaf' => '2',
       'spigot' => '6',
       'forge' => 'c',
+      'mohist' => '5',
       'fabric' => '9',
       'neoforge' => '6',
       _ => '7',
@@ -10657,10 +11095,13 @@ class NativeCommandService {
 
   /// Emits one tab-separated line per instance with live metrics for the
   /// dashboard: name, state, port, locked, players, max, version, tps,
-  /// isolation, uptimeSeconds, cpuPercent, rssBytes, logPath, latencyMs.
+  /// isolation, uptimeSeconds, cpuPercent, rssBytes, logPath, latencyMs,
+  /// remote resource counters, then local macOS packet counters.
   /// Running servers are pinged (and RCON-queried for TPS) concurrently with
   /// short timeouts, and every live server's resident set and CPU share come
-  /// from a single batched `ps`, so the whole sweep stays within ~1s.
+  /// from a single batched `ps`; macOS network counters come from one batched
+  /// `nettop`. Healthy local sweeps stay close to one second, with bounded
+  /// probe and sampler timeouts preventing a stalled dashboard.
   ///
   /// The `cpuPercent` column is BSD `ps %cpu`: a lifetime average, not an
   /// instantaneous load reading.
@@ -10717,14 +11158,22 @@ class NativeCommandService {
       }),
     );
 
-    final psStats = await _sampleProcessStats(<int>[
+    final List<int> pids = <int>[
       for (final sample in samples)
         if (sample.pid != null) sample.pid!,
-    ]);
+    ];
+    final Future<Map<int, PsStat>> psFuture = _sampleProcessStats(pids);
+    final Future<Map<int, ProcessNetworkCounters>> networkFuture =
+        _sampleProcessNetworkStats(pids);
+    final Map<int, PsStat> psStats = await psFuture;
+    final Map<int, ProcessNetworkCounters> networkStats = await networkFuture;
 
     for (final sample in samples) {
       final pid = sample.pid;
       final stat = pid != null ? psStats[pid] : null;
+      final ProcessNetworkCounters? network = pid == null
+          ? null
+          : networkStats[pid];
       final ping = sample.ping;
       io.write(
         metricsTsvRow(
@@ -10742,6 +11191,10 @@ class NativeCommandService {
           rssBytes: stat?.rssBytes,
           logPath: sample.logPath,
           latencyMs: ping?.latency.inMilliseconds,
+          networkRxBytes: network?.rxBytes,
+          networkTxBytes: network?.txBytes,
+          networkRxPackets: network?.rxPackets,
+          networkTxPackets: network?.txPackets,
         ),
       );
     }
@@ -10773,6 +11226,30 @@ class NativeCommandService {
       return const <int, PsStat>{};
     } on ProcessException {
       return const <int, PsStat>{};
+    }
+  }
+
+  /// Samples cumulative per-process byte and packet counters in one macOS
+  /// `nettop` call. Other platforms deliberately return no reading: their
+  /// zero-dependency process APIs do not expose trustworthy per-process
+  /// network counters, and host-wide totals would be attributed to every
+  /// server incorrectly.
+  Future<Map<int, ProcessNetworkCounters>> _sampleProcessNetworkStats(
+    List<int> pids,
+  ) async {
+    if (!Platform.isMacOS || pids.isEmpty) {
+      return const <int, ProcessNetworkCounters>{};
+    }
+    try {
+      final ProcessResult result = await Process.run(
+        'nettop',
+        nettopArgsForPids(pids),
+      ).timeout(const Duration(milliseconds: 1200));
+      return parseNettopOutput((result.stdout ?? '').toString());
+    } on TimeoutException {
+      return const <int, ProcessNetworkCounters>{};
+    } on ProcessException {
+      return const <int, ProcessNetworkCounters>{};
     }
   }
 
@@ -10835,10 +11312,6 @@ class NativeCommandService {
     }
   }
 
-  bool _isModdedType(String type) {
-    return type == 'forge' || type == 'fabric' || type == 'neoforge';
-  }
-
   bool _isPluginConsumer(ConsumerProfile profile) {
     return profile == ConsumerProfile.plugin;
   }
@@ -10846,6 +11319,7 @@ class NativeCommandService {
   ConsumerProfile _consumerForServerType(String type) {
     switch (type.toLowerCase().trim()) {
       case 'forge':
+      case 'mohist':
         return ConsumerProfile.forge;
       case 'fabric':
         return ConsumerProfile.fabric;
@@ -10875,6 +11349,7 @@ class NativeCommandService {
       case 'leaf':
       case 'spigot':
       case 'forge':
+      case 'mohist':
       case 'fabric':
       case 'neoforge':
         return true;
@@ -11440,6 +11915,7 @@ class NativeCommandService {
     'canvas',
     'leaf',
     'forge',
+    'mohist',
     'fabric',
     'neoforge',
   ];

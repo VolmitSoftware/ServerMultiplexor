@@ -30,6 +30,12 @@ class MetricSample {
     this.diskBytes,
     this.networkRxBytes,
     this.networkTxBytes,
+    this.networkRxPackets,
+    this.networkTxPackets,
+    this.networkRxBytesPerSecond,
+    this.networkTxBytesPerSecond,
+    this.networkRxPacketsPerSecond,
+    this.networkTxPacketsPerSecond,
     this.memoryLimitBytes,
     this.diskLimitBytes,
     this.uptimeSeconds,
@@ -50,6 +56,12 @@ class MetricSample {
   final int? diskBytes;
   final int? networkRxBytes;
   final int? networkTxBytes;
+  final int? networkRxPackets;
+  final int? networkTxPackets;
+  final double? networkRxBytesPerSecond;
+  final double? networkTxBytesPerSecond;
+  final double? networkRxPacketsPerSecond;
+  final double? networkTxPacketsPerSecond;
   final int? memoryLimitBytes;
   final int? diskLimitBytes;
   final int? uptimeSeconds;
@@ -103,6 +115,30 @@ class MetricSample {
     final int? networkTxBytes = this.networkTxBytes;
     if (networkTxBytes != null) {
       json['networkTxBytes'] = networkTxBytes;
+    }
+    final int? networkRxPackets = this.networkRxPackets;
+    if (networkRxPackets != null) {
+      json['networkRxPackets'] = networkRxPackets;
+    }
+    final int? networkTxPackets = this.networkTxPackets;
+    if (networkTxPackets != null) {
+      json['networkTxPackets'] = networkTxPackets;
+    }
+    final double? networkRxBytesPerSecond = this.networkRxBytesPerSecond;
+    if (networkRxBytesPerSecond != null) {
+      json['networkRxBytesPerSecond'] = networkRxBytesPerSecond;
+    }
+    final double? networkTxBytesPerSecond = this.networkTxBytesPerSecond;
+    if (networkTxBytesPerSecond != null) {
+      json['networkTxBytesPerSecond'] = networkTxBytesPerSecond;
+    }
+    final double? networkRxPacketsPerSecond = this.networkRxPacketsPerSecond;
+    if (networkRxPacketsPerSecond != null) {
+      json['networkRxPacketsPerSecond'] = networkRxPacketsPerSecond;
+    }
+    final double? networkTxPacketsPerSecond = this.networkTxPacketsPerSecond;
+    if (networkTxPacketsPerSecond != null) {
+      json['networkTxPacketsPerSecond'] = networkTxPacketsPerSecond;
     }
     final int? memoryLimitBytes = this.memoryLimitBytes;
     if (memoryLimitBytes != null) {
@@ -167,6 +203,20 @@ class MetricSample {
       diskBytes: _jsonToInt(decoded['diskBytes']),
       networkRxBytes: _jsonToInt(decoded['networkRxBytes']),
       networkTxBytes: _jsonToInt(decoded['networkTxBytes']),
+      networkRxPackets: _jsonToInt(decoded['networkRxPackets']),
+      networkTxPackets: _jsonToInt(decoded['networkTxPackets']),
+      networkRxBytesPerSecond: _jsonToDouble(
+        decoded['networkRxBytesPerSecond'],
+      ),
+      networkTxBytesPerSecond: _jsonToDouble(
+        decoded['networkTxBytesPerSecond'],
+      ),
+      networkRxPacketsPerSecond: _jsonToDouble(
+        decoded['networkRxPacketsPerSecond'],
+      ),
+      networkTxPacketsPerSecond: _jsonToDouble(
+        decoded['networkTxPacketsPerSecond'],
+      ),
       memoryLimitBytes: _jsonToInt(decoded['memoryLimitBytes']),
       diskLimitBytes: _jsonToInt(decoded['diskLimitBytes']),
       uptimeSeconds: _jsonToInt(decoded['uptimeSeconds']),
@@ -182,7 +232,8 @@ class MetricSample {
   /// Parses one row of the extended `runtime metrics` TSV output:
   /// `name state port locked players max version tps isolated
   /// uptimeSeconds cpuPercent rssBytes logPath latencyMs diskBytes
-  /// networkRxBytes networkTxBytes memoryLimitBytes diskLimitBytes`,
+  /// networkRxBytes networkTxBytes memoryLimitBytes diskLimitBytes
+  /// networkRxPackets networkTxPackets`,
   /// tab-separated,
   /// `-` marking a null cell.
   ///
@@ -194,8 +245,8 @@ class MetricSample {
   /// Shorter rows are read as far as they go, so an older writer's output
   /// still parses: 9-12 columns leave every metrics-only field null, and 13
   /// columns (the format before ping latency was carried) leave
-  /// [latencyMs] null rather than fabricating a round trip. The five remote
-  /// resource columns are append-only so existing local writers remain
+  /// [latencyMs] null rather than fabricating a round trip. Remote resource
+  /// and local packet-counter columns are append-only so older writers remain
   /// compatible.
   static MetricSample? fromMetricsTsv(String line, DateTime now) {
     final List<String> cols = line.split('\t');
@@ -242,6 +293,8 @@ class MetricSample {
       networkTxBytes: cols.length >= 17 ? _tsvInt(cols[16]) : null,
       memoryLimitBytes: cols.length >= 18 ? _tsvInt(cols[17]) : null,
       diskLimitBytes: cols.length >= 19 ? _tsvInt(cols[18]) : null,
+      networkRxPackets: cols.length >= 20 ? _tsvInt(cols[19]) : null,
+      networkTxPackets: cols.length >= 21 ? _tsvInt(cols[20]) : null,
       logPath: logPath,
     );
   }
@@ -270,6 +323,12 @@ class MetricSample {
       diskBytes: diskBytes,
       networkRxBytes: networkRxBytes,
       networkTxBytes: networkTxBytes,
+      networkRxPackets: networkRxPackets,
+      networkTxPackets: networkTxPackets,
+      networkRxBytesPerSecond: networkRxBytesPerSecond,
+      networkTxBytesPerSecond: networkTxBytesPerSecond,
+      networkRxPacketsPerSecond: networkRxPacketsPerSecond,
+      networkTxPacketsPerSecond: networkTxPacketsPerSecond,
       memoryLimitBytes: memoryLimitBytes,
       diskLimitBytes: diskLimitBytes,
       uptimeSeconds: uptimeSeconds,
@@ -277,6 +336,84 @@ class MetricSample {
       logPath: logPath,
     );
   }
+
+  /// Returns this reading with rates derived from the previous cumulative
+  /// network counters. The first reading, a non-positive interval, a missing
+  /// counter, or a counter reset stays unavailable instead of becoming a
+  /// fabricated zero or a negative rate.
+  MetricSample withNetworkRatesFrom(MetricSample? previous) {
+    final MetricSample? baseline = previous?.instance == instance
+        ? previous
+        : null;
+    final int elapsedMicros = baseline == null
+        ? 0
+        : ts.difference(baseline.ts).inMicroseconds;
+    final bool restarted =
+        baseline?.uptimeSeconds != null &&
+        uptimeSeconds != null &&
+        uptimeSeconds! < baseline!.uptimeSeconds!;
+    return MetricSample(
+      ts: ts,
+      instance: instance,
+      state: state,
+      port: port,
+      players: players,
+      maxPlayers: maxPlayers,
+      tps: tps,
+      latencyMs: latencyMs,
+      cpuPercent: cpuPercent,
+      rssBytes: rssBytes,
+      diskBytes: diskBytes,
+      networkRxBytes: networkRxBytes,
+      networkTxBytes: networkTxBytes,
+      networkRxPackets: networkRxPackets,
+      networkTxPackets: networkTxPackets,
+      networkRxBytesPerSecond: restarted
+          ? null
+          : _counterRate(
+              baseline?.networkRxBytes,
+              networkRxBytes,
+              elapsedMicros,
+            ),
+      networkTxBytesPerSecond: restarted
+          ? null
+          : _counterRate(
+              baseline?.networkTxBytes,
+              networkTxBytes,
+              elapsedMicros,
+            ),
+      networkRxPacketsPerSecond: restarted
+          ? null
+          : _counterRate(
+              baseline?.networkRxPackets,
+              networkRxPackets,
+              elapsedMicros,
+            ),
+      networkTxPacketsPerSecond: restarted
+          ? null
+          : _counterRate(
+              baseline?.networkTxPackets,
+              networkTxPackets,
+              elapsedMicros,
+            ),
+      memoryLimitBytes: memoryLimitBytes,
+      diskLimitBytes: diskLimitBytes,
+      uptimeSeconds: uptimeSeconds,
+      version: version,
+      logPath: logPath,
+    );
+  }
+}
+
+double? _counterRate(int? previous, int? current, int elapsedMicros) {
+  if (previous == null || current == null || elapsedMicros <= 0) {
+    return null;
+  }
+  final int delta = current - previous;
+  if (delta < 0) {
+    return null;
+  }
+  return delta * Duration.microsecondsPerSecond / elapsedMicros;
 }
 
 /// One `ps` reading for a single process: resident set size and CPU percent.
@@ -288,6 +425,108 @@ class PsStat {
 
   final int rssBytes;
   final double cpuPercent;
+}
+
+/// Cumulative network counters for one process, as reported by macOS
+/// `nettop`. These are deliberately counters rather than rates: the monitor
+/// sampler owns the timestamps and derives rates from consecutive sweeps.
+class ProcessNetworkCounters {
+  const ProcessNetworkCounters({
+    required this.rxBytes,
+    required this.txBytes,
+    required this.rxPackets,
+    required this.txPackets,
+  });
+
+  final int rxBytes;
+  final int txBytes;
+  final int rxPackets;
+  final int txPackets;
+}
+
+/// Parses `nettop -L 1 -P -n -x -J ...` CSV output by header name. `nettop`
+/// does not preserve the requested `-J` field order, so fixed column indexes
+/// would silently swap packets and bytes on some macOS releases.
+Map<int, ProcessNetworkCounters> parseNettopOutput(String stdout) {
+  final List<String> lines = stdout
+      .split('\n')
+      .map((String line) => line.trim())
+      .where((String line) => line.isNotEmpty)
+      .toList(growable: false);
+  if (lines.length < 2) {
+    return <int, ProcessNetworkCounters>{};
+  }
+  final List<String> headers = lines.first.split(',');
+  final int rxBytesIndex = headers.indexOf('bytes_in');
+  final int txBytesIndex = headers.indexOf('bytes_out');
+  final int rxPacketsIndex = headers.indexOf('packets_in');
+  final int txPacketsIndex = headers.indexOf('packets_out');
+  if (<int>[
+    rxBytesIndex,
+    txBytesIndex,
+    rxPacketsIndex,
+    txPacketsIndex,
+  ].any((int index) => index < 0)) {
+    return <int, ProcessNetworkCounters>{};
+  }
+
+  final Map<int, ProcessNetworkCounters> result =
+      <int, ProcessNetworkCounters>{};
+  final RegExp pidSuffix = RegExp(r'\.(\d+)$');
+  for (final String line in lines.skip(1)) {
+    final List<String> cells = line.split(',');
+    final int largestIndex = <int>[
+      rxBytesIndex,
+      txBytesIndex,
+      rxPacketsIndex,
+      txPacketsIndex,
+    ].reduce((int left, int right) => left > right ? left : right);
+    if (cells.length <= largestIndex) {
+      continue;
+    }
+    final RegExpMatch? pidMatch = pidSuffix.firstMatch(cells.first);
+    final int? pid = pidMatch == null ? null : int.tryParse(pidMatch.group(1)!);
+    final int? rxBytes = int.tryParse(cells[rxBytesIndex]);
+    final int? txBytes = int.tryParse(cells[txBytesIndex]);
+    final int? rxPackets = int.tryParse(cells[rxPacketsIndex]);
+    final int? txPackets = int.tryParse(cells[txPacketsIndex]);
+    if (pid == null ||
+        rxBytes == null ||
+        txBytes == null ||
+        rxPackets == null ||
+        txPackets == null) {
+      continue;
+    }
+    result[pid] = ProcessNetworkCounters(
+      rxBytes: rxBytes,
+      txBytes: txBytes,
+      rxPackets: rxPackets,
+      txPackets: txPackets,
+    );
+  }
+  return result;
+}
+
+/// Builds one batched macOS `nettop` query for [pids].
+List<String> nettopArgsForPids(List<int> pids) {
+  if (pids.isEmpty) {
+    return <String>[];
+  }
+  final List<String> args = <String>[
+    '-L',
+    '1',
+    '-P',
+    '-n',
+    '-x',
+    '-J',
+    'bytes_in,bytes_out,packets_in,packets_out',
+  ];
+  for (final int pid in pids) {
+    args
+      ..add('-p')
+      ..add('$pid');
+  }
+  return args;
 }
 
 /// Parses the output of `ps -o pid=,rss=,%cpu= -p <pid> ...` (see
@@ -337,7 +576,9 @@ List<String> psArgsForPids(List<int> pids) {
 /// Renders one row of the extended `runtime metrics` TSV — the exact
 /// inverse of [MetricSample.fromMetricsTsv]. Columns, in order:
 /// `name state port locked players max version tps isolated uptimeSeconds
-/// cpuPercent rssBytes logPath latencyMs`.
+/// cpuPercent rssBytes logPath latencyMs diskBytes networkRxBytes
+/// networkTxBytes memoryLimitBytes diskLimitBytes networkRxPackets
+/// networkTxPackets`.
 ///
 /// Every unavailable value renders as `-`, never as a zero. [tps] and
 /// [cpuPercent] render with one decimal place. [version] and [logPath] are
@@ -361,6 +602,13 @@ String metricsTsvRow({
   int? rssBytes,
   String? logPath,
   int? latencyMs,
+  int? diskBytes,
+  int? networkRxBytes,
+  int? networkTxBytes,
+  int? memoryLimitBytes,
+  int? diskLimitBytes,
+  int? networkRxPackets,
+  int? networkTxPackets,
 }) {
   return <String>[
     _tsvSanitize(name),
@@ -377,8 +625,49 @@ String metricsTsvRow({
     _tsvNumberCell(rssBytes),
     _tsvTextCell(logPath),
     _tsvNumberCell(latencyMs),
+    _tsvNumberCell(diskBytes),
+    _tsvNumberCell(networkRxBytes),
+    _tsvNumberCell(networkTxBytes),
+    _tsvNumberCell(memoryLimitBytes),
+    _tsvNumberCell(diskLimitBytes),
+    _tsvNumberCell(networkRxPackets),
+    _tsvNumberCell(networkTxPackets),
   ].join('\t');
 }
+
+/// The network unit that is actually present in a sample history. Packet
+/// rates win when true packet counters exist; otherwise byte throughput is
+/// used. Byte deltas are never mislabeled as packets.
+enum NetworkRateUnit { packetsPerSecond, bytesPerSecond }
+
+NetworkRateUnit? preferredNetworkRateUnit(Iterable<MetricSample> samples) {
+  bool hasBytes = false;
+  for (final MetricSample sample in samples) {
+    if (sample.networkRxPacketsPerSecond != null ||
+        sample.networkTxPacketsPerSecond != null) {
+      return NetworkRateUnit.packetsPerSecond;
+    }
+    if (sample.networkRxBytesPerSecond != null ||
+        sample.networkTxBytesPerSecond != null) {
+      hasBytes = true;
+    }
+  }
+  return hasBytes ? NetworkRateUnit.bytesPerSecond : null;
+}
+
+double? networkRxRate(MetricSample sample, NetworkRateUnit? unit) =>
+    switch (unit) {
+      NetworkRateUnit.packetsPerSecond => sample.networkRxPacketsPerSecond,
+      NetworkRateUnit.bytesPerSecond => sample.networkRxBytesPerSecond,
+      null => null,
+    };
+
+double? networkTxRate(MetricSample sample, NetworkRateUnit? unit) =>
+    switch (unit) {
+      NetworkRateUnit.packetsPerSecond => sample.networkTxPacketsPerSecond,
+      NetworkRateUnit.bytesPerSecond => sample.networkTxBytesPerSecond,
+      null => null,
+    };
 
 /// The two per-instance booleans the dashboard needs but [MetricSample] does
 /// not carry: whether the instance is locked (delete and factory reset are

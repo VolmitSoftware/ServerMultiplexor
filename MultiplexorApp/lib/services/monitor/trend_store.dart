@@ -49,10 +49,10 @@ class TrendRetention {
 /// `cpuPercent`/`rssBytes`/`uptimeSeconds` are the mean of the non-null
 /// values in the bucket (null when every value in the bucket is null,
 /// integer fields rounded to the nearest int), and `port`/`version`/
-/// `logPath` are the last non-null value. Remote disk, network, and resource
-/// limit readings follow the same non-null mean rule so seven-day charts do
-/// not lose those series during compaction. The result is sorted by `ts`
-/// ascending.
+/// `logPath` are the last non-null value. Disk, cumulative network counters,
+/// derived network rates, and resource-limit readings follow the same
+/// non-null mean rule so seven-day charts do not lose those series during
+/// compaction. The result is sorted by `ts` ascending.
 List<MetricSample> rollupSamples(List<MetricSample> samples, Duration bucket) {
   if (samples.isEmpty) {
     return <MetricSample>[];
@@ -112,6 +112,24 @@ MetricSample _rollupBucket(
     ),
     networkTxBytes: _meanInt(
       bucketSamples.map((MetricSample s) => s.networkTxBytes),
+    ),
+    networkRxPackets: _meanInt(
+      bucketSamples.map((MetricSample s) => s.networkRxPackets),
+    ),
+    networkTxPackets: _meanInt(
+      bucketSamples.map((MetricSample s) => s.networkTxPackets),
+    ),
+    networkRxBytesPerSecond: _meanDouble(
+      bucketSamples.map((MetricSample s) => s.networkRxBytesPerSecond),
+    ),
+    networkTxBytesPerSecond: _meanDouble(
+      bucketSamples.map((MetricSample s) => s.networkTxBytesPerSecond),
+    ),
+    networkRxPacketsPerSecond: _meanDouble(
+      bucketSamples.map((MetricSample s) => s.networkRxPacketsPerSecond),
+    ),
+    networkTxPacketsPerSecond: _meanDouble(
+      bucketSamples.map((MetricSample s) => s.networkTxPacketsPerSecond),
     ),
     memoryLimitBytes: _meanInt(
       bucketSamples.map((MetricSample s) => s.memoryLimitBytes),

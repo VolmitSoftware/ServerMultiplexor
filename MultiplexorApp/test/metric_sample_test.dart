@@ -18,6 +18,17 @@ void main() {
     latencyMs: 42,
     cpuPercent: 3.5,
     rssBytes: 536870912,
+    diskBytes: 1073741824,
+    networkRxBytes: 1048576,
+    networkTxBytes: 2097152,
+    networkRxPackets: 1200,
+    networkTxPackets: 900,
+    networkRxBytesPerSecond: 8192.5,
+    networkTxBytesPerSecond: 4096.25,
+    networkRxPacketsPerSecond: 42.5,
+    networkTxPacketsPerSecond: 21.25,
+    memoryLimitBytes: 4294967296,
+    diskLimitBytes: 10737418240,
     uptimeSeconds: 3600,
     version: '1.21.1',
     logPath: '/logs/survival/latest.log',
@@ -39,6 +50,17 @@ void main() {
         'latencyMs': 42,
         'cpuPercent': 3.5,
         'rssBytes': 536870912,
+        'diskBytes': 1073741824,
+        'networkRxBytes': 1048576,
+        'networkTxBytes': 2097152,
+        'networkRxPackets': 1200,
+        'networkTxPackets': 900,
+        'networkRxBytesPerSecond': 8192.5,
+        'networkTxBytesPerSecond': 4096.25,
+        'networkRxPacketsPerSecond': 42.5,
+        'networkTxPacketsPerSecond': 21.25,
+        'memoryLimitBytes': 4294967296,
+        'diskLimitBytes': 10737418240,
         'uptimeSeconds': 3600,
         'version': '1.21.1',
         'logPath': '/logs/survival/latest.log',
@@ -82,6 +104,17 @@ void main() {
       expect(parsed.latencyMs, 42);
       expect(parsed.cpuPercent, 3.5);
       expect(parsed.rssBytes, 536870912);
+      expect(parsed.diskBytes, 1073741824);
+      expect(parsed.networkRxBytes, 1048576);
+      expect(parsed.networkTxBytes, 2097152);
+      expect(parsed.networkRxPackets, 1200);
+      expect(parsed.networkTxPackets, 900);
+      expect(parsed.networkRxBytesPerSecond, 8192.5);
+      expect(parsed.networkTxBytesPerSecond, 4096.25);
+      expect(parsed.networkRxPacketsPerSecond, 42.5);
+      expect(parsed.networkTxPacketsPerSecond, 21.25);
+      expect(parsed.memoryLimitBytes, 4294967296);
+      expect(parsed.diskLimitBytes, 10737418240);
       expect(parsed.uptimeSeconds, 3600);
       expect(parsed.version, '1.21.1');
       expect(parsed.logPath, '/logs/survival/latest.log');
@@ -232,6 +265,21 @@ void main() {
       expect(sample.networkTxBytes, 2097152);
       expect(sample.memoryLimitBytes, 6442450944);
       expect(sample.diskLimitBytes, 53687091200);
+      expect(sample.networkRxPackets, isNull);
+      expect(sample.networkTxPackets, isNull);
+    });
+
+    test('parses appended per-process packet counters', () {
+      const String line =
+          'local\trunning\t25565\tunlocked\t-\t-\t-\t-\tshared'
+          '\t3600\t12.5\t1073741824\t-\t-\t-\t1048576\t2097152\t-\t-'
+          '\t1200\t900';
+      final MetricSample? sample = MetricSample.fromMetricsTsv(line, ts);
+      expect(sample, isNotNull);
+      expect(sample!.networkRxBytes, 1048576);
+      expect(sample.networkTxBytes, 2097152);
+      expect(sample.networkRxPackets, 1200);
+      expect(sample.networkTxPackets, 900);
     });
 
     test('a stopped instance row with dash fields parses to nulls', () {
@@ -288,6 +336,91 @@ void main() {
       const String line =
           'survival\tbogus\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated';
       expect(MetricSample.fromMetricsTsv(line, ts), isNull);
+    });
+  });
+
+  group('MetricSample.withNetworkRatesFrom', () {
+    MetricSample counters({
+      required DateTime at,
+      required int rxBytes,
+      required int txBytes,
+      required int rxPackets,
+      required int txPackets,
+      int uptimeSeconds = 100,
+    }) => MetricSample(
+      ts: at,
+      instance: 'survival',
+      state: RuntimeState.running,
+      networkRxBytes: rxBytes,
+      networkTxBytes: txBytes,
+      networkRxPackets: rxPackets,
+      networkTxPackets: txPackets,
+      uptimeSeconds: uptimeSeconds,
+    );
+
+    test('derives byte and packet rates over the measured interval', () {
+      final MetricSample previous = counters(
+        at: ts,
+        rxBytes: 1000,
+        txBytes: 2000,
+        rxPackets: 100,
+        txPackets: 200,
+      );
+      final MetricSample current = counters(
+        at: ts.add(const Duration(seconds: 2)),
+        rxBytes: 5000,
+        txBytes: 3000,
+        rxPackets: 140,
+        txPackets: 260,
+        uptimeSeconds: 102,
+      ).withNetworkRatesFrom(previous);
+      expect(current.networkRxBytesPerSecond, 2000);
+      expect(current.networkTxBytesPerSecond, 500);
+      expect(current.networkRxPacketsPerSecond, 20);
+      expect(current.networkTxPacketsPerSecond, 30);
+    });
+
+    test('first sample and reset counters leave rates unavailable', () {
+      final MetricSample previous = counters(
+        at: ts,
+        rxBytes: 5000,
+        txBytes: 3000,
+        rxPackets: 140,
+        txPackets: 260,
+      );
+      expect(
+        previous.withNetworkRatesFrom(null).networkRxBytesPerSecond,
+        isNull,
+      );
+      final MetricSample reset = counters(
+        at: ts.add(const Duration(seconds: 2)),
+        rxBytes: 10,
+        txBytes: 20,
+        rxPackets: 1,
+        txPackets: 2,
+        uptimeSeconds: 1,
+      ).withNetworkRatesFrom(previous);
+      expect(reset.networkRxBytesPerSecond, isNull);
+      expect(reset.networkTxBytesPerSecond, isNull);
+      expect(reset.networkRxPacketsPerSecond, isNull);
+      expect(reset.networkTxPacketsPerSecond, isNull);
+    });
+
+    test('never compares counters belonging to another instance', () {
+      final MetricSample previous = MetricSample(
+        ts: ts,
+        instance: 'creative',
+        state: RuntimeState.running,
+        networkRxPackets: 100,
+      );
+      final MetricSample current = counters(
+        at: ts.add(const Duration(seconds: 2)),
+        rxBytes: 1000,
+        txBytes: 1000,
+        rxPackets: 140,
+        txPackets: 140,
+      ).withNetworkRatesFrom(previous);
+      expect(current.networkRxPacketsPerSecond, isNull);
     });
   });
 
@@ -438,6 +571,53 @@ void main() {
     });
   });
 
+  group('parseNettopOutput', () {
+    test('maps reordered headers and process pid suffixes', () {
+      const String output =
+          ',packets_in,bytes_in,packets_out,bytes_out,\n'
+          'java.32185,17278,34771964,14176,175139,\n';
+      final Map<int, ProcessNetworkCounters> result = parseNettopOutput(output);
+      expect(result.keys, <int>[32185]);
+      expect(result[32185]!.rxBytes, 34771964);
+      expect(result[32185]!.txBytes, 175139);
+      expect(result[32185]!.rxPackets, 17278);
+      expect(result[32185]!.txPackets, 14176);
+    });
+
+    test('rejects missing headers and malformed rows', () {
+      expect(parseNettopOutput(',bytes_in,bytes_out,\njava.1,2,3,'), isEmpty);
+      expect(
+        parseNettopOutput(
+          ',packets_in,bytes_in,packets_out,bytes_out,\n'
+          'java.nope,1,2,3,4,\n',
+        ),
+        isEmpty,
+      );
+    });
+  });
+
+  group('nettopArgsForPids', () {
+    test('builds one batch query for every pid', () {
+      expect(nettopArgsForPids(<int>[123, 456]), <String>[
+        '-L',
+        '1',
+        '-P',
+        '-n',
+        '-x',
+        '-J',
+        'bytes_in,bytes_out,packets_in,packets_out',
+        '-p',
+        '123',
+        '-p',
+        '456',
+      ]);
+    });
+
+    test('returns no arguments for no pids', () {
+      expect(nettopArgsForPids(<int>[]), isEmpty);
+    });
+  });
+
   group('psArgsForPids', () {
     test('builds the ps -o/-p argument list for multiple pids', () {
       expect(psArgsForPids([123, 456]), [
@@ -456,7 +636,7 @@ void main() {
   });
 
   group('metricsTsvRow', () {
-    test('emits 14 tab-separated columns in the documented order', () {
+    test('emits 21 tab-separated columns in the documented order', () {
       final String row = metricsTsvRow(
         name: 'survival',
         state: RuntimeState.running,
@@ -472,13 +652,21 @@ void main() {
         rssBytes: 536870912,
         logPath: '/logs/survival/latest.log',
         latencyMs: 42,
+        diskBytes: 1073741824,
+        networkRxBytes: 1048576,
+        networkTxBytes: 2097152,
+        memoryLimitBytes: 4294967296,
+        diskLimitBytes: 10737418240,
+        networkRxPackets: 1200,
+        networkTxPackets: 900,
       );
       expect(
         row,
         'survival\trunning\t25565\tlocked\t4\t20\t1.21.1\t19.8\tisolated'
-        '\t3600\t3.5\t536870912\t/logs/survival/latest.log\t42',
+        '\t3600\t3.5\t536870912\t/logs/survival/latest.log\t42'
+        '\t1073741824\t1048576\t2097152\t4294967296\t10737418240\t1200\t900',
       );
-      expect(row.split('\t'), hasLength(14));
+      expect(row.split('\t'), hasLength(21));
     });
 
     test('renders every unavailable value as a dash, never zero', () {
@@ -500,7 +688,8 @@ void main() {
       );
       expect(
         row,
-        'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-\t-',
+        'lobby\tstopped\t-\tunlocked\t-\t-\t-\t-\tshared\t-\t-\t-\t-\t-'
+        '\t-\t-\t-\t-\t-\t-\t-',
       );
     });
 
@@ -528,7 +717,7 @@ void main() {
         logPath: '/logs/a\tb.log',
       );
       final List<String> cols = row.split('\t');
-      expect(cols, hasLength(14));
+      expect(cols, hasLength(21));
       expect(cols[6], 'Paper 1.21 beta');
       expect(cols[12], '/logs/a b.log');
     });
@@ -549,6 +738,13 @@ void main() {
         rssBytes: 536870912,
         logPath: '/logs/survival/latest.log',
         latencyMs: 42,
+        diskBytes: 1073741824,
+        networkRxBytes: 1048576,
+        networkTxBytes: 2097152,
+        memoryLimitBytes: 4294967296,
+        diskLimitBytes: 10737418240,
+        networkRxPackets: 1200,
+        networkTxPackets: 900,
       );
       final MetricSample? sample = MetricSample.fromMetricsTsv(row, ts);
       expect(sample, isNotNull);
@@ -564,6 +760,13 @@ void main() {
       expect(sample.rssBytes, 536870912);
       expect(sample.logPath, '/logs/survival/latest.log');
       expect(sample.latencyMs, 42);
+      expect(sample.diskBytes, 1073741824);
+      expect(sample.networkRxBytes, 1048576);
+      expect(sample.networkTxBytes, 2097152);
+      expect(sample.memoryLimitBytes, 4294967296);
+      expect(sample.diskLimitBytes, 10737418240);
+      expect(sample.networkRxPackets, 1200);
+      expect(sample.networkTxPackets, 900);
     });
 
     test('a fully-unavailable row round-trips back to nulls', () {
@@ -602,6 +805,14 @@ void main() {
       expect(updated.port, original.port);
       expect(updated.maxPlayers, original.maxPlayers);
       expect(updated.latencyMs, original.latencyMs);
+      expect(updated.networkRxBytes, original.networkRxBytes);
+      expect(updated.networkTxBytes, original.networkTxBytes);
+      expect(updated.networkRxPackets, original.networkRxPackets);
+      expect(updated.networkTxPackets, original.networkTxPackets);
+      expect(
+        updated.networkRxPacketsPerSecond,
+        original.networkRxPacketsPerSecond,
+      );
       expect(updated.version, original.version);
       expect(updated.logPath, original.logPath);
       expect(updated.uptimeSeconds, original.uptimeSeconds);

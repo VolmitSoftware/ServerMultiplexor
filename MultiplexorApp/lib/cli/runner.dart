@@ -192,6 +192,7 @@ Future<int> _runBuild(List<String> rest) async {
     case 'leaf':
     case 'spigot':
     case 'forge':
+    case 'mohist':
     case 'fabric':
     case 'neoforge':
       await handleBuildTarget(sub, <String, dynamic>{

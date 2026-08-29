@@ -1903,7 +1903,12 @@ Future<int> _printHistory(_RemoteArguments parsed) async {
       '${sample.ts.toUtc().toIso8601String()}\t${sample.state.name}\t'
       '${sample.cpuPercent ?? '-'}\t${sample.rssBytes ?? '-'}\t'
       '${sample.diskBytes ?? '-'}\t${sample.networkRxBytes ?? '-'}\t'
-      '${sample.networkTxBytes ?? '-'}\t${sample.uptimeSeconds ?? '-'}',
+      '${sample.networkTxBytes ?? '-'}\t'
+      '${sample.networkRxBytesPerSecond ?? '-'}\t'
+      '${sample.networkTxBytesPerSecond ?? '-'}\t'
+      '${sample.networkRxPacketsPerSecond ?? '-'}\t'
+      '${sample.networkTxPacketsPerSecond ?? '-'}\t'
+      '${sample.uptimeSeconds ?? '-'}',
     );
   }
   return 0;

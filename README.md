@@ -31,9 +31,9 @@ Every branch push runs the executable workflow. It assigns the build a monotonic
 
 ## Live monitor
 
-`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. `Tab` switches between the Local workspace and the saved Pterodactyl Remote fleet. Local sweeps `runtime metrics` every two seconds. Remote uses Pterodactyl's resource API at a rate-aware interval of at least 20 seconds and automatically slows down for large panels. Both views keep per-server history seeded from their own trend stores so charts survive a restart. History is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that.
+`./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. `Tab` switches between the Local workspace and the saved Pterodactyl Remote fleet. Local sweeps `runtime metrics` every two seconds. On macOS it reads real per-Java-process packet and byte counters from `nettop`; platforms without trustworthy zero-dependency per-process counters leave Local network telemetry unavailable. Remote uses Pterodactyl's resource API at a rate-aware interval of at least 20 seconds and automatically slows down for large panels. Pterodactyl exposes byte counters rather than packet counters, so Remote correctly reports RX/TX bytes per second instead of estimating packets. The first sample after opening the monitor reads `n/a`; later samples derive rates from the measured counter delta and interval, rejecting counter resets and server restarts. Both views keep per-server history seeded from their own trend stores so charts survive a restart. History is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that.
 
-The landing view is a `MULTIPLEXOR` header, a KPI strip (`FLEET` servers-up and players, a fleet `TPS` sparkline, a `HOST` memory and CPU card), a full-width `SERVERS` table (state, players, TPS, a trend sparkline, memory, CPU and uptime per row — narrow terminals drop the rightmost readings whole), and a compact card for the selected server. The card is sized by the selection's own state: a running server expands into small side-by-side charts (TPS, CPU, memory as width allows) over a facts line, while a stopped one collapses to a single line and leaves the rows to the table. Under them sit two action bars — the selected server's, then the workspace's — over the key hint footer.
+The landing view is a `MULTIPLEXOR` header, a KPI strip (`FLEET` servers-up and players, a fleet `TPS` sparkline, a `HOST` memory and CPU card), a full-width `SERVERS` table (state, players, TPS, a trend sparkline, memory, CPU and uptime per row — narrow terminals drop the rightmost readings whole), and a compact card for the selected server. The card is sized by the selection's own state: a running server expands into small side-by-side charts (TPS, CPU, memory as width allows), a facts line, and a dedicated bottom RX/TX network monitor with comparable sparklines. It labels true macOS packet telemetry as `PPS` and Pterodactyl throughput as `B/s`. A stopped server collapses to a single line and leaves the rows to the table. Under them sit two action bars — the selected server's, then the workspace's — over the key hint footer.
 
 Everything on those bars is a button. Pressing lights a chip in the accent tone; a click activates on release, so a press that drifts onto another chip before it lifts does nothing. Chips that cannot apply — `RESTART` on a stopped server, `DELETE` on a locked one — are drawn faint and are not clickable at all. `START`, on the bar or on the card, is a background start: the dashboard stays up and watches the server come alive, and `CONSOLE` is one click away once it is running. The range badge on the selected panel (`running · 15m`) is a button too, and cycles the chart window.
 
@@ -51,14 +51,14 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 | `d` | Detail screen for the selected server. |
 | `R` `S` `X` `O` | Restart, stop (graceful), kill (force), open console — on the selected server. Uppercase on purpose, so a slipped key can never fire one. |
 | `g` | Open every running console in a tmux grid. |
-| `n` | Create a new instance. Isolated servers offer a checkbox list of drop-in artifacts, plus Select All and Deselect All controls, for one-time local copies. |
+| `n` | Create a new instance. Mohist creation offers a persistent Mods/Plugins source checklist; other isolated servers offer per-artifact one-time copies. |
 | `b` | Open Remote bulk actions, or Local Build & tuning. The remaining workspace actions live behind `[ MORE ]`. |
 | `w` | Open the workspace card — the keyboard twin of `[ MORE ]` on the workspace bar. Landing view only. |
 | `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
 | `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h` → `7d`. |
 | `q`, `ctrl-c` | Quit. |
 
-The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM MiB`, and `PLAYERS` charts over the same window, plus a live `LOG` tail of its runtime log. `esc` returns to the landing view; `esc` on the landing view quits. Below 80×24 the frame is replaced by a resize prompt rather than a squeezed layout.
+The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM MiB`, `PLAYERS`, and dual-series RX/TX `NETWORK` charts over the same window, plus a live `LOG` tail of its runtime log. On wide terminals the network chart spans the bottom of the chart grid immediately above the log. `esc` returns to the landing view; `esc` on the landing view quits. Below 80×24 the frame is replaced by a resize prompt rather than a squeezed layout.
 
 `./start.sh runtime watch --once` prints a single frame to stdout and exits — colorless, zero escape bytes, no TTY required — so it is safe to pipe, log, or diff from a script.
 
@@ -82,10 +82,10 @@ Pull latest builds refreshes the newest build of every platform the active consu
 
 ## Concepts
 
-- **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. They never share state. The active profile is set with `consumer use`.
-- **Instance** — one server install inside a consumer. Lives at `consumers/<profile>/instances/<name>` (or under `~/.multiplexor/instance-store/...` if the workspace path contains `[` or `]`). Metadata is in `.server-source` (type, launch mode, jar path, isolated flag, and lock state + hashed PIN).
+- **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. The active profile is set with `consumer use`. Mohist is the explicit hybrid exception: it is Forge-owned and can subscribe to plugin-consumer dropins.
+- **Instance** — one server install inside a consumer. Lives at `consumers/<profile>/instances/<name>` (or under `~/.multiplexor/instance-store/...` if the workspace path contains `[` or `]`). Metadata is in `.server-source` (type, launch mode, jar path, isolation, Mohist dropin sources, and lock state + hashed PIN).
 - **Active instance** — the default target when an instance name is omitted. Set with `instance activate`.
-- **Dropins** — plugin or mod jars under `consumers/<profile>/dropins/plugins` or `consumers/<profile>/dropins/mods`. On `runtime start` and via the watcher, these jars are copied into every non-isolated instance's `plugins/` (or `mods/`) folder. Automatic sync tracks the last synchronized SHA-256 per instance: it updates untouched jars but preserves and warns about unknown or locally modified jars. An explicit `plugins sync` or `mods sync` remains authoritative and replaces them.
+- **Dropins** — plugin or mod jars under `consumers/<profile>/dropins/plugins` or `consumers/<profile>/dropins/mods`. On `runtime start` and via the watcher, these jars are copied into subscribed instances. Mohist records whether it tracks Forge mods, plugin-consumer plugins, or both, placing them in separate `mods/` and `plugins/` folders. Automatic sync tracks the last synchronized SHA-256 per instance: it updates untouched jars but preserves and warns about unknown or locally modified jars. An explicit `plugins sync` or `mods sync` remains authoritative and replaces them.
 - **Isolated instance** — opts out of all shared state: no dropin sync, no Iris pack symlink, no shared `ops.json` merge. Created with `server create --isolated` or toggled later with `instance isolated <name> true`.
 - **Shared plugin data** — `consumers/plugin-consumers/shared-plugin-data/` holds Iris packs and a merged `ops.json` for non-isolated plugin instances.
 - **Build cache** — `consumers/<profile>/builds/<type>/` holds versioned server jars. `server create --type ...` resolves jars from here; `--auto-build` refreshes from upstream first.
@@ -117,7 +117,7 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `remote catalog [--profile <id>]` | List the Panel owners, nodes/free allocations, nests/eggs, allowed Docker image label/value pairs, egg environment keys/default requirements, and existing templates available for Remote creation. |
 | `remote stats <server> [--profile <id>]` | Show current state, CPU, memory, disk, network, and uptime for one server. |
 | `remote stats --all [--profile <id>]` | Show aggregate and per-server resource statistics for the panel fleet. |
-| `remote history <server> [--since <15m\|6h\|7d>] [--limit <n>] [--json] [--profile <id>]` | Read persisted monitor samples without polling the panel. History keeps raw samples for 24 hours and five-minute rollups for seven days. |
+| `remote history <server> [--since <15m\|6h\|7d>] [--limit <n>] [--json] [--profile <id>]` | Read persisted monitor samples, including derived RX/TX rates, without polling the panel. History keeps raw samples for 24 hours and five-minute rollups for seven days. |
 | `remote drive install [--profile <id>\|--all-profiles] [--username <name>] [--mount-root <path>] [--known-hosts <path>] [--no-key] [--no-open]` | Set up the local Multiplexor Drive, defaulting to every saved account and `~/Multiplexor Drive`; verify SSH host fingerprints, mount every accessible server, and open the drive in Finder. By default it generates a per-profile Ed25519 key and registers only its public half through the Client API. |
 | `remote drive add [--profile <id>] [--username <name>] [--no-key]` | Add or refresh one remote account in Multiplexor Drive. Stop the drive first when changing its accounts. |
 | `remote drive remove [profile] --confirm <profile>` | Remove one account and its saved SFTP password from Multiplexor Drive with exact confirmation. |
@@ -194,13 +194,13 @@ For CI/non-macOS sessions, set both an origin-bound key and its companion origin
 
 | Command | What it does |
 |---------|--------------|
-| `server create <name> --type <type> [--mc <v>] [--auto-build] [--isolated] [--artifact <dropin.jar> ...]` | Create + wire `server.jar` from the build cache (or refresh upstream first if `--auto-build`). `--isolated` opts the instance out of shared dropins/iris/ops; repeat `--artifact` to make one-time local copies from that consumer's drop-ins folder. |
-| `server create <name> --jar <path> [--type label] [--isolated] [--artifact <dropin.jar> ...]` | Create + wire an explicit jar. Isolated instances can receive the same one-time selected artifact copies. |
+| `server create <name> --type <type> [--mc <v>] [--auto-build] [--isolated] [--mod-dropins] [--plugin-dropins] [--artifact <dropin.jar> ...]` | Create + wire `server.jar` from the build cache (or refresh upstream first if `--auto-build`). Mohist defaults to persistently tracking both sources; pass either dropin flag alone to track only that source, or `--isolated` for neither. Other isolated types can repeat `--artifact` for one-time local copies. |
+| `server create <name> --jar <path> [--type label] [--isolated] [--mod-dropins] [--plugin-dropins] [--artifact <dropin.jar> ...]` | Create + wire an explicit jar. `--type mohist` accepts the same persistent source choices; isolated instances can receive one-time selected artifact copies. |
 | `server create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]` | Spin up one instance per type in a single call. Each instance is named after its type (or `<prefix>-<type>` if `--prefix` is set) and routed to the correct consumer (plugin types → plugin profile, modded types → their own). Skips collisions and resolution failures without aborting the batch. |
 
 Single `server create` and `build <type>` commands must run under the consumer that owns the selected server type. Use `--consumer fabric`, `--consumer forge`, or `--consumer neoforge` for modded types; plugin-family types use `plugin`. `server create-many` remains the cross-consumer batch command.
 
-`<type>` is one of: `paper`, `purpur`, `folia`, `canvas`, `leaf`, `spigot`, `forge`, `fabric`, `neoforge`. `leaf` is a high-performance Paper fork and behaves like any other plugin-family type. For `forge` / `neoforge`, an installer jar triggers args-file launch mode automatically.
+`<type>` is one of: `paper`, `purpur`, `folia`, `canvas`, `leaf`, `spigot`, `forge`, `mohist`, `fabric`, `neoforge`. `leaf` is a high-performance Paper fork. Mohist is a Forge/Bukkit hybrid owned by the `forge` consumer and launches directly from its downloaded jar. For `forge` / `neoforge`, an installer jar triggers args-file launch mode automatically.
 
 ### runtime — start, stop, attach
 
@@ -218,7 +218,7 @@ macOS/Linux runtimes use named `tmux` sessions. Windows uses a native background
 | `runtime status [instance]` | Print the runtime state of one instance. |
 | `runtime stats [instance]` | Show live stats for running servers: player count (`online/max`), state, CPU, memory, uptime, port, and version, plus the names of online players. With no instance, scans every consumer for running servers; with an instance, reports that one. Player counts come from a Server List Ping, so neither `enable-query` nor `enable-rcon` is required. `CPU` (`4.2%`) and `MEM` (resident set, e.g. `2.4G`) come from a single batched `ps` over the tracked server pids; `CPU`, `MEM`, and `UPTIME` read `n/a` when the value is unavailable rather than showing a zero. |
 | `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked<TAB>isolated`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`; the final two columns are `locked`/`unlocked` and `isolated`/`shared`. |
-| `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps<TAB>isolated<TAB>uptimeSeconds<TAB>cpuPercent<TAB>rssBytes<TAB>logPath<TAB>latencyMs`. Running servers are pinged (and RCON-queried for TPS) concurrently. Every sweep of the [live monitor](#live-monitor) is one of these. TPS is `-` unless the server is Paper-family and was started with RCON enabled. The last five columns extend the row for monitoring: `uptimeSeconds` is whole seconds since the tmux session started, `cpuPercent` and `rssBytes` (resident set, bytes) come from one batched `ps` over the tracked server pids, `logPath` is the absolute path of the instance's runtime log, and `latencyMs` is the server-list-ping round trip in whole milliseconds. Note that `cpuPercent` is BSD `ps %cpu` — a lifetime average over the process's whole run, not an instantaneous load reading. Any unavailable value is `-`, never a zero. Columns are only ever appended, so a reader written against a shorter row keeps working. |
+| `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps<TAB>isolated<TAB>uptimeSeconds<TAB>cpuPercent<TAB>rssBytes<TAB>logPath<TAB>latencyMs<TAB>diskBytes<TAB>networkRxBytes<TAB>networkTxBytes<TAB>memoryLimitBytes<TAB>diskLimitBytes<TAB>networkRxPackets<TAB>networkTxPackets`. Running servers are pinged (and RCON-queried for TPS) concurrently. Every sweep of the [live monitor](#live-monitor) is one of these. TPS is `-` unless the server is Paper-family and was started with RCON enabled. Uptime is whole seconds since launch; CPU and resident memory come from one batched `ps`; the log path is absolute; latency is the server-list-ping round trip. The resource columns carry Pterodactyl disk/network/limit counters in Remote monitoring. On macOS Local monitoring, one batched `nettop` supplies the network byte and packet counters for each tracked Java pid; unsupported platforms leave them unavailable. The dashboard derives per-second rates from consecutive samples. `cpuPercent` is BSD `ps %cpu` — a lifetime average, not an instantaneous load reading. Any unavailable value is `-`, never a zero. Columns are append-only, so readers written against shorter rows keep working. |
 | `runtime list` | Print running instance names. |
 | `runtime settings show` | Print the active heap, JVM preset, and flags. |
 | `runtime settings presets` | List available JVM presets (`aikar`, `vanilla`, `conservative`). |
@@ -255,7 +255,7 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 | Command | What it does |
 |---------|--------------|
 | `plugins show-source` (or `mods show-source`) | Print the absolute dropin folder. |
-| `plugins sync [instance\|--all] [--clean]` | Authoritatively copy dropins into one instance or every instance, replacing same-name local jars. `--clean` clears existing jars first. Isolated instances are skipped with `[SKIP]`. |
+| `plugins sync [instance\|--all] [--clean]` | Authoritatively copy dropins into one instance or every instance, replacing same-name local jars. `--clean` clears existing jars first. Isolated instances are skipped with `[SKIP]`. `mods sync` on Mohist refreshes every persisted source, including tracked plugin dropins. |
 | `plugins copy <isolated-instance> --artifact <dropin.jar> [...]` | Copy only the selected drop-in jars into an existing isolated instance without subscribing it to automatic sync. The `mods` form behaves the same way for mod consumers. |
 | `plugins watch-start` | Start a background daemon that re-syncs whenever a dropin jar changes. Untouched previously synchronized jars update automatically; locally modified jars are preserved with a warning. |
 | `plugins watch-stop` | Stop the watcher daemon. |
@@ -357,6 +357,9 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 # Create a Leaf server (high-performance Paper fork) on the latest stable build
 ./start.sh server create leaf --type leaf --auto-build
 
+# Create a Mohist hybrid that keeps both Forge mods and plugin dropins synced
+./start.sh --consumer forge server create hybrid --type mohist --auto-build --mod-dropins --plugin-dropins
+
 # Spin up one of every plugin flavor at the same MC version
 ./start.sh server create-many --types paper,purpur,canvas,spigot --mc 1.21.11 --auto-build
 
@@ -444,11 +447,11 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   backups/<instance>/              # restorable snapshots + manifest/checksums
   dropins/plugins or dropins/mods   # dropin jars (manual and content-managed)
   instances/<name>/                 # one server's worldroot
-    .server-source                # type, launch mode, jar path, isolated flag
+    .server-source                # type, launch mode, jar path, isolation/subscriptions
     .multiplexor-remote.json      # durable link after pull, first new push, or --link
     .multiplexor-dropins.json     # last synchronized jar hashes
     server.jar                    # symlink into builds/
-    plugins/ or mods/             # synced from dropin-source
+    plugins/ or mods/             # Mohist can track both source kinds
   shared-plugin-data/             # plugin-only: iris packs + merged ops.json
   state/runtime/                  # tmux logs, pid files
   state/trends/                   # per-instance metric history for the monitor

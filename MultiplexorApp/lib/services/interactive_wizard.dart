@@ -621,6 +621,7 @@ class InteractiveWizard {
     'leaf',
     'spigot',
     'forge',
+    'mohist',
     'fabric',
     'neoforge',
   ];
@@ -4272,13 +4273,26 @@ class InteractiveWizard {
       cachedAge: versionChoice.cachedAge,
     );
 
-    // Confirms default YES — phrase as "subscribe?" so accepting keeps the
-    // existing shared-dropin behavior. Decline to make the server isolated.
-    final bool subscribe = await Ui.confirm(
-      'Subscribe $name to plugin/mod dropins and shared ops?',
-    );
+    final bool isMohist = type == 'mohist';
+    final Set<int> mohistSources = isMohist
+        ? await Ui.checklist(
+            'Track drop-ins for $name',
+            const <String>[
+              'Mods from the Forge consumer',
+              'Plugins from the plugin consumer',
+            ],
+            initiallySelected: const <int>{0, 1},
+          )
+        : const <int>{};
+    // Non-hybrid servers retain the existing all-or-isolated subscription
+    // choice. Mohist derives isolation from its two explicit source choices.
+    final bool subscribe = isMohist
+        ? mohistSources.isNotEmpty
+        : await Ui.confirm(
+            'Subscribe $name to plugin/mod dropins and shared ops?',
+          );
     final bool isolated = !subscribe;
-    final List<String> artifacts = isolated
+    final List<String> artifacts = isolated && !isMohist
         ? await _selectDropinArtifacts(
             'Copy artifacts into this isolated server',
           )
@@ -4295,6 +4309,8 @@ class InteractiveWizard {
       version.trim(),
       if (refresh) '--auto-build',
       if (isolated) '--isolated',
+      if (isMohist && mohistSources.contains(0)) '--mod-dropins',
+      if (isMohist && mohistSources.contains(1)) '--plugin-dropins',
       for (final String artifact in artifacts) ...<String>[
         '--artifact',
         artifact,
@@ -4305,7 +4321,7 @@ class InteractiveWizard {
       return;
     }
 
-    if (!isolated) {
+    if (!isolated && !isMohist) {
       await _syncDropinsAllTargets();
     }
 
@@ -5329,7 +5345,7 @@ class InteractiveWizard {
         'leaf',
         'spigot',
       ],
-      ConsumerProfile.forge => const <String>['forge'],
+      ConsumerProfile.forge => const <String>['forge', 'mohist'],
       ConsumerProfile.fabric => const <String>['fabric'],
       ConsumerProfile.neoforge => const <String>['neoforge'],
     };
@@ -5344,6 +5360,7 @@ class InteractiveWizard {
       'leaf' => 'Leaf',
       'spigot' => 'Spigot',
       'forge' => 'Forge',
+      'mohist' => 'Mohist',
       'fabric' => 'Fabric',
       'neoforge' => 'NeoForge',
       _ => type,

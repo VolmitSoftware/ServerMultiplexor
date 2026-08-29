@@ -46,14 +46,14 @@ final RegExp _pathSeparator = RegExp(r'[\\/]');
 class _DetailChart {
   const _DetailChart({
     required this.title,
-    required this.points,
+    required this.series,
     this.forcedLow,
     this.forcedHigh,
     this.ramp = MonitorRamp.load,
   });
 
   final String title;
-  final List<ChartPoint> points;
+  final List<ChartSeries> series;
   final double? forcedLow;
   final double? forcedHigh;
   final MonitorRamp ramp;
@@ -64,9 +64,9 @@ class _DetailChart {
 ///
 /// Below the [monitorMinColumns] x [monitorMinLines] floor the frame
 /// degrades to [buildResizeRequiredFrame]. Above it: a header panel, up to
-/// four charts (a 2x2 grid from [_gridMinColumns] columns, otherwise
-/// stacked full width, dropping to the TPS and MEM charts and then to TPS
-/// alone when the rows for a readable plot are not there), a log panel
+/// five charts (a 2x2 grid plus a full-width network chart from
+/// [_gridMinColumns] columns, otherwise stacked full width, dropping lower
+/// priority charts when the rows for a readable plot are not there), a log panel
 /// filling what is left, and a one-row footer hint.
 ///
 /// Pure: no clock reads and no IO. [now] must be UTC, matching the UTC
@@ -123,7 +123,9 @@ MonitorFrame buildDetailFrame({
       heights: chartHeights,
       charts: _resolveCharts(
         history: history,
-        count: grid ? chartHeights.length * 2 : chartHeights.length,
+        count: grid
+            ? (chartHeights.length >= 3 ? 5 : chartHeights.length * 2)
+            : chartHeights.length,
       ),
       grid: grid,
       columns: columns,
@@ -167,10 +169,10 @@ List<int> _planChartHeights({required int available, required bool grid}) {
     return const <int>[];
   }
 
-  final int slots = grid ? 2 : 4;
+  final int slots = grid ? 3 : 5;
   int used = slots;
   while (used > 1 && area ~/ used < _minChartPanelRows) {
-    used = used ~/ 2;
+    used -= 1;
   }
   if (area ~/ used < _minChartPanelRows) {
     return const <int>[];
@@ -185,8 +187,8 @@ List<int> _planChartHeights({required int available, required bool grid}) {
 }
 
 /// The [count] highest-priority charts, rendered back in canonical order.
-/// TPS and memory outrank CPU and players: they are the two that explain a
-/// struggling server.
+/// TPS, memory, and network outrank CPU and players when the frame cannot
+/// show all five.
 List<_DetailChart> _resolveCharts({
   required List<MetricSample> history,
   required int count,
@@ -198,38 +200,94 @@ List<_DetailChart> _resolveCharts({
       peakMaxPlayers = max.toDouble();
     }
   }
+  final NetworkRateUnit? networkUnit = preferredNetworkRateUnit(history);
+  final String networkTitle = switch (networkUnit) {
+    NetworkRateUnit.packetsPerSecond => 'NETWORK PPS · RX/TX',
+    NetworkRateUnit.bytesPerSecond => 'NETWORK KiB/s · RX/TX',
+    null => 'NETWORK · RX/TX',
+  };
+  double? networkValue(MetricSample sample, {required bool rx}) {
+    final double? value = rx
+        ? networkRxRate(sample, networkUnit)
+        : networkTxRate(sample, networkUnit);
+    if (value == null) {
+      return null;
+    }
+    return networkUnit == NetworkRateUnit.bytesPerSecond ? value / 1024 : value;
+  }
 
   final List<_DetailChart> canonical = <_DetailChart>[
     _DetailChart(
       title: 'TPS',
-      points: _series(history, (MetricSample s) => s.tps),
+      series: <ChartSeries>[
+        ChartSeries(
+          label: 'TPS',
+          points: _series(history, (MetricSample s) => s.tps),
+        ),
+      ],
       forcedLow: 0,
       forcedHigh: 20,
       ramp: MonitorRamp.tps,
     ),
     _DetailChart(
       title: 'CPU %',
-      points: _series(history, (MetricSample s) => s.cpuPercent),
+      series: <ChartSeries>[
+        ChartSeries(
+          label: 'CPU %',
+          points: _series(history, (MetricSample s) => s.cpuPercent),
+        ),
+      ],
       forcedLow: 0,
       forcedHigh: 100,
     ),
     _DetailChart(
       title: 'MEM MiB',
-      points: _series(
-        history,
-        (MetricSample s) =>
-            s.rssBytes == null ? null : s.rssBytes! / _bytesPerMib,
-      ),
+      series: <ChartSeries>[
+        ChartSeries(
+          label: 'MEM MiB',
+          points: _series(
+            history,
+            (MetricSample s) =>
+                s.rssBytes == null ? null : s.rssBytes! / _bytesPerMib,
+          ),
+        ),
+      ],
     ),
     _DetailChart(
       title: 'PLAYERS',
-      points: _series(history, (MetricSample s) => s.players?.toDouble()),
+      series: <ChartSeries>[
+        ChartSeries(
+          label: 'PLAYERS',
+          points: _series(history, (MetricSample s) => s.players?.toDouble()),
+        ),
+      ],
       forcedLow: peakMaxPlayers == null ? null : 0,
       forcedHigh: peakMaxPlayers,
     ),
+    _DetailChart(
+      title: networkTitle,
+      series: <ChartSeries>[
+        ChartSeries(
+          label: 'RX',
+          points: _series(
+            history,
+            (MetricSample sample) => networkValue(sample, rx: true),
+          ),
+        ),
+        ChartSeries(
+          label: 'TX',
+          points: _series(
+            history,
+            (MetricSample sample) => networkValue(sample, rx: false),
+          ),
+          toneIndex: 1,
+        ),
+      ],
+      forcedLow: 0,
+    ),
   ];
 
-  const List<int> priority = <int>[0, 2, 1, 3];
+  const List<int> priority = <int>[0, 2, 4, 1, 3];
   final Set<int> chosen = priority.take(count).toSet();
   return <_DetailChart>[
     for (int index = 0; index < canonical.length; index++)
@@ -260,6 +318,15 @@ List<String> _headerPanel({
 }) {
   final double? tps = latest?.tps;
   final int? uptime = latest?.uptimeSeconds;
+  final NetworkRateUnit? networkUnit = latest == null
+      ? null
+      : preferredNetworkRateUnit(<MetricSample>[latest]);
+  final double? networkRx = latest == null
+      ? null
+      : networkRxRate(latest, networkUnit);
+  final double? networkTx = latest == null
+      ? null
+      : networkTxRate(latest, networkUnit);
   final List<String> facts = <String>[
     'STATE ${theme.paint(monitorStateText(latest), latest == null ? theme.faint : theme.statusTone(latest.state))}',
     'PORT ${monitorNumberText(latest?.port, theme)}',
@@ -268,6 +335,7 @@ List<String> _headerPanel({
     'CPU ${formatCpuPercent(latest?.cpuPercent)}',
     'MEM ${formatBytes(latest?.rssBytes)}',
     'DISK ${formatBytes(latest?.diskBytes)}',
+    'NET RX ${_networkRateText(networkRx, networkUnit)} TX ${_networkRateText(networkTx, networkUnit)}',
     'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}',
   ];
   // Drop trailing facts rather than let the row be clipped mid-word on a
@@ -329,6 +397,20 @@ List<String> _charts({
       rows.addAll(List<String>.filled(height, ' ' * columns));
       continue;
     }
+    if (right >= charts.length) {
+      rows.addAll(
+        _chartPanel(
+          chart: charts[left],
+          width: columns,
+          height: height,
+          badge: badge,
+          theme: theme,
+          start: start,
+          end: now,
+        ),
+      );
+      continue;
+    }
     rows.addAll(
       joinBlocks(<List<String>>[
         _chartPanel(
@@ -340,18 +422,15 @@ List<String> _charts({
           start: start,
           end: now,
         ),
-        if (right < charts.length)
-          _chartPanel(
-            chart: charts[right],
-            width: rightWidth,
-            height: height,
-            badge: badge,
-            theme: theme,
-            start: start,
-            end: now,
-          )
-        else
-          List<String>.filled(height, ' ' * rightWidth),
+        _chartPanel(
+          chart: charts[right],
+          width: rightWidth,
+          height: height,
+          badge: badge,
+          theme: theme,
+          start: start,
+          end: now,
+        ),
       ]),
     );
   }
@@ -372,9 +451,7 @@ List<String> _chartPanel({
     title: chart.title,
     badge: badge,
     content: renderBrailleChart(
-      series: <ChartSeries>[
-        ChartSeries(label: chart.title, points: chart.points),
-      ],
+      series: chart.series,
       width: width - 4,
       height: height - 2,
       start: start,
@@ -388,6 +465,12 @@ List<String> _chartPanel({
     theme: theme,
   );
 }
+
+String _networkRateText(double? rate, NetworkRateUnit? unit) => switch (unit) {
+  NetworkRateUnit.packetsPerSecond => formatPacketsPerSecond(rate),
+  NetworkRateUnit.bytesPerSecond => formatBytesPerSecond(rate),
+  null => 'n/a',
+};
 
 /// The log panel: the tail of [logLines] that fits, raw and faint. An empty
 /// tail says so rather than rendering an empty box.

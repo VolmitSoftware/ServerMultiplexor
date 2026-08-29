@@ -25,6 +25,10 @@ void main() {
     double? cpuPercent = 12.5,
     int? rssBytes = 1024000,
     String? logPath = '/var/log/survival.log',
+    int? networkRxBytes,
+    int? networkTxBytes,
+    int? networkRxPackets,
+    int? networkTxPackets,
   }) => metricsTsvRow(
     name: name,
     state: state,
@@ -39,6 +43,10 @@ void main() {
     cpuPercent: cpuPercent,
     rssBytes: rssBytes,
     logPath: logPath,
+    networkRxBytes: networkRxBytes,
+    networkTxBytes: networkTxBytes,
+    networkRxPackets: networkRxPackets,
+    networkTxPackets: networkTxPackets,
   );
 
   group('sweep', () {
@@ -122,6 +130,62 @@ void main() {
         expect(history[1].players, 2);
       },
     );
+
+    test(
+      'derives independent byte and packet rates after two sweeps',
+      () async {
+        int sweepCount = 0;
+        final MetricsSampler sampler = MetricsSampler(
+          captureMetrics: () async {
+            sweepCount += 1;
+            return tsvRow(
+              networkRxBytes: sweepCount == 1 ? 1000 : 5000,
+              networkTxBytes: sweepCount == 1 ? 2000 : 3000,
+              networkRxPackets: sweepCount == 1 ? 100 : 140,
+              networkTxPackets: sweepCount == 1 ? 200 : 260,
+              uptimeSeconds: 100 + sweepCount * 2,
+            );
+          },
+          clock: () => DateTime.utc(2026, 7, 30, 12, 0, sweepCount * 2),
+        );
+
+        await sampler.sweep();
+        expect(sampler.latest('survival')!.networkRxBytesPerSecond, isNull);
+        await sampler.sweep();
+
+        final MetricSample latest = sampler.latest('survival')!;
+        expect(latest.networkRxBytesPerSecond, 2000);
+        expect(latest.networkTxBytesPerSecond, 500);
+        expect(latest.networkRxPacketsPerSecond, 20);
+        expect(latest.networkTxPacketsPerSecond, 30);
+      },
+    );
+
+    test('a restart invalidates every derived network rate', () async {
+      int sweepCount = 0;
+      final MetricsSampler sampler = MetricsSampler(
+        captureMetrics: () async {
+          sweepCount += 1;
+          return tsvRow(
+            networkRxBytes: sweepCount == 1 ? 1000 : 5000,
+            networkTxBytes: sweepCount == 1 ? 2000 : 7000,
+            networkRxPackets: sweepCount == 1 ? 100 : 500,
+            networkTxPackets: sweepCount == 1 ? 200 : 700,
+            uptimeSeconds: sweepCount == 1 ? 100 : 1,
+          );
+        },
+        clock: () => DateTime.utc(2026, 7, 30, 12, 0, sweepCount * 2),
+      );
+
+      await sampler.sweep();
+      await sampler.sweep();
+
+      final MetricSample latest = sampler.latest('survival')!;
+      expect(latest.networkRxBytesPerSecond, isNull);
+      expect(latest.networkTxBytesPerSecond, isNull);
+      expect(latest.networkRxPacketsPerSecond, isNull);
+      expect(latest.networkTxPacketsPerSecond, isNull);
+    });
 
     test(
       'ring truncates to ringCapacity, keeping only the newest samples',

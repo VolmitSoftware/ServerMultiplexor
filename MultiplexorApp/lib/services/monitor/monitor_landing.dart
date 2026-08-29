@@ -881,9 +881,9 @@ MonitorPanelRender renderSelectedPanel({
 }
 
 /// The live card's content: a faint label row, up to three small charts side
-/// by side, a blank, and the facts row. When the rows are not there the card
-/// gives its trimmings up in that order — blank first, then facts, then the
-/// labels — because the charts are the card's reason to exist.
+/// by side, a blank, the facts row, and a compact RX/TX network monitor at
+/// the bottom. When rows tighten, the blank, facts, and labels give way in
+/// that order; the charts and network monitor are the live card's signal.
 List<String> _liveCard({
   required List<MetricSample> history,
   required MetricSample latest,
@@ -896,17 +896,22 @@ List<String> _liveCard({
   bool labels = true;
   bool blank = true;
   bool facts = true;
-  int chartRows = contentRows - 3;
+  bool network = true;
+  int chartRows = contentRows - 4;
   if (chartRows < _minChartRows) {
     blank = false;
-    chartRows = contentRows - 2;
+    chartRows = contentRows - 3;
   }
   if (chartRows < _minChartRows) {
     facts = false;
-    chartRows = contentRows - 1;
+    chartRows = contentRows - 2;
   }
   if (chartRows < _minChartRows) {
     labels = false;
+    chartRows = contentRows - 1;
+  }
+  if (chartRows < _minChartRows) {
+    network = false;
     chartRows = contentRows;
   }
   if (chartRows < 0) {
@@ -1024,6 +1029,16 @@ List<String> _liveCard({
   if (facts) {
     content.add(_factsRow(latest: latest, inner: inner, theme: theme));
   }
+  if (network) {
+    content.add(
+      _networkMonitorRow(
+        history: history,
+        latest: latest,
+        inner: inner,
+        theme: theme,
+      ),
+    );
+  }
   return content;
 }
 
@@ -1035,6 +1050,70 @@ List<ChartPoint> _chartPoints(
   for (final MetricSample sample in history)
     ChartPoint(ts: sample.ts, value: read(sample)),
 ];
+
+/// One compact, bottom-anchored network monitor. macOS Local samples use
+/// true per-process packet rates; Remote samples fall back to byte
+/// throughput because Pterodactyl does not expose packet counters.
+String _networkMonitorRow({
+  required List<MetricSample> history,
+  required MetricSample latest,
+  required int inner,
+  required MonitorTheme theme,
+}) {
+  final NetworkRateUnit? unit = preferredNetworkRateUnit(history);
+  final double? rx = networkRxRate(latest, unit);
+  final double? tx = networkTxRate(latest, unit);
+  final String label = switch (unit) {
+    NetworkRateUnit.packetsPerSecond => 'NETWORK PPS',
+    NetworkRateUnit.bytesPerSecond => 'NETWORK B/s',
+    null => 'NETWORK',
+  };
+  final String rxText = _networkRateText(rx, unit);
+  final String txText = _networkRateText(tx, unit);
+  final String summary = '$label · RX $rxText · TX $txText';
+
+  final List<double?> rxSeries = <double?>[
+    for (final MetricSample sample in history) networkRxRate(sample, unit),
+  ];
+  final List<double?> txSeries = <double?>[
+    for (final MetricSample sample in history) networkTxRate(sample, unit),
+  ];
+  double? peak;
+  for (final double? value in <double?>[...rxSeries, ...txSeries]) {
+    if (value != null && (peak == null || value > peak)) {
+      peak = value;
+    }
+  }
+  final int sparkCells = _clampInt((inner - summary.length - 2) ~/ 2, 0, 24);
+  if (sparkCells == 0) {
+    return theme.paint(summary, theme.muted);
+  }
+  final double? high = peak == null ? null : (peak <= 0 ? 1 : peak);
+  final String rxSpark = renderSparkline(
+    values: rxSeries,
+    width: sparkCells,
+    theme: theme,
+    min: 0,
+    max: high,
+    ramp: MonitorRamp.title,
+  );
+  final String txSpark = renderSparkline(
+    values: txSeries,
+    width: sparkCells,
+    theme: theme,
+    min: 0,
+    max: high,
+    ramp: MonitorRamp.title,
+  );
+  return '${theme.paint('$label · RX $rxText ', theme.muted)}$rxSpark'
+      '${theme.paint(' · TX $txText ', theme.muted)}$txSpark';
+}
+
+String _networkRateText(double? rate, NetworkRateUnit? unit) => switch (unit) {
+  NetworkRateUnit.packetsPerSecond => formatPacketsPerSecond(rate),
+  NetworkRateUnit.bytesPerSecond => formatBytesPerSecond(rate),
+  null => 'n/a',
+};
 
 /// The idle card's one line: the state in its own tone, and what would bring
 /// the server to life — no fabricated facts, no empty chart grid.
@@ -1133,16 +1212,23 @@ String _factsRow({
   final String? version = latest?.version;
   final int? disk = latest?.diskBytes;
   final int? diskLimit = latest?.diskLimitBytes;
-  final int? networkRx = latest?.networkRxBytes;
-  final int? networkTx = latest?.networkTxBytes;
+  final NetworkRateUnit? networkUnit = latest == null
+      ? null
+      : preferredNetworkRateUnit(<MetricSample>[latest]);
+  final double? networkRx = latest == null
+      ? null
+      : networkRxRate(latest, networkUnit);
+  final double? networkTx = latest == null
+      ? null
+      : networkTxRate(latest, networkUnit);
   final List<String> facts = <String>[
     'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}',
     '${monitorPlayersText(latest, theme)} PLAYERS',
     'PING ${latency == null ? 'n/a' : '${latency}ms'}',
+    'NET RX ${_networkRateText(networkRx, networkUnit)} TX ${_networkRateText(networkTx, networkUnit)}',
     'MEM ${formatBytes(latest?.rssBytes)}',
     'CPU ${formatCpuPercent(latest?.cpuPercent)}',
     'DISK ${formatBytes(disk)}${diskLimit == null ? '' : '/${formatBytes(diskLimit)}'}',
-    'NET ${formatBytes(networkRx)} RX ${formatBytes(networkTx)} TX',
     version == null || version.isEmpty ? theme.glyphs.dash : version,
   ];
   while (facts.length > 1 && facts.join(' · ').length > inner) {

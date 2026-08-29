@@ -87,8 +87,8 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'delete-all [--everywhere] [--force]',
   ]),
   CommandHelpGroup('server', <String>[
-    'create <name> --type <type> [--mc <version>] [--loader <version>] [--installer <version>] [--auto-build] [--isolated] [--artifact <dropin.jar> ...]',
-    'create <name> --jar <path> [--type label] [--isolated] [--artifact <dropin.jar> ...]',
+    'create <name> --type <type> [--mc <version>] [--loader <version>] [--installer <version>] [--auto-build] [--isolated] [--mod-dropins] [--plugin-dropins] [--artifact <dropin.jar> ...]',
+    'create <name> --jar <path> [--type label] [--isolated] [--mod-dropins] [--plugin-dropins] [--artifact <dropin.jar> ...]',
     'create-many --types <a,b,c> [--prefix N] [--mc <v>] [--auto-build] [--isolated]',
   ]),
   CommandHelpGroup('runtime', <String>[
@@ -107,7 +107,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
   ]),
   CommandHelpGroup('build', <String>[
-    '<paper|purpur|folia|canvas|leaf|spigot|forge|fabric|neoforge> [--mc <version>] [--loader <version>] [--installer <version>] [--force]',
+    '<paper|purpur|folia|canvas|leaf|spigot|forge|mohist|fabric|neoforge> [--mc <version>] [--loader <version>] [--installer <version>] [--force]',
     'latest <type>',
     'versions [type]',
     'cache-info [type] [--mc <version>]',

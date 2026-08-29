@@ -54,6 +54,7 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
       expect(buildJarVersionKey('paper-26.2-71.jar'), '26.2');
       expect(buildJarVersionKey('purpur-26.1.2-2591.jar'), '26.1.2');
       expect(buildJarVersionKey('leaf-1.21.8-106.jar'), '1.21.8');
+      expect(buildJarVersionKey('mohist-1.20.2-168.jar'), '1.20.2');
     });
 
     test('reads the version out of a build-less spigot jar', () {
