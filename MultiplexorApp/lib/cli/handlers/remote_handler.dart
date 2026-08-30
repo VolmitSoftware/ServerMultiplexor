@@ -221,7 +221,7 @@ Future<int> handleRemote(List<String> args) async {
         final PterodactylConsoleConnection connection = await pterodactylService
             .openConsole(_profileId(parsed), identifier);
         stdout.writeln(
-          'Attaching to $identifier. Press Esc, Ctrl-C, or enter :exit to detach.',
+          'Attaching to $identifier. Tab completes; Esc, Ctrl-C, or :exit detaches.',
         );
         await PterodactylConsoleTerminal(connection: connection).run();
         return 0;

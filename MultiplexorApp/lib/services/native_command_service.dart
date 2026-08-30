@@ -18,6 +18,7 @@ import 'consumer_service.dart';
 import 'dropin_sync_policy.dart';
 import 'gameplay_test_service.dart';
 import 'manager_context.dart';
+import 'minimal_log4j_config.dart';
 import 'monitor/metric_sample.dart';
 import 'rcon_client.dart';
 import 'runtime_state.dart';
@@ -7578,6 +7579,7 @@ class NativeCommandService {
       'All Consoles ($layoutLabel): ${running.length} running server(s)',
     );
     io.write('Navigate panes: Left/Right arrows. Type in the focused pane.');
+    io.write('Complete: Tab (server-native when supported).');
     io.write('Scroll: mouse wheel. Drag-select text to copy it.');
     io.write('Detach: Esc (or Ctrl+B then D). Servers keep running.');
 
@@ -7618,6 +7620,7 @@ class NativeCommandService {
 
     io.write('Server Console: $instance');
     io.write('Detach: Esc (or Ctrl+B then D). The server keeps running.');
+    io.write('Complete: Tab (server-native when supported).');
     io.write('Scroll: mouse wheel. Drag-select text to copy it.');
 
     var temporaryEscBinding = false;
@@ -8832,36 +8835,9 @@ class NativeCommandService {
   String _ensureMinimalLog4jConfig(ConsumerProfile profile, String instance) {
     final dir = _instanceDir(profile, instance);
     final path = p.join(dir, '.multiplexor-log4j2.xml');
-    final body = '''
-<?xml version="1.0" encoding="UTF-8"?>
-<Configuration status="WARN" monitorInterval="30">
-    <Appenders>
-        <Console name="MinimalConsole" target="SYSTEM_OUT">
-            <PatternLayout>
-                <Pattern>%msg%n%xEx</Pattern>
-            </PatternLayout>
-        </Console>
-        <RollingRandomAccessFile name="File"
-                                 fileName="logs/latest.log"
-                                 filePattern="logs/%d{yyyy-MM-dd}-%i.log.gz">
-            <PatternLayout>
-                <Pattern>[%d{HH:mm:ss}] [%t/%level]: [%logger] %msg%n</Pattern>
-            </PatternLayout>
-            <Policies>
-                <TimeBasedTriggeringPolicy />
-                <OnStartupTriggeringPolicy />
-            </Policies>
-        </RollingRandomAccessFile>
-    </Appenders>
-    <Loggers>
-        <Root level="info">
-            <RegexFilter regex="(?s).*RCON Client.*" useRawMsg="false" onMatch="DENY" onMismatch="NEUTRAL"/>
-            <AppenderRef ref="MinimalConsole"/>
-            <AppenderRef ref="File"/>
-        </Root>
-    </Loggers>
-</Configuration>
-''';
+    final String body = buildMinimalLog4jConfig(
+      _instanceSourceType(profile, instance),
+    );
     final file = File(path);
     if (!file.existsSync() || file.readAsStringSync() != body) {
       file

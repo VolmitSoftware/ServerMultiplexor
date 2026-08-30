@@ -375,6 +375,110 @@ void main() {
     await running;
   });
 
+  test('Tab completes a common command before Enter sends it', () async {
+    final _FakeConnection connection = _FakeConnection();
+    final _FakeTerminal terminal = _FakeTerminal();
+    final Future<void> running = PterodactylConsoleTerminal(
+      connection: connection,
+      terminal: terminal,
+    ).run();
+    await _pump();
+
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 'h'));
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 'e'));
+    terminal.input.add(const TermEvent(TermEventKind.tab));
+    terminal.input.add(const TermEvent(TermEventKind.enter));
+    await _pump();
+
+    expect(connection.commands, <String>['help']);
+    expect(Ansi.strip(terminal.output.toString()), contains('[Tab] complete'));
+
+    terminal.input.add(const TermEvent(TermEventKind.escape));
+    await running;
+  });
+
+  test('repeated Tab cycles ambiguous command matches', () async {
+    final _FakeConnection connection = _FakeConnection();
+    final _FakeTerminal terminal = _FakeTerminal();
+    final Future<void> running = PterodactylConsoleTerminal(
+      connection: connection,
+      terminal: terminal,
+    ).run();
+    await _pump();
+
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 't'));
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 'e'));
+    terminal.input.add(const TermEvent(TermEventKind.tab));
+    terminal.input.add(const TermEvent(TermEventKind.tab));
+    terminal.input.add(const TermEvent(TermEventKind.enter));
+    await _pump();
+
+    expect(connection.commands, <String>['team']);
+    expect(Ansi.strip(terminal.output.toString()), contains('1/5 team'));
+
+    terminal.input.add(const TermEvent(TermEventKind.escape));
+    await running;
+  });
+
+  test('Tab completes player names learned from console output', () async {
+    final _FakeConnection connection = _FakeConnection(
+      onConnect: (_FakeConnection value) {
+        value.remote.add(
+          const PterodactylConsoleOutput(<String>[
+            '[09:10:11 INFO]: There are 2 of a max of 20 players online: '
+                'Alice, Bob',
+          ]),
+        );
+      },
+    );
+    final _FakeTerminal terminal = _FakeTerminal();
+    final Future<void> running = PterodactylConsoleTerminal(
+      connection: connection,
+      terminal: terminal,
+    ).run();
+    await _pump();
+
+    for (final String character in 'kick Al'.split('')) {
+      terminal.input.add(TermEvent(TermEventKind.char, char: character));
+    }
+    terminal.input.add(const TermEvent(TermEventKind.tab));
+    terminal.input.add(const TermEvent(TermEventKind.enter));
+    await _pump();
+
+    expect(connection.commands, <String>['kick Alice']);
+
+    terminal.input.add(const TermEvent(TermEventKind.escape));
+    await running;
+  });
+
+  test('successful custom commands become completion candidates', () async {
+    final _FakeConnection connection = _FakeConnection();
+    final _FakeTerminal terminal = _FakeTerminal();
+    final Future<void> running = PterodactylConsoleTerminal(
+      connection: connection,
+      terminal: terminal,
+    ).run();
+    await _pump();
+
+    for (final String character in 'spark health'.split('')) {
+      terminal.input.add(TermEvent(TermEventKind.char, char: character));
+    }
+    terminal.input.add(const TermEvent(TermEventKind.enter));
+    await _pump();
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 's'));
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 'p'));
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 'a'));
+    terminal.input.add(const TermEvent(TermEventKind.char, char: 'r'));
+    terminal.input.add(const TermEvent(TermEventKind.tab));
+    terminal.input.add(const TermEvent(TermEventKind.enter));
+    await _pump();
+
+    expect(connection.commands, <String>['spark health', 'spark']);
+
+    terminal.input.add(const TermEvent(TermEventKind.escape));
+    await running;
+  });
+
   test('failed command remains editable and can be retried', () async {
     final _FakeConnection connection = _FakeConnection(sendFailures: 1);
     final _FakeTerminal terminal = _FakeTerminal();

@@ -1268,7 +1268,7 @@ class InteractiveWizard {
     final PterodactylConsoleConnection connection = await pterodactyl
         .openConsole(profile.id, identifier);
     Ui.info(
-      'Attaching to $identifier. Press Esc, Ctrl-C, or enter :exit to detach.',
+      'Attaching to $identifier. Tab completes; Esc, Ctrl-C, or :exit detaches.',
     );
     await PterodactylConsoleTerminal(connection: connection).run();
   }

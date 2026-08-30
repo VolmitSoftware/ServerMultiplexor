@@ -4,6 +4,7 @@ import 'dart:io';
 import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/term_events.dart';
 import '../../utils/terminal/term_io.dart';
+import '../minecraft_console_completion.dart';
 import 'pterodactyl_console_protocol.dart';
 import 'pterodactyl_console_session.dart';
 
@@ -188,8 +189,11 @@ final class PterodactylConsoleTerminal {
   final List<String> _buffer = <String>[];
   final List<String> _history = <String>[];
   final List<String> _pendingOutput = <String>[];
+  final MinecraftConsoleCompletion _completion = MinecraftConsoleCompletion();
   int _cursor = 0;
   int _historyIndex = 0;
+  _ConsoleCompletionCycle? _completionCycle;
+  String? _completionHint;
   String _state = 'connecting';
   double? _cpu;
   int? _memory;
@@ -292,11 +296,15 @@ final class PterodactylConsoleTerminal {
       case TermEventKind.ctrlC:
         return true;
       case TermEventKind.enter:
+        _resetCompletion();
         return _submit();
+      case TermEventKind.tab:
+        _complete();
       case TermEventKind.char:
         if (_buffer.length < 4096 &&
             event.char.isNotEmpty &&
             !RegExp(r'[\x00-\x1f\x7f]').hasMatch(event.char)) {
+          _resetCompletion();
           _buffer.insert(_cursor, event.char);
           _cursor++;
           _historyIndex = _history.length;
@@ -304,28 +312,34 @@ final class PterodactylConsoleTerminal {
         }
       case TermEventKind.backspace:
         if (_cursor > 0) {
+          _resetCompletion();
           _buffer.removeAt(--_cursor);
           _redraw();
         }
       case TermEventKind.delete:
         if (_cursor < _buffer.length) {
+          _resetCompletion();
           _buffer.removeAt(_cursor);
           _redraw();
         }
       case TermEventKind.arrowLeft:
         if (_cursor > 0) {
+          _resetCompletion();
           _cursor--;
           _redraw();
         }
       case TermEventKind.arrowRight:
         if (_cursor < _buffer.length) {
+          _resetCompletion();
           _cursor++;
           _redraw();
         }
       case TermEventKind.home:
+        _resetCompletion();
         _cursor = 0;
         _redraw();
       case TermEventKind.end:
+        _resetCompletion();
         _cursor = _buffer.length;
         _redraw();
       case TermEventKind.arrowUp:
@@ -342,12 +356,12 @@ final class PterodactylConsoleTerminal {
   }
 
   Future<bool> _submit() async {
-    final String command = _buffer.join();
+    final String command = _buffer.join().trimRight();
     if (command.trim() == ':exit') {
       _echoSubmittedCommand(command);
       return true;
     }
-    if (command.isEmpty) {
+    if (command.trim().isEmpty) {
       _redraw();
       return false;
     }
@@ -374,6 +388,7 @@ final class PterodactylConsoleTerminal {
       return false;
     }
     _echoSubmittedCommand(command);
+    _completion.rememberCommand(command);
     if (_history.isEmpty || _history.last != command) _history.add(command);
     if (_history.length > 100) _history.removeAt(0);
     _historyIndex = _history.length;
@@ -389,10 +404,12 @@ final class PterodactylConsoleTerminal {
     );
     _buffer.clear();
     _cursor = 0;
+    _resetCompletion();
   }
 
   void _recall(int delta) {
     if (_history.isEmpty) return;
+    _resetCompletion();
     _historyIndex = (_historyIndex + delta).clamp(0, _history.length);
     _buffer
       ..clear()
@@ -409,6 +426,14 @@ final class PterodactylConsoleTerminal {
     if (!_acceptOutput) return;
     switch (event) {
       case PterodactylConsoleOutput(:final lines):
+        bool completionChanged = false;
+        for (final String line in lines) {
+          final String? plain = PterodactylConsoleLogFormatter.line(line);
+          if (plain != null && _completion.observeOutputLine(plain)) {
+            completionChanged = true;
+          }
+        }
+        if (completionChanged) _resetCompletion();
         _queueLines(
           PterodactylConsoleLogFormatter.renderedLines(
             lines,
@@ -651,9 +676,84 @@ final class PterodactylConsoleTerminal {
       if (_cpu case final double cpu) 'CPU ${cpu.toStringAsFixed(1)}%',
       if (_memory case final int memory) _memoryLabel(memory),
     ];
+    final String tabHint = _completionHint ?? 'complete';
     return '${metrics.join('${_style(Ansi.gray)} · ${_style(Ansi.reset)}')}  '
-        '${_style(Ansi.gray)}[Esc] back · [Enter] send · [:exit] back'
+        '${_style(Ansi.gray)}[Tab] $tabHint · [Esc] back · [Enter] send'
         '${_style(Ansi.reset)}';
+  }
+
+  void _complete() {
+    final String input = _buffer.join();
+    final _ConsoleCompletionCycle? cycle = _completionCycle;
+    if (cycle != null &&
+        cycle.expectedInput == input &&
+        cycle.expectedCursor == _cursor) {
+      final int index = (cycle.index + 1) % cycle.plan.matches.length;
+      final String candidate = cycle.plan.matches[index];
+      final ConsoleCompletionEdit edit = cycle.plan.apply(candidate);
+      _applyCompletionEdit(edit);
+      _completionCycle = cycle.copyWith(
+        index: index,
+        expectedInput: edit.input,
+        expectedCursor: edit.cursor,
+      );
+      _completionHint = '${index + 1}/${cycle.plan.matches.length} $candidate';
+      _redraw();
+      return;
+    }
+
+    final ConsoleCompletionPlan plan = _completion.plan(input, _cursor);
+    if (plan.matches.isEmpty) {
+      _completionCycle = null;
+      _completionHint = plan.commandToken
+          ? 'no command match'
+          : 'no player match (run list to refresh)';
+      _redraw();
+      return;
+    }
+    if (plan.matches.length == 1) {
+      final ConsoleCompletionEdit edit = plan.apply(
+        plan.matches.single,
+        appendSpace: true,
+      );
+      _applyCompletionEdit(edit);
+      _completionCycle = null;
+      _completionHint = 'completed ${plan.matches.single}';
+      _redraw();
+      return;
+    }
+
+    ConsoleCompletionEdit edit = ConsoleCompletionEdit(
+      input: input,
+      cursor: _cursor,
+    );
+    if (plan.commonPrefix.runes.length > plan.typedPrefix.runes.length) {
+      edit = plan.apply(plan.commonPrefix);
+      _applyCompletionEdit(edit);
+    }
+    _completionCycle = _ConsoleCompletionCycle(
+      plan: plan,
+      index: -1,
+      expectedInput: edit.input,
+      expectedCursor: edit.cursor,
+    );
+    final List<String> shown = plan.matches.take(4).toList(growable: false);
+    final int hidden = plan.matches.length - shown.length;
+    _completionHint = '${shown.join(' · ')}${hidden > 0 ? ' · +$hidden' : ''}';
+    _redraw();
+  }
+
+  void _applyCompletionEdit(ConsoleCompletionEdit edit) {
+    _buffer
+      ..clear()
+      ..addAll(edit.input.runes.map<String>(String.fromCharCode));
+    _cursor = edit.cursor;
+    _historyIndex = _history.length;
+  }
+
+  void _resetCompletion() {
+    _completionCycle = null;
+    _completionHint = null;
   }
 
   String _memoryLabel(int memory) {
@@ -699,6 +799,31 @@ final class PterodactylConsoleTerminal {
 
   static bool _isRunningState(String state) =>
       state.trim().toLowerCase() == 'running';
+}
+
+final class _ConsoleCompletionCycle {
+  const _ConsoleCompletionCycle({
+    required this.plan,
+    required this.index,
+    required this.expectedInput,
+    required this.expectedCursor,
+  });
+
+  final ConsoleCompletionPlan plan;
+  final int index;
+  final String expectedInput;
+  final int expectedCursor;
+
+  _ConsoleCompletionCycle copyWith({
+    required int index,
+    required String expectedInput,
+    required int expectedCursor,
+  }) => _ConsoleCompletionCycle(
+    plan: plan,
+    index: index,
+    expectedInput: expectedInput,
+    expectedCursor: expectedCursor,
+  );
 }
 
 /// Makes Wings console output resemble Multiplexor's Local minimal console.

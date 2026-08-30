@@ -51,6 +51,11 @@ void main() {
       expect(feed(parser, '\x03').single.kind, TermEventKind.ctrlC);
     });
 
+    test('parses tab', () {
+      final TermEventParser parser = TermEventParser();
+      expect(feed(parser, '\t').single.kind, TermEventKind.tab);
+    });
+
     test('resolves a lone escape via timeout', () {
       final TermEventParser parser = TermEventParser();
       expect(feed(parser, '\x1B'), isEmpty);
