@@ -277,6 +277,7 @@ class MonitorScreen {
   int _selectedIndex = 0;
   Duration _range = monitorRanges.first;
   bool _forceFull = true;
+  int _incrementalCharactersSinceFullFrame = 0;
   int _lastColumns = -1;
   int _lastLines = -1;
   final MonitorGeometryStabilizer _geometry = MonitorGeometryStabilizer();
@@ -344,6 +345,7 @@ class MonitorScreen {
   void _resetViewState() {
     _last = null;
     _forceFull = true;
+    _incrementalCharactersSinceFullFrame = 0;
     _lastColumns = -1;
     _lastLines = -1;
     _geometry.reset();
@@ -513,24 +515,39 @@ class MonitorScreen {
     _pressedId = _liveId(_pressedId);
 
     final String text = frame.rows.join('\n');
-    final String patch = renderTerminalPatch(
+    bool fullFrame = _forceFull;
+    String patch = renderTerminalPatch(
       previous: _last,
       next: text,
-      forceFull: _forceFull,
+      forceFull: fullFrame,
     );
-    _last = text;
-    _forceFull = false;
-    if (patch.isEmpty) {
-      return;
-    }
     // Raw mode turns OPOST off, so a bare '\n' drops a line without
     // returning the carriage and stair-steps the frame. Only the full-frame
     // path contains newlines at all — a patch addresses each line by cursor
     // position — so that is the only one that needs them expanded.
-    final String normalized = patch.startsWith(_fullFramePrefix)
+    String normalized = patch.startsWith(_fullFramePrefix)
         ? patch.replaceAll('\n', '\r\n')
         : patch;
-    stdout.write(synchronizeTerminalPatch(normalized));
+    String output = synchronizeTerminalPatch(normalized);
+    if (!fullFrame &&
+        terminalFullFrameCheckpointDue(
+          charactersSinceFullFrame: _incrementalCharactersSinceFullFrame,
+          nextPatchCharacters: output.length,
+        )) {
+      fullFrame = true;
+      patch = renderTerminalPatch(previous: _last, next: text, forceFull: true);
+      normalized = patch.replaceAll('\n', '\r\n');
+      output = synchronizeTerminalPatch(normalized);
+    }
+    _last = text;
+    _forceFull = false;
+    if (output.isEmpty) {
+      return;
+    }
+    stdout.write(output);
+    _incrementalCharactersSinceFullFrame = fullFrame
+        ? 0
+        : _incrementalCharactersSinceFullFrame + output.length;
   }
 
   /// Composes [modal]'s card over [base], carrying the instance's latest

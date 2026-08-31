@@ -2,6 +2,42 @@ import 'package:multiplexor/utils/terminal/frame_patch.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('terminalFullFrameCheckpointDue', () {
+    test('uses a one-million-character default budget', () {
+      expect(terminalFullFrameCheckpointCharacters, 1_000_000);
+    });
+
+    test('keeps incremental output below the checkpoint budget', () {
+      expect(
+        terminalFullFrameCheckpointDue(
+          charactersSinceFullFrame: 900_000,
+          nextPatchCharacters: 99_999,
+        ),
+        isFalse,
+      );
+    });
+
+    test('requests a checkpoint when the next patch reaches the budget', () {
+      expect(
+        terminalFullFrameCheckpointDue(
+          charactersSinceFullFrame: 900_000,
+          nextPatchCharacters: 100_000,
+        ),
+        isTrue,
+      );
+    });
+
+    test('does not checkpoint an empty idle update', () {
+      expect(
+        terminalFullFrameCheckpointDue(
+          charactersSinceFullFrame: terminalFullFrameCheckpointCharacters,
+          nextPatchCharacters: 0,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('renderTerminalPatch', () {
     test('renders a full clear and the frame content on the first render', () {
       const String next = 'line one\nline two';

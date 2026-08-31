@@ -1,3 +1,20 @@
+/// Maximum incremental terminal output emitted between complete frames.
+///
+/// Periodic complete frames act as replay checkpoints for terminal hosts that
+/// detach and later reconstruct their display from a bounded output history.
+/// The budget advances only when a visible patch is emitted, so an idle
+/// dashboard still writes nothing.
+const int terminalFullFrameCheckpointCharacters = 1_000_000;
+
+/// Whether [nextPatchCharacters] would exhaust the incremental output budget.
+bool terminalFullFrameCheckpointDue({
+  required int charactersSinceFullFrame,
+  required int nextPatchCharacters,
+  int threshold = terminalFullFrameCheckpointCharacters,
+}) =>
+    nextPatchCharacters > 0 &&
+    charactersSinceFullFrame + nextPatchCharacters >= threshold;
+
 /// Computes a differential ANSI patch that turns a previously rendered
 /// terminal frame into [next], writing only the lines that actually
 /// changed. This keeps full-screen dashboard repaints flicker-free by
