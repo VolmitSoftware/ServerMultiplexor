@@ -145,6 +145,7 @@ void main() {
         InstanceModalAction.console,
         InstanceModalAction.pullToLocal,
         InstanceModalAction.pushToRemote,
+        InstanceModalAction.addons,
         InstanceModalAction.settings,
         InstanceModalAction.history,
         InstanceModalAction.reinstall,
@@ -240,6 +241,7 @@ void main() {
       expect(modalActionIdForHotkey(stopped.hitboxes, 's'), 'im:start');
       expect(modalActionIdForHotkey(stopped.hitboxes, 'S'), 'im:start');
       expect(modalActionIdForHotkey(stopped.hitboxes, 'p'), 'im:pushToRemote');
+      expect(modalActionIdForHotkey(stopped.hitboxes, 'o'), 'im:addons');
 
       final MonitorFrame running = instanceOverlay();
       expect(modalActionIdForHotkey(running.hitboxes, 's'), 'im:stop');
@@ -558,6 +560,37 @@ void main() {
   });
 
   group('overlayModal instance actions', () {
+    test('offers addons only for stopped Local instances', () {
+      final MonitorFrame stopped = instanceOverlay(state: RuntimeState.stopped);
+      expect(buttonIds(stopped), contains('im:addons'));
+      expect(plainRows(stopped).join('\n'), contains('[ O ADDONS ]'));
+      final MonitorHitbox addons = boxFor(stopped, 'im:addons')!;
+      expect(
+        hitTest(stopped.hitboxes, row: addons.row, col: addons.colStart),
+        'im:addons',
+      );
+
+      for (final RuntimeState state in RuntimeState.values) {
+        if (state != RuntimeState.stopped) {
+          final MonitorFrame live = instanceOverlay(state: state);
+          expect(
+            buttonIds(live),
+            isNot(contains('im:addons')),
+            reason: state.name,
+          );
+          expect(modalActionIdForHotkey(live.hitboxes, 'o'), isNull);
+          expect(plainRows(live).join('\n'), contains('[ O ADDONS ]'));
+        }
+        final MonitorFrame remote = instanceOverlay(remote: true, state: state);
+        expect(
+          buttonIds(remote),
+          isNot(contains('im:addons')),
+          reason: state.name,
+        );
+        expect(plainRows(remote).join('\n'), isNot(contains('ADDONS')));
+      }
+    });
+
     test('blocks runtime controls but keeps remote management available', () {
       final MonitorFrame frame = instanceOverlay(
         remote: true,
@@ -921,7 +954,7 @@ void main() {
 
     test('spends the whole frame width when the inset card is too narrow', () {
       final MonitorFrame frame = instanceOverlay(columns: 28);
-      expect(plainRows(frame)[10], startsWith('┌─ alpha '));
+      expect(plainRows(frame)[9], startsWith('┌─ alpha '));
       for (final String row in frame.rows) {
         expect(Ansi.visibleLength(row), 28);
       }
@@ -957,6 +990,7 @@ void main() {
           'im:start',
           'im:setPort',
           'im:pushToRemote',
+          'im:addons',
           'im:makeActive',
           'im:motd',
           'im:lock',
@@ -972,6 +1006,7 @@ void main() {
           '[ C CONSOLE ]',
           '[ T SET PORT ]',
           '[ P PUSH TO REMOTE ]',
+          '[ O ADDONS ]',
           '[ A MAKE ACTIVE ]',
           '[ M MOTD ]',
           '[ L LOCK ]',
@@ -1007,6 +1042,8 @@ void main() {
       );
       expect(buttonIds(local), contains('im:pushToRemote'));
       expect(plainRows(local).join('\n'), contains('[ PUSH TO REMOTE ]'));
+      expect(buttonIds(local), contains('im:addons'));
+      expect(plainRows(local).join('\n'), contains('[ O ADDONS ]'));
 
       final MonitorFrame remote = instanceOverlay(
         remote: true,

@@ -157,6 +157,12 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'export <instance> <template>',
     'delete <name>',
   ]),
+  CommandHelpGroup('addons', <String>[
+    'catalog [--json]',
+    'list [instance] [--mc <version>] [--json]',
+    'set [instance] (--select <id,id,...>|--none) [--mc <version>]',
+    'update [instance] [--mc <version>]',
+  ]),
   CommandHelpGroup('content', <String>[
     'search <query>',
     'install <modrinth-slug|url> [--mc <version>] [--loader <loader>] [--name <alias>] [--sync]',

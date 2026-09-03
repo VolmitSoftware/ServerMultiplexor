@@ -14,6 +14,8 @@ import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
 import '../utils/table.dart';
 import '../utils/terminal/ansi.dart';
+import 'addons/addon_catalog.dart';
+import 'addons/addon_installer.dart';
 import '../utils/terminal/term_io.dart';
 import 'consumer_service.dart';
 import 'dropin_sync_policy.dart';
@@ -29,6 +31,7 @@ import 'server_ping.dart';
 
 part 'native_command_help.dart';
 part 'native_cli_output.dart';
+part 'native_command_addons.dart';
 
 class NativeCommandService {
   NativeCommandService({
@@ -144,6 +147,8 @@ class NativeCommandService {
         return _dispatchTemplate(rest, io);
       case 'content':
         return _dispatchContent(rest, io);
+      case 'addons':
+        return _dispatchAddons(rest, io);
       case 'gameplay':
         return _dispatchGameplay(rest, io);
       case 'consumer':
@@ -9429,9 +9434,14 @@ class NativeCommandService {
     final List<String> failed = <String>[];
     try {
       _withDropinSyncLock(targetProfile, instance, () {
+        final AddonState addons = AddonState.read(
+          _instanceDir(targetProfile, instance),
+        );
         if (clean) {
           for (final FileSystemEntity entity in targetDir.listSync()) {
-            if (entity is File && entity.path.endsWith('.jar')) {
+            if (entity is File &&
+                entity.path.endsWith('.jar') &&
+                !addons.protects('$targetSubdir/${p.basename(entity.path)}')) {
               entity.deleteSync();
             }
           }
@@ -9464,6 +9474,10 @@ class NativeCommandService {
           try {
             final String jarName = p.basename(entity.path);
             final String syncKey = _dropinSyncJarKey(targetSubdir, jarName);
+            if (addons.protects(syncKey)) {
+              preserved.add(jarName);
+              continue;
+            }
             final String targetPath = p.join(targetDir.path, jarName);
             final String sourceHash = _sha256File(entity);
             if (preserveLocalChanges) {
@@ -9561,6 +9575,12 @@ class NativeCommandService {
     final String jarName = p.basename(sourceFile.path);
     try {
       _withDropinSyncLock(targetProfile, instance, () {
+        if (AddonState.read(
+          _instanceDir(targetProfile, instance),
+        ).protects('$targetSubdir/$jarName')) {
+          preserved.add(jarName);
+          return;
+        }
         final Map<String, String> synchronizedHashes = _loadDropinSyncHashes(
           targetProfile,
           instance,
@@ -10752,7 +10772,8 @@ class NativeCommandService {
       return true;
     }
 
-    return name == 'server.properties' ||
+    return name == AddonState.filename ||
+        name == 'server.properties' ||
         name == 'eula.txt' ||
         name == 'ops.json' ||
         name == 'whitelist.json' ||

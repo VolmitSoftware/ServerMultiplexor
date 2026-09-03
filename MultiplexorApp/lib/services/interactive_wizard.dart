@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -33,6 +34,8 @@ import 'pterodactyl/pterodactyl_smb_service.dart';
 import 'pterodactyl/pterodactyl_transfer_models.dart';
 import 'pterodactyl/pterodactyl_transfer_service.dart';
 import 'runtime_state.dart';
+
+part 'interactive_wizard_addons.dart';
 
 /// The side effect a Remote quick key is allowed to perform after a fresh
 /// resource-state check.
@@ -992,6 +995,8 @@ class InteractiveWizard {
         await _quickConsole(name);
       case InstanceModalAction.pushToRemote:
         await _pushLocalToRemote(name);
+      case InstanceModalAction.addons:
+        await _configureInstanceAddons(name);
       case InstanceModalAction.pullToLocal:
         Ui.note('That action is Remote-only.');
         await Ui.pause();
@@ -1199,6 +1204,7 @@ class InteractiveWizard {
       case InstanceModalAction.isolated:
       case InstanceModalAction.shared:
       case InstanceModalAction.copyDropins:
+      case InstanceModalAction.addons:
       case InstanceModalAction.update:
       case InstanceModalAction.factoryReset:
         Ui.note('That action is Local-only.');
@@ -4317,6 +4323,10 @@ class InteractiveWizard {
 
     if (!isolated && !isMohist) {
       await _syncDropinsAllTargets();
+    }
+
+    if (!await _configureInstanceAddons(name, duringSetup: true)) {
+      return;
     }
 
     final List<String> all = await _instanceNames();

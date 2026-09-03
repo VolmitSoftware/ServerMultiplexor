@@ -87,6 +87,8 @@ Version refresh is automatic — the wizard never asks "refresh from upstream?".
 
 Pull latest builds refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line.
 
+Local server setup includes an **Addons** checklist before the first launch. To change an existing server, stop it and open its card → **Addons**. Use Space, Enter, or a click to toggle entries, then Done to apply. The checked selection is saved per instance. ViaBackwards includes ViaVersion automatically. Cancelling or a failed install leaves the new server stopped.
+
 ## Concepts
 
 - **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. The active profile is set with `consumer use`. Mohist is the explicit hybrid exception: it is Forge-owned and can subscribe to plugin-consumer dropins.
@@ -294,6 +296,58 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 | `template export <instance> <template>` | Create a template from an existing instance's source metadata, runtime settings, isolation flag, and `server.properties`. |
 | `template delete <name>` | Delete a template file. |
 
+### addons — per-instance plugin and mod checklists
+
+The bundled catalog offers EssentialsX (core), FastAsyncWorldEdit (FAWE), ViaVersion, ViaBackwards, and ProtocolLib. These are server plugins. EssentialsX and FAWE are offered for Paper, Purpur, Leaf, and Spigot; ViaVersion, ViaBackwards, and ProtocolLib also support Folia/Canvas. Forge, Fabric, NeoForge, and Mohist can use explicitly compatible custom entries. Platform restrictions are applied before selection; Modrinth installs require an exact published Minecraft-version match and a stable release, preferring the Paper FAWE artifact for Paper derivatives.
+
+| Command | What it does |
+|---------|--------------|
+| `addons catalog [--json]` | List the bundled and workspace-local catalog; print the custom registry path in text mode. |
+| `addons list [instance] [--mc <version>] [--json]` | Show selected addons and platform eligibility. Uses the active instance if omitted. |
+| `addons set [instance] (--select <id,id,...>\|--none) [--mc <version>]` | Apply the complete checked selection, automatically including declared dependencies. Requires a stopped server. |
+| `addons update [instance] [--mc <version>]` | Refresh the selected addons from their configured sources. Requires a stopped server. |
+
+Downloads are staged and validated before the selection is committed. Modrinth hashes and available GitHub asset hashes are verified. Jars are installed directly as `plugins/multiplexor-<id>.jar` or `mods/multiplexor-<id>.jar`, with ownership and checksums in `.multiplexor-addons.json`. An unchanged selection reuses its installed jars. Unchecking removes managed jars, retaining plugin configuration folders. Existing unmanaged conflicts and locally modified managed jars require moving the conflicting file aside first. Normal drop-in sync, including `--clean`, preserves selected addons and skips conflicting source filenames. Addons work on isolated instances too. Factory reset clears both their jars and selection; clone and backup preserve them.
+
+ProtocolLib uses the official stable `5.4.0` release through Minecraft 1.21.8. For 1.21.9–1.21.11 and 26.1–26.1.2 it uses the official `dev-build` Spigot-compatible artifact, including on Paper. For 26.2 it uses the Paper artifact on Paper derivatives and the Spigot artifact on Spigot. The checklist labels these **ProtocolLib (development)**. The modern Paper artifact requires Paper API 26.2 and cannot be substituted on older servers. These rules are based on [ProtocolLib's artifacts and support declarations](https://github.com/dmulloy2/ProtocolLib). Unknown newer versions need a catalog update before ProtocolLib is offered.
+
+#### Adding entries to the checklist
+
+Create `.multiplexor/addons.json` in the workspace. Entries are added alongside the bundled catalog and cannot reuse an existing ID. No code changes or recompilation are needed:
+
+```json
+{
+  "addons": [
+    {
+      "id": "my-plugin",
+      "name": "My Plugin",
+      "description": "My local development plugin",
+      "kind": "plugin",
+      "serverTypes": ["paper", "purpur"],
+      "source": {"type": "file", "path": "external/MyPlugin.jar"}
+    },
+    {
+      "id": "fabric-api",
+      "name": "Fabric API",
+      "kind": "mod",
+      "serverTypes": ["fabric"],
+      "source": {"type": "modrinth", "project": "P7dR8mSH"}
+    }
+  ]
+}
+```
+
+The required entry fields are `id`, `name`, `kind` (`plugin` or `mod`), `serverTypes`, and `source`. Optional `dependencies` lists other catalog IDs and installs them first; unknown or cyclic dependencies are rejected. Modrinth-required dependencies must have catalog entries and be declared in this list. Optional `filePrefixes` lists existing jar-name prefixes to detect duplicate installations and skip conflicting shared drop-ins, for example `["MyPlugin-"]`.
+
+| Source type | Fields |
+|-------------|--------|
+| `modrinth` | `project`: project ID or slug; optional `versionId` pins an exact stable version and `loaders` overrides the ordered loader preferences for a verified universal jar. Chooses stable versions for the instance's Minecraft version. |
+| `github` | `repo`: `owner/repo`; `asset`: exact jar filename; optional `tag` (defaults to `latest`) and `label` such as `development`. |
+| `url` | `url`: direct HTTP(S) jar URL; optional `sha256` and `version`. |
+| `file` | `path`: local jar, absolute or relative to the workspace. `addons update` recopies it. |
+
+Each source can restrict `serverTypes` and `minecraftVersions` to exact lists. Use these for direct URLs, local jars, and GitHub releases whose compatibility is known; those providers do not publish standardized Minecraft compatibility metadata. An entry can use `sources: [...]` instead of `source`, with the first matching source winning. Bundled definitions live in `MultiplexorApp/lib/services/addons/builtin_addons.dart`; catalog validation, provider resolution, and installation are separate modules reused by the CLI and wizard.
+
 ### content — Modrinth/URL plugin and mod manager
 
 | Command | What it does |
@@ -400,6 +454,17 @@ The Local dashboard's `g` or `G` opens the same grid. Use `Shift+R` to repaint t
 ./start.sh content search luckperms
 ./start.sh content install luckperms --mc 1.21.11 --sync
 
+# Choose addons for this server; ViaBackwards also installs ViaVersion
+./start.sh runtime stop lobby
+./start.sh addons set lobby --select essentialsx,fawe,viabackwards,protocollib
+./start.sh addons list lobby
+./start.sh runtime start lobby
+
+# Refresh the checked addons while stopped, or uncheck all of them
+./start.sh runtime stop lobby
+./start.sh addons update lobby
+./start.sh addons set lobby --none
+
 # Run diagnostics when setup or runtime behavior looks suspicious
 ./start.sh doctor
 
@@ -468,6 +533,7 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
     .server-source                # type, launch mode, jar path, isolation/subscriptions
     .multiplexor-remote.json      # durable link after pull, first new push, or --link
     .multiplexor-dropins.json     # last synchronized jar hashes
+    .multiplexor-addons.json      # this instance's checked addons and jar hashes
     server.jar                    # symlink into builds/
     plugins/ or mods/             # Mohist can track both source kinds
   shared-plugin-data/             # plugin-only: iris packs + merged ops.json
@@ -476,6 +542,7 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   state/content-lock.yaml          # managed plugin/mod manifest
   state/gameplay-tests/             # ignored Mineflayer JSON reports
 .multiplexor/templates/             # reusable server blueprints
+.multiplexor/addons.json            # optional custom checklist entries
 .multiplexor/workspace.yaml         # workspace marker
 .multiplexor/pterodactyl-profiles.yaml # non-secret remote panel metadata
 .manager-state/pterodactyl/         # remote monitor trend history

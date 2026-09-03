@@ -51,6 +51,7 @@ enum InstanceModalAction {
   console,
   pullToLocal,
   pushToRemote,
+  addons,
   settings,
   history,
   reinstall,
@@ -156,6 +157,7 @@ String instanceModalActionHotkey(InstanceModalAction action) =>
       InstanceModalAction.console => 'c',
       InstanceModalAction.pullToLocal ||
       InstanceModalAction.pushToRemote => 'p',
+      InstanceModalAction.addons => 'o',
       InstanceModalAction.settings => 'e',
       InstanceModalAction.history => 'h',
       InstanceModalAction.reinstall => 'n',
@@ -411,6 +413,7 @@ int _cardWidth(int columns, List<List<ButtonSpec>> rows) {
 /// - Not stopped (running, or mid-flight starting/stopping/restarting): STOP,
 ///   RESTART and CONSOLE are live; START is not offered at all.
 /// - Stopped: START and UPDATE are live; RESTART and CONSOLE render faint.
+/// - ADDONS requires a stopped Local instance.
 /// - An instance with no reading yet is treated as stopped, the same way the
 ///   selection bar treats it — an unsampled instance is not a running one.
 /// - FACTORY RESET and DELETE need the instance stopped *and* unlocked; that
@@ -427,10 +430,21 @@ List<List<ButtonSpec>> _instanceRows({
   required MetricSample? latest,
   required bool locked,
   required bool isolated,
+  required int columns,
 }) {
   final RuntimeState? state = latest?.state;
   final bool stopped = state == null || state == RuntimeState.stopped;
   final bool destructive = stopped && !locked;
+  final List<ButtonSpec> transferAddons = <ButtonSpec>[
+    _instanceButton(
+      InstanceModalAction.pushToRemote,
+      'PUSH TO REMOTE',
+      enabled: stopped,
+    ),
+    _instanceButton(InstanceModalAction.addons, 'ADDONS', enabled: stopped),
+  ];
+  final bool splitTransferAddons =
+      _rowWidth(transferAddons, showShortcuts: false) + _cardChrome > columns;
 
   return <List<ButtonSpec>>[
     <ButtonSpec>[
@@ -451,13 +465,10 @@ List<List<ButtonSpec>> _instanceRows({
       ),
       _instanceButton(InstanceModalAction.setPort, 'SET PORT'),
     ],
-    <ButtonSpec>[
-      _instanceButton(
-        InstanceModalAction.pushToRemote,
-        'PUSH TO REMOTE',
-        enabled: stopped,
-      ),
-    ],
+    if (splitTransferAddons)
+      for (final ButtonSpec button in transferAddons) <ButtonSpec>[button]
+    else
+      transferAddons,
     <ButtonSpec>[
       _instanceButton(InstanceModalAction.makeActive, 'MAKE ACTIVE'),
       _instanceButton(InstanceModalAction.motd, 'MOTD'),
@@ -647,7 +658,12 @@ MonitorFrame overlayModal({
               latest: latest,
               operationsBlocked: instanceBlocked,
             )
-          : _instanceRows(latest: latest, locked: locked, isolated: isolated),
+          : _instanceRows(
+              latest: latest,
+              locked: locked,
+              isolated: isolated,
+              columns: columns,
+            ),
     WorkspaceModal() => remote ? _remoteWorkspaceRows() : _workspaceRows(),
   };
 
