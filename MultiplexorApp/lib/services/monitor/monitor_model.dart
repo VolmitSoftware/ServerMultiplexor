@@ -13,11 +13,13 @@ import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/button.dart';
 import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
+import '../instance_bulk.dart';
 import '../runtime_state.dart';
 import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
 import 'monitor_landing.dart';
+import 'monitor_selection.dart';
 
 /// The frame's fixed row budget, top-down: the header panel (a title border,
 /// one facts row and a bottom border), the KPI strip, one row per action bar,
@@ -47,7 +49,7 @@ const String _hintSeparator = ' · ';
 /// Local footer key hints in display order — the row exactly as it renders on
 /// a terminal wide enough for all of it.
 const String _localFooterHints =
-    '[tab] local/remote · [enter] open · d detail · Shift+R repaint · S stop · X kill · O console · '
+    '[tab] local/remote · [enter] open · Space check · a all · x clear · d detail · Shift+R repaint · S stop · X kill · O console · '
     'g consoles · n new · b build · w workspace · c consumer · r range · '
     'q quit';
 
@@ -55,15 +57,14 @@ const String _localFooterHints =
 /// menu and connection card. The workspace shortcut remains visible because
 /// that card also owns files and create-many.
 const String _remoteFooterHints =
-    '[tab] local/remote · [enter] open · d detail · Shift+R repaint · S stop · X kill · '
+    '[tab] local/remote · [enter] open · Space check · a all · x clear · d detail · Shift+R repaint · S stop · X kill · '
     'O live console · n new · b bulk · w workspace · c connection · r range · '
     'q quit';
 
 /// The order hints are given up in when the terminal is too narrow for all
 /// of them (comma-separated). A hint always leaves whole — a footer clipped
-/// mid-word hides a binding without admitting to it — and the four absent
-/// here (`[enter] open`, `d detail`, `Shift+R repaint`, `q quit`) are never
-/// dropped at all.
+/// mid-word hides a binding without admitting to it. The ordinary footer keeps
+/// open, detail, repaint, and quit; checked rows prioritize selection controls.
 ///
 /// `b build` goes first even though `w workspace` was added after it: the
 /// workspace card `w` raises carries Build & tuning itself, so giving up the
@@ -71,10 +72,11 @@ const String _remoteFooterHints =
 /// reachable by mouse alone.
 const String _localFooterDropOrder =
     'b build,c consumer,n new,g consoles,O console,X kill,S stop,'
-    'r range,w workspace';
+    'r range,w workspace,[tab] local/remote,x clear,a all,Space check';
 
 const String _remoteFooterDropOrder =
-    'n new,c connection,X kill,S stop,O live console,r range';
+    'n new,c connection,X kill,S stop,O live console,r range,b bulk,w workspace,'
+    '[tab] local/remote,x clear,a all,Space check';
 
 /// The selection action bar's chips. Which set is drawn follows the
 /// selection's own state: you cannot stop what is not running, and starting
@@ -182,6 +184,7 @@ MonitorFrame buildMonitorFrame({
   required Duration range,
   required DateTime now,
   required DateTime clockNow,
+  Set<String> checkedInstances = const <String>{},
   String? hoveredId,
   String? pressedId,
 }) {
@@ -198,6 +201,9 @@ MonitorFrame buildMonitorFrame({
 
   final int total = snapshot.instances.length;
   final bool hasInstances = total > 0;
+  final Set<String> checked = snapshot.instances
+      .where(checkedInstances.contains)
+      .toSet();
   final bool remoteDisconnected =
       snapshot.view == MonitorView.remote &&
       snapshot.consumerName == 'remote:not connected';
@@ -291,6 +297,7 @@ MonitorFrame buildMonitorFrame({
       theme: theme,
       windowStart: now.subtract(range),
       windowEnd: now,
+      checkedInstances: checked,
       hoveredId: hoveredId,
     );
     rows.addAll(list.rows);
@@ -313,19 +320,31 @@ MonitorFrame buildMonitorFrame({
       hitboxes.addAll(panel.hitboxes);
     }
 
+    final String selectionLabel = checked.isEmpty
+        ? ''
+        : ' ${checked.length} SELECTED  ';
     final ButtonRowRender bar = layoutButtonRow(
-      buttons: _selectionButtons(
-        selectedLatest,
-        operationBlockReason: operationBlockReason,
-        remote: snapshot.view == MonitorView.remote,
-      ),
-      width: columns,
+      buttons: checked.isEmpty
+          ? _selectionButtons(
+              selectedLatest,
+              operationBlockReason: operationBlockReason,
+              remote: snapshot.view == MonitorView.remote,
+            )
+          : _bulkButtons(snapshot, checked),
+      width: columns - selectionLabel.length,
       theme: theme,
       hoveredId: hoveredId,
       pressedId: pressedId,
+      indent: checked.isEmpty ? 1 : 0,
     );
-    rows.add(bar.row);
-    hitboxes.addAll(_buttonHits(bar.spans, rows.length - 1));
+    rows.add(
+      selectionLabel.isEmpty
+          ? bar.row
+          : '${theme.paint(selectionLabel, '${theme.bold}${theme.accent}')}${bar.row}',
+    );
+    hitboxes.addAll(
+      _buttonHits(bar.spans, rows.length - 1, colOffset: selectionLabel.length),
+    );
   } else {
     final MonitorPanelRender body = renderEmptyBody(
       rows: bodyRows,
@@ -354,13 +373,48 @@ MonitorFrame buildMonitorFrame({
   rows.add(workspace.row);
   hitboxes.addAll(_buttonHits(workspace.spans, rows.length - 1));
 
-  rows.add(theme.paint(_footerHints(columns, snapshot.view), theme.faint));
+  rows.add(
+    theme.paint(
+      _footerHints(columns, snapshot.view, hasChecked: checked.isNotEmpty),
+      theme.faint,
+    ),
+  );
 
   return padFrame(
     MonitorFrame(rows: rows, hitboxes: hitboxes),
     columns: columns,
     lines: lines,
   );
+}
+
+List<ButtonSpec> _bulkButtons(MonitorSnapshot snapshot, Set<String> checked) {
+  bool eligible(InstanceBulkAction action) => checked.any(
+    (String instance) => monitorBulkEligible(snapshot, instance, action),
+  );
+  return <ButtonSpec>[
+    ButtonSpec(
+      id: bulkStartHitId,
+      label: 'START',
+      enabled: eligible(InstanceBulkAction.start),
+    ),
+    ButtonSpec(
+      id: bulkStopHitId,
+      label: 'STOP',
+      enabled: eligible(InstanceBulkAction.stop),
+    ),
+    ButtonSpec(
+      id: bulkRestartHitId,
+      label: 'RESTART',
+      enabled: eligible(InstanceBulkAction.restart),
+    ),
+    ButtonSpec(
+      id: bulkDeleteHitId,
+      label: 'DELETE',
+      danger: true,
+      enabled: eligible(InstanceBulkAction.delete),
+    ),
+    const ButtonSpec(id: clearSelectionHitId, label: 'CLEAR'),
+  ];
 }
 
 /// The chips the selection bar draws for a selection whose latest reading is
@@ -382,27 +436,42 @@ List<ButtonSpec> _selectionButtons(
 }
 
 /// The hitboxes for one laid-out button row, drawn on frame row [row].
-List<MonitorHitbox> _buttonHits(List<ButtonSpan> spans, int row) =>
-    <MonitorHitbox>[
-      for (final ButtonSpan span in spans)
-        MonitorHitbox(
-          id: span.id,
-          kind: MonitorHitKind.button,
-          row: row,
-          colStart: span.colStart,
-          colEnd: span.colEnd,
-        ),
-    ];
+List<MonitorHitbox> _buttonHits(
+  List<ButtonSpan> spans,
+  int row, {
+  int colOffset = 0,
+}) => <MonitorHitbox>[
+  for (final ButtonSpan span in spans)
+    MonitorHitbox(
+      id: span.id,
+      kind: MonitorHitKind.button,
+      row: row,
+      colStart: span.colStart + colOffset,
+      colEnd: span.colEnd + colOffset,
+    ),
+];
 
 /// The footer hint row for a [columns]-wide frame: as many of
 /// the provider's hints as fit, dropped whole and highest rank first, so
 /// the row never ends mid-hint and never hides `q quit`.
-String _footerHints(int columns, MonitorView view) {
+String _footerHints(int columns, MonitorView view, {bool hasChecked = false}) {
   final bool remote = view == MonitorView.remote;
-  final String hints = remote ? _remoteFooterHints : _localFooterHints;
-  final String dropOrder = remote
-      ? _remoteFooterDropOrder
-      : _localFooterDropOrder;
+  String hints = remote ? _remoteFooterHints : _localFooterHints;
+  String dropOrder = remote ? _remoteFooterDropOrder : _localFooterDropOrder;
+  if (hasChecked) {
+    hints = hints.replaceFirst(
+      remote ? 'b bulk' : 'b build',
+      'b selected actions',
+    );
+    dropOrder = dropOrder
+        .split(',')
+        .where(
+          (String hint) =>
+              !<String>['Space check', 'a all', 'x clear'].contains(hint),
+        )
+        .join(',');
+    dropOrder = '$dropOrder,d detail,Shift+R repaint';
+  }
   final List<String> shown = hints.split(_hintSeparator);
   for (final String hint in dropOrder.split(',')) {
     if (shown.join(_hintSeparator).length <= columns) {

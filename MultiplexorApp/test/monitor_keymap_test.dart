@@ -74,6 +74,21 @@ void main() {
       expect(monitorActionForEvent(typed('q')), MonitorAction.quit);
     });
 
+    test(
+      'maps checkbox keys while preserving the contextual build shortcut',
+      () {
+        expect(
+          monitorActionForEvent(typed(' ')),
+          MonitorAction.toggleSelection,
+        );
+        expect(monitorActionForEvent(typed('a')), MonitorAction.selectAll);
+        expect(monitorActionForEvent(typed('x')), MonitorAction.clearSelection);
+        expect(monitorActionForEvent(typed('b')), MonitorAction.buildMenu);
+        expect(monitorActionForEvent(typed('A')), MonitorAction.none);
+        expect(monitorActionForEvent(typed('X')), MonitorAction.kill);
+      },
+    );
+
     test('maps w to the workspace card, the keyboard twin of [ MORE ]', () {
       expect(monitorActionForEvent(typed('w')), MonitorAction.workspaceCard);
     });
@@ -94,14 +109,13 @@ void main() {
       expect(monitorActionForEvent(typed('Q')), MonitorAction.none);
       expect(monitorActionForEvent(typed('W')), MonitorAction.none);
       expect(monitorActionForEvent(typed('s')), MonitorAction.none);
-      expect(monitorActionForEvent(typed('x')), MonitorAction.none);
+      expect(monitorActionForEvent(typed('x')), MonitorAction.clearSelection);
       expect(monitorActionForEvent(typed('o')), MonitorAction.none);
     });
 
     test('maps unbound characters to none', () {
       expect(monitorActionForEvent(typed('z')), MonitorAction.none);
       expect(monitorActionForEvent(typed('1')), MonitorAction.none);
-      expect(monitorActionForEvent(typed(' ')), MonitorAction.none);
       expect(monitorActionForEvent(typed('')), MonitorAction.none);
     });
 

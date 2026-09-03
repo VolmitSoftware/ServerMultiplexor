@@ -22,9 +22,8 @@ import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
 
-/// Columns the fleet table spends left of its first column: the selector,
-/// the status bullet and the space after each.
-const int _tablePrefix = 4;
+/// Columns before the name: checkbox, focus selector, status, and spacing.
+const int _tablePrefix = 8;
 
 /// Columns between adjacent fleet-table columns.
 const int _tableGap = 2;
@@ -514,11 +513,15 @@ MonitorPanelRender renderServerList({
   required MonitorTheme theme,
   required DateTime windowStart,
   required DateTime windowEnd,
+  Set<String> checkedInstances = const <String>{},
   String? hoveredId,
 }) {
   final int contentRows = rows < 2 ? 0 : rows - 2;
   final int inner = width - 4 < 0 ? 0 : width - 4;
   final int total = snapshot.instances.length;
+  final int checkedCount = snapshot.instances
+      .where(checkedInstances.contains)
+      .length;
   final ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan =
       _planTable(inner);
 
@@ -562,7 +565,29 @@ MonitorPanelRender renderServerList({
   final List<String> content = <String>[];
   final List<MonitorHitbox> hitboxes = <MonitorHitbox>[];
   if (contentRows > 0) {
-    content.add(_tableHeaderRow(plan: plan, theme: theme));
+    content.add(
+      _tableHeaderRow(
+        plan: plan,
+        theme: theme,
+        selectionMark: checkedCount == 0
+            ? '[ ]'
+            : checkedCount == total
+            ? '[x]'
+            : '[-]',
+        hovered: total > 0 && hoveredId == selectAllHitId,
+      ),
+    );
+    if (total > 0 && inner >= 3) {
+      hitboxes.add(
+        MonitorHitbox(
+          id: selectAllHitId,
+          kind: MonitorHitKind.checkbox,
+          row: topRow + 1,
+          colStart: 2,
+          colEnd: inner >= 7 ? 9 : 5,
+        ),
+      );
+    }
   }
   if (above) {
     content.add(theme.paint('+$offset more', theme.faint));
@@ -578,6 +603,17 @@ MonitorPanelRender renderServerList({
         colEnd: width,
       ),
     );
+    if (inner >= 3) {
+      hitboxes.add(
+        MonitorHitbox(
+          id: '$serverCheckHitPrefix$instance',
+          kind: MonitorHitKind.checkbox,
+          row: topRow + 1 + content.length,
+          colStart: 2,
+          colEnd: 5,
+        ),
+      );
+    }
     content.add(
       _serverTableRow(
         plan: plan,
@@ -585,6 +621,8 @@ MonitorPanelRender renderServerList({
         latest: snapshot.latestFor(instance),
         history: snapshot.historyFor(instance),
         selected: index == selectedIndex,
+        checked: checkedInstances.contains(instance),
+        checkboxHovered: hoveredId == '$serverCheckHitPrefix$instance',
         hovered: hoveredId == '$serverHitPrefix$instance',
         active: instance == snapshot.activeInstance,
         theme: theme,
@@ -602,7 +640,7 @@ MonitorPanelRender renderServerList({
 
   return MonitorPanelRender(
     rows: renderPanel(
-      title: 'SERVERS',
+      title: checkedCount == 0 ? 'SERVERS' : 'SERVERS · $checkedCount SELECTED',
       badge: '${rollup.up}/${rollup.total} UP',
       content: content,
       width: width,
@@ -618,8 +656,10 @@ MonitorPanelRender renderServerList({
 String _tableHeaderRow({
   required ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan,
   required MonitorTheme theme,
+  required String selectionMark,
+  required bool hovered,
 }) {
-  final StringBuffer row = StringBuffer(' ' * _tablePrefix);
+  final StringBuffer row = StringBuffer();
   for (int index = 0; index < plan.columns.length; index++) {
     if (index > 0) {
       row.write(' ' * _tableGap);
@@ -633,10 +673,11 @@ String _tableHeaderRow({
       ),
     );
   }
-  return theme.paint(row.toString(), theme.faint);
+  return '${theme.paint('$selectionMark ALL ', hovered ? theme.accent : theme.faint)}'
+      '${theme.paint(row.toString(), theme.faint)}';
 }
 
-/// One reading row of the fleet table: `▸ ● name  state  …`. The selector
+/// One reading row of the fleet table: `[ ] ▸ ● name  state  …`. The selector
 /// marks the selection and the hovered row alike; the name is strong for
 /// the selection and the workspace's active instance; every missing reading
 /// is the dash glyph, never a zero.
@@ -646,6 +687,8 @@ String _serverTableRow({
   required MetricSample? latest,
   required List<MetricSample> history,
   required bool selected,
+  required bool checked,
+  required bool checkboxHovered,
   required bool hovered,
   required bool active,
   required MonitorTheme theme,
@@ -664,7 +707,11 @@ String _serverTableRow({
       ? theme.paint(glyphs.bulletOn, theme.statusTone(state))
       : theme.paint(glyphs.bulletOff, theme.faint);
 
-  final StringBuffer row = StringBuffer('$selector $bullet ');
+  final String checkbox = theme.paint(
+    checked ? '[x]' : '[ ]',
+    checked || checkboxHovered ? theme.accent : theme.faint,
+  );
+  final StringBuffer row = StringBuffer('$checkbox $selector $bullet ');
   for (int index = 0; index < plan.columns.length; index++) {
     if (index > 0) {
       row.write(' ' * _tableGap);

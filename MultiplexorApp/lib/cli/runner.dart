@@ -290,6 +290,7 @@ Future<int> _runInstance(List<String> rest) async {
         'name': parsed.option('name') ?? parsed.positionalOrNull(0),
       });
       return 0;
+    case 'bulk':
     case 'safe-update':
       await handleNativePassthrough(<String>['instance', ...rest]);
       return 0;
@@ -347,7 +348,7 @@ Future<int> _runInstance(List<String> rest) async {
       return 0;
     default:
       stderr.writeln(
-        'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|safe-update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
+        'Usage: instance <list|bulk|create|clone|delete|reset|activate|path|open|update|safe-update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
       );
       return 2;
   }

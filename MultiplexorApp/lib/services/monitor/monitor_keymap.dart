@@ -25,6 +25,9 @@ enum MonitorAction {
   newInstance,
   buildMenu,
   workspaceCard,
+  toggleSelection,
+  selectAll,
+  clearSelection,
   switchView,
   switchConsumer,
   cycleRange,
@@ -117,6 +120,9 @@ MonitorAction monitorActionForEvent(TermEvent event) {
 }
 
 MonitorAction _charAction(String char) => switch (char) {
+  ' ' => MonitorAction.toggleSelection,
+  'a' => MonitorAction.selectAll,
+  'x' => MonitorAction.clearSelection,
   'd' => MonitorAction.detail,
   'R' => MonitorAction.repaint,
   'S' => MonitorAction.stop,

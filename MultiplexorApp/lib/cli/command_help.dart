@@ -68,6 +68,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
   ]),
   CommandHelpGroup('instance', <String>[
     'list',
+    'bulk <start|stop|restart|delete> <name>... [--confirm <token>]',
     'current',
     'create <name> [--isolated]',
     'clone <source> <target>',

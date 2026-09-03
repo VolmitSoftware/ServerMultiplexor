@@ -5,13 +5,28 @@
 library;
 
 /// The kind of interactive region a [MonitorHitbox] represents.
-enum MonitorHitKind { serverRow, button, chart, rangeChip, modalScrim }
+enum MonitorHitKind {
+  serverRow,
+  checkbox,
+  button,
+  chart,
+  rangeChip,
+  modalScrim,
+}
 
 /// The id prefix every [MonitorHitKind.serverRow] hitbox carries: the id is
 /// `server:<instance>`. Both the builder that emits the hitbox and the
 /// screen that reads it back name the prefix from here, so the two can never
 /// drift apart on the spelling.
 const String serverHitPrefix = 'server:';
+
+const String serverCheckHitPrefix = 'check:';
+const String selectAllHitId = 'selection:all';
+const String clearSelectionHitId = 'selection:clear';
+const String bulkStartHitId = 'bulk:start';
+const String bulkStopHitId = 'bulk:stop';
+const String bulkRestartHitId = 'bulk:restart';
+const String bulkDeleteHitId = 'bulk:delete';
 
 /// The id of the [MonitorHitKind.rangeChip] hitbox over the selected-server
 /// panel's badge — clicking it cycles the chart window, exactly as `r` does.
@@ -44,7 +59,7 @@ const String wsConsolesHitId = 'ws:consoles';
 const String wsConnectHitId = 'ws:connect';
 const String wsMoreHitId = 'ws:more';
 
-/// Every non-row dashboard control id, header switch first and then both
+/// Every dashboard button id, header switch first and then both
 /// action bars. Both halves of the contract are pinned to this list: the
 /// builders emit exactly these ids (across the states that select between
 /// them) and the screen dispatches on exactly these ids, so a control can
@@ -58,6 +73,11 @@ const List<String> monitorBarHitIds = <String>[
   actConsoleHitId,
   actDetailHitId,
   actMoreHitId,
+  bulkStartHitId,
+  bulkStopHitId,
+  bulkRestartHitId,
+  bulkDeleteHitId,
+  clearSelectionHitId,
   wsNewHitId,
   wsBuildsHitId,
   wsTuningHitId,

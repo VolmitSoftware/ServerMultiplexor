@@ -39,6 +39,10 @@ Everything on those bars is a button. Pressing lights a chip in the accent tone;
 
 Clicking a row in `SERVERS` selects it; clicking the selected row again opens its **card**, as do `enter` and `[ MORE ]`. `[ MORE ]` on the workspace bar, or `w`, opens the workspace card instead: build & tuning, pull builds, create many, start all, stop all, wipe. A card is modal: buttons print their single-letter hotkeys when space permits, all four arrow keys move keyboard focus through the button grid, and `enter` runs the focused action. Clicking a button still runs it; clicking elsewhere on the card does nothing, while clicking outside it or pressing `esc` dismisses it. Disabled actions cannot receive focus or fire by hotkey, and nothing behind a card is clickable or keyboard-active while it is up.
 
+Every server row has a checkbox on its left in both Local and Remote views. Click the checkbox or press **Space** on the focused row to select it for a batch. The **ALL** checkbox or `a` selects every server in the current fleet, including rows scrolled offscreen; repeating it clears the selection. `x` or **CLEAR** clears the checked boxes. While any servers are checked, the action bar shows **N SELECTED** with **START**, **STOP**, **RESTART**, **DELETE**, and **CLEAR**. Press `b` for the same selected-actions menu. Opening a server card or detail view does not change the checked set, and single-server card actions still affect only that card's server.
+
+Checks stay attached to server identities across refreshes and scrolling. Disappeared servers are removed from the selection; newly discovered servers are never checked automatically. Switching provider or consumer starts a fresh selection. Start applies to stopped servers, stop to active servers, restart to running servers, and Local deletion skips locked instances. Commands recheck each exact target, report skips/failures, and never widen an empty selection to the whole fleet. Delete lists the targets and requires confirmation; Remote deletion retains its typed confirmation and permission checks.
+
 Mouse support needs a terminal that reports SGR mouse events, which every current one does (Terminal.app, iTerm2, kitty, WezTerm, tmux, the VS Code terminal). The monitor uses click-only reporting (`?1000` with `?1006` SGR coordinates), so passive pointer movement does not repaint the screen. Reporting is turned off again on exit, so the terminal is left as it was found.
 
 | Key | What it does |
@@ -47,13 +51,16 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 | `↑` `↓`, wheel | Move the server selection. Inside a modal card, arrows and the wheel move button focus instead. |
 | `←` `→` | Move horizontally between buttons in an open modal card. |
 | `enter`, click | Open the selected server's card; inside a card, run the focused button. A second click on the selected row, or `[ MORE ]`, also opens the card. |
+| `Space`, checkbox click | Toggle the focused/clicked server's batch checkbox on the main dashboard. |
+| `a`, **ALL** | Select every server in the current fleet, including offscreen rows; clear if all are already checked. |
+| `x`, **CLEAR** | Clear the checked selection. |
 | button letter | Run that button directly while its modal card is open; the hotkey is printed at the start of each button when space permits. |
 | `d` | Detail screen for the selected server. |
 | `S` `X` `O` | Stop, kill (force), open console on the selected server. Restart is available on its action bar and server card. |
 | `Shift+R` | Clear and repaint the entire screen, preserving selection, chart range, and any open card. |
 | `g`, `G` | Open all running Local consoles: a native terminal grid on Windows, a tmux grid on macOS/Linux. |
 | `n` | Create a new instance. Mohist creation offers a persistent Mods/Plugins source checklist; other isolated servers offer per-artifact one-time copies. |
-| `b` | Open Remote bulk actions, or Local Build & tuning. The remaining workspace actions live behind `[ MORE ]`. |
+| `b` | With checked rows, open actions for those exact servers. Otherwise open Remote bulk actions or Local Build & tuning. |
 | `w` | Open the workspace card — the keyboard twin of `[ MORE ]` on the workspace bar. Landing view only. |
 | `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
 | `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h` → `7d`. |
@@ -88,6 +95,8 @@ Version refresh is automatic — the wizard never asks "refresh from upstream?".
 Pull latest builds refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line.
 
 Local server setup includes an **Addons** checklist before the first launch. To change an existing server, stop it and open its card → **Addons**. Use Space, Enter, or a click to toggle entries, then Done to apply. The checked selection is saved per instance. ViaBackwards includes ViaVersion automatically. Cancelling or a failed install leaves the new server stopped.
+
+For batches, use the main dashboard's left-hand checkboxes and selected action bar. Batch starts stay headless, so they do not attach a console for each server. Local operations use the same `instance bulk` command available to scripts; Remote operations reuse the existing bounded fleet engine with only the checked IDs.
 
 ## Concepts
 
@@ -180,6 +189,7 @@ For CI/non-macOS sessions, set both an origin-bound key and its companion origin
 | Command | What it does |
 |---------|--------------|
 | `instance list` | List instances in the active profile; the active one is tagged `(active)`. |
+| `instance bulk <start\|stop\|restart\|delete> <name>... [--confirm <token>]` | Operate on an explicit nonempty set in the active consumer. Validates every target before any mutation, skips ineligible states/locked deletions, and reports each outcome. Start/restart are headless. Delete first prints the exact required confirmation token; repeat with `--confirm` to apply. Partial failures return nonzero. |
 | `instance current` | Print the active instance name. |
 | `instance create <name> [--isolated]` | Create a blank instance (no jar wired up). `--isolated` skips shared drop-ins, Iris packs, and plugin ops; Remote Pull uses this mode so copied servers cannot inherit unrelated Local shared state. |
 | `instance clone <source> <target>` | Copy an instance verbatim, then re-wire shared links. |
@@ -419,6 +429,14 @@ The Local dashboard's `g` or `G` opens the same grid. Use `Shift+R` to repaint t
 
 # Snapshot the dashboard into a log from a script (no TTY, no escape bytes)
 ./start.sh runtime watch --once >> monitor.log
+
+# Start or stop only these named Local servers (dashboard: check rows, then START/STOP)
+./start.sh instance bulk start lobby survival
+./start.sh instance bulk stop lobby survival
+
+# Preview deletion of only this set, then repeat with the printed exact token
+./start.sh instance bulk delete lobby survival
+# ./start.sh instance bulk delete lobby survival --confirm "DELETE lobby,survival"
 
 # Create an isolated test server (won't pick up your dropins)
 ./start.sh server create vanilla-test --type purpur --isolated

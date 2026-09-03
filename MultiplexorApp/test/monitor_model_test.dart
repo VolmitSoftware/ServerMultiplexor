@@ -126,10 +126,10 @@ List<String> stripAll(List<String> rows) =>
     rows.map(Ansi.strip).toList(growable: false);
 
 /// The columns the fleet table's name field occupies in a stripped row: the
-/// panel rule and a space (2), the selector and a space (2), the status
-/// bullet and a space (2), then the 20-column name.
-const int _nameStart = 6;
-const int _nameEnd = 26;
+/// panel rule and a space (2), checkbox and space (4), selector and space
+/// (2), status bullet and space (2), then the 20-column name.
+const int _nameStart = 10;
+const int _nameEnd = 30;
 
 /// The instance name rendered on [row] of a stripped frame, or the empty
 /// string when the row is too short to carry one.
@@ -565,17 +565,17 @@ void main() {
       );
       expect(nameOnRow(rows[8]), 'alpha');
       expect(nameOnRow(rows[9]), 'beta');
-      expect(rows[8][2], ' ');
-      expect(rows[9][2], '▸');
-      expect(rows[8][4], '●', reason: 'a running instance keeps its bullet');
+      expect(rows[8][6], ' ');
+      expect(rows[9][6], '▸');
+      expect(rows[8][8], '●', reason: 'a running instance keeps its bullet');
     });
 
     test('shows the selector on a hovered row that is not the selection', () {
       final List<String> rows = stripAll(
         frameOf(selectedIndex: 0, hoveredId: '${serverHitPrefix}beta').rows,
       );
-      expect(rows[8][2], '▸', reason: 'the selection');
-      expect(rows[9][2], '▸', reason: 'the hover');
+      expect(rows[8][6], '▸', reason: 'the selection');
+      expect(rows[9][6], '▸', reason: 'the hover');
     });
 
     test('paints a hovered row selector with the accent tone', () {
@@ -864,6 +864,9 @@ void main() {
       const List<String> allHints = <String>[
         '[tab] local/remote',
         '[enter] open',
+        'Space check',
+        'a all',
+        'x clear',
         'd detail',
         'Shift+R repaint',
         'S stop',
@@ -891,7 +894,7 @@ void main() {
     });
 
     test('shows every footer hint once the terminal is wide enough', () {
-      final List<String> rows = stripAll(frameOf(columns: 200).rows);
+      final List<String> rows = stripAll(frameOf(columns: 280).rows);
       expect(rows.last, contains('g consoles'));
       expect(rows.last, contains('b build'));
       expect(rows.last, contains('w workspace'));
@@ -907,7 +910,7 @@ void main() {
             consumerName: 'remote:production',
             view: MonitorView.remote,
           ),
-          columns: 200,
+          columns: 280,
           lines: 40,
         ).rows,
       );
@@ -1032,6 +1035,7 @@ void main() {
       int selectedIndex = 0,
       int columns = 80,
       int lines = 24,
+      Set<String> checkedInstances = const <String>{},
     }) => buildMonitorFrame(
       snapshot: snapshot ?? twoServers(),
       selectedIndex: selectedIndex,
@@ -1042,6 +1046,7 @@ void main() {
       range: range,
       now: now,
       clockNow: now,
+      checkedInstances: checkedInstances,
     );
 
     /// Asserts the `[ LABEL ]` chip on [row] is covered by a button hitbox
@@ -1369,6 +1374,10 @@ void main() {
           // between them every chip the dashboard has.
           frameOf(snapshot: twoServers(), columns: 132, lines: 40),
           frameOf(snapshot: mixedFleet(), selectedIndex: 1),
+          frameOf(
+            snapshot: mixedFleet(),
+            checkedInstances: <String>{'alpha', 'gamma'},
+          ),
           frameOf(snapshot: emptyWorkspace(), columns: 132, lines: 40),
           frameOf(
             snapshot: MonitorSnapshot(

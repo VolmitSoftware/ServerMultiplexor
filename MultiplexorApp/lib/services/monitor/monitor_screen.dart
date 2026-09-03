@@ -16,6 +16,7 @@ import '../../utils/terminal/frame_patch.dart';
 import '../../utils/terminal/term_events.dart';
 import '../../utils/terminal/term_io.dart';
 import '../../utils/terminal/theme.dart';
+import '../instance_bulk.dart';
 import 'metric_sample.dart';
 import 'metrics_sampler.dart';
 import 'monitor_detail_model.dart';
@@ -24,6 +25,7 @@ import 'monitor_hitbox.dart';
 import 'monitor_keymap.dart';
 import 'monitor_modal.dart';
 import 'monitor_model.dart';
+import 'monitor_selection.dart';
 
 /// How long each iteration waits for input. Together with [_yieldWindow] this
 /// is the heartbeat: no [Timer] drives this screen, the blocking read's own
@@ -201,6 +203,7 @@ class MonitorScreen {
     required this.instanceAction,
     required this.workspaceAction,
     required this.readLogTail,
+    this.bulkAction,
     Duration sweepInterval = _localSweepInterval,
     this.sweepIntervalProvider,
     this.refreshImmediately = true,
@@ -221,6 +224,12 @@ class MonitorScreen {
   )
   workspaceAction;
   final Future<List<String>> Function(String logPath, int maxLines) readLogTail;
+  final Future<void> Function(
+    List<String> instances,
+    InstanceBulkAction? action,
+    MonitorSnapshot snapshot,
+  )?
+  bulkAction;
 
   final Duration _sweepInterval;
 
@@ -275,6 +284,7 @@ class MonitorScreen {
   String? _modalSelectedId;
 
   int _selectedIndex = 0;
+  final MonitorSelection _selection = MonitorSelection();
   Duration _range = monitorRanges.first;
   bool _forceFull = true;
   int _incrementalCharactersSinceFullFrame = 0;
@@ -484,6 +494,7 @@ class MonitorScreen {
           )
         : buildMonitorFrame(
             snapshot: _snapshot,
+            checkedInstances: _selection.checked,
             selectedIndex: _selectedIndex,
             frame: activityFrame,
             columns: columns,
@@ -616,6 +627,7 @@ class MonitorScreen {
   }
 
   void _clampSelection() {
+    _selection.reconcile(_snapshot);
     final int count = _snapshot.instances.length;
     if (count == 0) {
       _selectedIndex = 0;
@@ -918,11 +930,32 @@ class MonitorScreen {
   /// constants the builders draw their chips from, so this switch and the
   /// bars cannot drift apart on an id.
   Future<MonitorResult?> _activateBase(String id) async {
+    if (id.startsWith(serverCheckHitPrefix)) {
+      final String instance = id.substring(serverCheckHitPrefix.length);
+      final int index = _snapshot.instances.indexOf(instance);
+      if (index >= 0) {
+        _selection.toggle(instance, _snapshot);
+        _selectedIndex = index;
+      }
+      return null;
+    }
     if (id.startsWith(serverHitPrefix)) {
       _activateServerRow(id.substring(serverHitPrefix.length));
       return null;
     }
     switch (id) {
+      case selectAllHitId:
+        _selection.toggleAll(_snapshot);
+      case clearSelectionHitId:
+        _selection.clear();
+      case bulkStartHitId:
+        return _runBulkAction(InstanceBulkAction.start);
+      case bulkStopHitId:
+        return _runBulkAction(InstanceBulkAction.stop);
+      case bulkRestartHitId:
+        return _runBulkAction(InstanceBulkAction.restart);
+      case bulkDeleteHitId:
+        return _runBulkAction(InstanceBulkAction.delete);
       case actStartHitId:
         return _runInstanceAction(InstanceModalAction.start);
       case actStopHitId:
@@ -1043,6 +1076,31 @@ class MonitorScreen {
     return invalidated ? const MonitorSwitchConsumer() : null;
   }
 
+  Future<MonitorResult?> _runBulkAction(InstanceBulkAction? action) async {
+    final Future<void> Function(
+      List<String>,
+      InstanceBulkAction?,
+      MonitorSnapshot,
+    )?
+    callback = bulkAction;
+    if (callback == null || _detailMode) return null;
+    // Capture exact identities before suspending. Refreshes or focus changes
+    // while the user reviews a confirmation cannot redirect the operation.
+    final MonitorSnapshot snapshot = _snapshot;
+    final List<String> targets = _selection.targets(snapshot);
+    if (targets.isEmpty ||
+        action != null &&
+            !targets.any(
+              (String target) => monitorBulkEligible(_snapshot, target, action),
+            )) {
+      return null;
+    }
+    final bool invalidated = await _suspended(
+      () => callback(targets, action, snapshot),
+    );
+    return invalidated ? const MonitorSwitchConsumer() : null;
+  }
+
   void _openInstanceModal(String? instance) {
     if (instance == null || instance.isEmpty) {
       return;
@@ -1112,6 +1170,18 @@ class MonitorScreen {
       case MonitorAction.detail:
         _enterDetail();
         return null;
+      case MonitorAction.toggleSelection:
+        final String? focused = _selectedInstance;
+        if (!_detailMode && focused != null) {
+          _selection.toggle(focused, _snapshot);
+        }
+        return null;
+      case MonitorAction.selectAll:
+        if (!_detailMode) _selection.toggleAll(_snapshot);
+        return null;
+      case MonitorAction.clearSelection:
+        if (!_detailMode) _selection.clear();
+        return null;
       case MonitorAction.back:
         // Handled above so modal/detail precedence is explicit.
         return null;
@@ -1124,6 +1194,7 @@ class MonitorScreen {
       case MonitorAction.newInstance:
         return _runWorkspaceAction(WorkspaceModalAction.newInstance);
       case MonitorAction.buildMenu:
+        if (!_detailMode && !_selection.isEmpty) return _runBulkAction(null);
         return _runWorkspaceAction(monitorBuildShortcutAction(_snapshot.view));
       case MonitorAction.workspaceCard:
         // The keyboard twin of `[ MORE ]` on the workspace bar — and, like

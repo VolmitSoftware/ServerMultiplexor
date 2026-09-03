@@ -38,9 +38,10 @@ void main() {
   });
 
   group('MonitorHitKind', () {
-    test('has exactly the five kinds the dashboard needs', () {
+    test('has exactly the kinds the dashboard needs', () {
       expect(MonitorHitKind.values, <MonitorHitKind>[
         MonitorHitKind.serverRow,
+        MonitorHitKind.checkbox,
         MonitorHitKind.button,
         MonitorHitKind.chart,
         MonitorHitKind.rangeChip,

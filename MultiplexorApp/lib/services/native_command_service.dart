@@ -20,6 +20,7 @@ import '../utils/terminal/term_io.dart';
 import 'consumer_service.dart';
 import 'dropin_sync_policy.dart';
 import 'gameplay_test_service.dart';
+import 'instance_bulk.dart';
 import 'manager_context.dart';
 import 'minimal_log4j_config.dart';
 import 'monitor/metric_sample.dart';
@@ -32,6 +33,7 @@ import 'server_ping.dart';
 part 'native_command_help.dart';
 part 'native_cli_output.dart';
 part 'native_command_addons.dart';
+part 'native_command_bulk.dart';
 
 class NativeCommandService {
   NativeCommandService({
@@ -229,6 +231,8 @@ class NativeCommandService {
           io.write(name == active ? '$name (active)' : name);
         }
         return 0;
+      case 'bulk':
+        return _dispatchInstanceBulk(profile, rest, io);
       case 'current':
         final current = _currentInstance(profile);
         if (current == null || current.isEmpty) {
@@ -315,7 +319,7 @@ class NativeCommandService {
         return _dispatchInstanceDeleteAll(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: instance <list|create|clone|delete|reset|activate|path|open|update|safe-update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
+          'Usage: instance <list|bulk|create|clone|delete|reset|activate|path|open|update|safe-update|isolated|lock|unlock|locked|port|motd-style|current|delete-all>',
           2,
         );
     }

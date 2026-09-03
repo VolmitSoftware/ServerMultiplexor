@@ -10,6 +10,7 @@ import '../utils/process_runner.dart';
 import '../utils/terminal/theme.dart';
 import '../utils/user_prompt.dart';
 import 'consumer_service.dart';
+import 'instance_bulk.dart';
 import 'monitor/log_tail.dart';
 import 'monitor/metric_sample.dart';
 import 'monitor/metrics_sampler.dart';
@@ -36,6 +37,7 @@ import 'pterodactyl/pterodactyl_transfer_service.dart';
 import 'runtime_state.dart';
 
 part 'interactive_wizard_addons.dart';
+part 'interactive_wizard_selection.dart';
 
 /// The side effect a Remote quick key is allowed to perform after a fresh
 /// resource-state check.
@@ -719,6 +721,12 @@ class InteractiveWizard {
       quickAction: _monitorQuickAction,
       instanceAction: _monitorInstanceAction,
       workspaceAction: _monitorWorkspaceAction,
+      bulkAction:
+          (
+            List<String> instances,
+            InstanceBulkAction? action,
+            MonitorSnapshot snapshot,
+          ) => _monitorSelectionAction(instances, action, snapshot),
       readLogTail: readLogTail,
       refreshImmediately: false,
     );
@@ -809,6 +817,17 @@ class InteractiveWizard {
       quickAction: _monitorQuickAction,
       instanceAction: _monitorInstanceAction,
       workspaceAction: _monitorWorkspaceAction,
+      bulkAction:
+          (
+            List<String> instances,
+            InstanceBulkAction? action,
+            MonitorSnapshot snapshot,
+          ) => _monitorSelectionAction(
+            instances,
+            action,
+            snapshot,
+            remoteProfile: profile,
+          ),
       readLogTail: (String _, int _) async => const <String>[
         'Remote console output is available from the live CONSOLE action.',
       ],
@@ -946,6 +965,9 @@ class InteractiveWizard {
       case MonitorAction.newInstance:
       case MonitorAction.buildMenu:
       case MonitorAction.workspaceCard:
+      case MonitorAction.toggleSelection:
+      case MonitorAction.selectAll:
+      case MonitorAction.clearSelection:
       case MonitorAction.switchView:
       case MonitorAction.switchConsumer:
       case MonitorAction.cycleRange:
@@ -1156,6 +1178,9 @@ class InteractiveWizard {
       case MonitorAction.newInstance:
       case MonitorAction.buildMenu:
       case MonitorAction.workspaceCard:
+      case MonitorAction.toggleSelection:
+      case MonitorAction.selectAll:
+      case MonitorAction.clearSelection:
       case MonitorAction.switchView:
       case MonitorAction.switchConsumer:
       case MonitorAction.cycleRange:
@@ -2878,21 +2903,47 @@ class InteractiveWizard {
 
   Future<void> _runRemoteBulkAction(
     RemoteBulkAction action,
-    String? selectedIdentifier,
-  ) async {
-    final PterodactylProfile profile = _requireRemoteProfile();
+    String? selectedIdentifier, {
+    List<String>? checkedIdentifiers,
+    PterodactylProfile? checkedProfile,
+  }) async {
+    final PterodactylProfile profile = checkedProfile ?? _requireRemoteProfile();
     final List<PterodactylFleetSample> fleet = await Ui.spin(
       'Refreshing remote fleet',
       () => pterodactyl.captureFleet(profile.id),
     );
-    final List<PterodactylFleetSample>? targets = await _pickRemoteBulkTargets(
-      fleet: fleet,
-      action: action,
-      selectedIdentifier: selectedIdentifier,
-    );
+    final List<PterodactylFleetSample>? targets = checkedIdentifiers == null
+        ? await _pickRemoteBulkTargets(
+            fleet: fleet,
+            action: action,
+            selectedIdentifier: selectedIdentifier,
+          )
+        : remoteCheckedBulkTargets(
+            fleet: fleet,
+            checkedIdentifiers: checkedIdentifiers,
+            action: action,
+          );
     if (targets == null) return;
+    final Set<String> eligibleIds = targets
+        .map((PterodactylFleetSample sample) => sample.server.identifier)
+        .toSet();
+    final List<PterodactylFleetSample> skippedChecked =
+        checkedIdentifiers == null
+        ? const <PterodactylFleetSample>[]
+        : fleet
+              .where(
+                (PterodactylFleetSample sample) =>
+                    checkedIdentifiers.contains(sample.server.identifier) &&
+                    !eligibleIds.contains(sample.server.identifier),
+              )
+              .toList();
     if (targets.isEmpty) {
       Ui.note('No eligible servers are selected.');
+      for (final PterodactylFleetSample sample in skippedChecked) {
+        Ui.note(
+          'Skipped ${_safeRemoteText(sample.server.name)}: unavailable for ${action.name}.',
+        );
+      }
       await Ui.pause();
       return;
     }
@@ -2968,6 +3019,11 @@ class InteractiveWizard {
       } else {
         Ui.error('$label: ${_safeRemoteText(item.error ?? 'unknown failure')}');
       }
+    }
+    for (final PterodactylFleetSample sample in skippedChecked) {
+      Ui.note(
+        'Skipped ${_safeRemoteText(sample.server.name)}: unavailable for ${action.name}.',
+      );
     }
     Ui.blank();
     if (result.isSuccess) {
@@ -5182,11 +5238,12 @@ class InteractiveWizard {
     return _activeConsumer() == ConsumerProfile.plugin;
   }
 
-  Future<List<_InstanceRow>> _loadInstanceRows() async {
-    final CapturedResult result = await passthrough.capture(<String>[
-      'runtime',
-      'states',
-    ]);
+  Future<List<_InstanceRow>> _loadInstanceRows({
+    PassthroughService? source,
+  }) async {
+    final CapturedResult result = await (source ?? passthrough).capture(
+      <String>['runtime', 'states'],
+    );
     if (!result.success) {
       return const <_InstanceRow>[];
     }
