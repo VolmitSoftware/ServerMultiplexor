@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -26,6 +27,82 @@ void main() {
 
     expect(interval, const Duration(seconds: 52));
     expect(requestsPerMinute, lessThanOrEqualTo(100));
+  });
+
+  test('remote stop returns when the server shuts down cleanly', () async {
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      _ServiceTransport(<_ServiceReply>[
+        const _ServiceReply(204, ''),
+        _ServiceReply(200, _resourceResponse('offline')),
+      ]),
+    ]);
+    addTearDown(fixture.close);
+
+    await fixture.service.power(
+      fixture.profile.id,
+      'server01',
+      PterodactylPowerSignal.stop,
+    );
+
+    expect(fixture.transports.single.requests, hasLength(2));
+    expect(
+      fixture.transports.single.requests.last.uri.path,
+      '/api/client/servers/server01/resources',
+    );
+  });
+
+  test('remote stop forces after five seconds even if status stalls', () async {
+    final _StalledStopTransport transport = _StalledStopTransport();
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      transport,
+    ]);
+    addTearDown(fixture.close);
+    final Stopwatch elapsed = Stopwatch()..start();
+
+    await fixture.service.power(
+      fixture.profile.id,
+      'server01',
+      PterodactylPowerSignal.stop,
+    );
+
+    expect(transport.signals, <String>['stop', 'kill']);
+    expect(elapsed.elapsed, greaterThanOrEqualTo(const Duration(seconds: 5)));
+    expect(elapsed.elapsed, lessThan(const Duration(seconds: 10)));
+  });
+
+  test('bulk stop waits for each clean shutdown', () async {
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      _ServiceTransport(<_ServiceReply>[
+        _ServiceReply(200, _twoServerListResponse()),
+        _ServiceReply(200, _serverListResponse(empty: true)),
+        const _ServiceReply(204, ''),
+        _ServiceReply(200, _resourceResponse('offline')),
+        const _ServiceReply(204, ''),
+        _ServiceReply(200, _resourceResponse('offline')),
+      ]),
+    ]);
+    addTearDown(fixture.close);
+
+    final PterodactylBulkResult result = await fixture.service.bulkPower(
+      profileId: fixture.profile.id,
+      serverIdentifiers: <String>['server01', 'server02'],
+      signal: PterodactylPowerSignal.stop,
+      concurrency: 1,
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(
+      fixture.transports.single.requests
+          .where(
+            (PterodactylTransportRequest request) =>
+                request.uri.path.endsWith('/resources'),
+          )
+          .map((PterodactylTransportRequest request) => request.uri.path),
+      <String>[
+        '/api/client/servers/server01/resources',
+        '/api/client/servers/server02/resources',
+      ],
+    );
   });
 
   test('bulk confirmation token is exact, normalized, and stable', () {
@@ -2066,6 +2143,29 @@ final class _ServiceTransport implements PterodactylTransport {
 
   @override
   void close() {}
+}
+
+final class _StalledStopTransport extends _ServiceTransport {
+  _StalledStopTransport() : super(const <_ServiceReply>[]);
+
+  final List<String> signals = <String>[];
+
+  @override
+  Future<PterodactylTransportResponse> send(
+    PterodactylTransportRequest request,
+  ) async {
+    requests.add(request);
+    if (request.uri.path.endsWith('/resources')) {
+      return Completer<PterodactylTransportResponse>().future;
+    }
+    if (request.uri.path.endsWith('/power')) {
+      final Map<String, Object?> body =
+          jsonDecode(request.body!) as Map<String, Object?>;
+      signals.add(body['signal']! as String);
+      return const PterodactylTransportResponse(statusCode: 204, body: '');
+    }
+    throw StateError('Unexpected request: ${request.uri}');
+  }
 }
 
 final class _ConcurrencyTransport extends _ServiceTransport {

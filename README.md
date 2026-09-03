@@ -135,7 +135,7 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 | `remote permissions <server> [--profile <id>]` | Show ownership and the exact Client permissions used to gate server actions. |
 | `remote activity <server> [--page <n>] [--per-page <1-100>] [--profile <id>]` | Read the panel's historical server activity/audit feed. |
 | `remote settings <server> [--profile <id>]` | Show limits, feature limits, startup command, and accessible startup variables. |
-| `remote start\|stop\|restart\|kill <server> [--profile <id>]` | Send a Pterodactyl power signal. |
+| `remote start\|stop\|restart\|kill <server> [--profile <id>]` | Send a Pterodactyl power signal. Stop allows five seconds for shutdown, then sends kill if the server remains online. |
 | `remote bulk <start\|stop\|restart\|kill\|reinstall\|delete> [servers...] [--all] [--state running\|offline] [--concurrency <1-8>] [--confirm <token>] [--force] [--profile <id>]` | Safely operate on an explicit remote fleet. Every selector is resolved before mutation; state filters use live resource state (`running` includes transitional non-offline states), work is bounded, and every server receives an outcome. Reinstall/delete print the exact token required by `--confirm`. |
 | `remote console <server> [--profile <id>]` | Attach to a severity-colored, prefix/noise-trimmed live console with server resource chrome, safe Minecraft `§` formatting, and `Tab` completion for common/session commands, selectors, and observed online player names. Repeated `Tab` cycles ambiguous matches; Esc, Ctrl-C, or `:exit` restores the caller without stopping the server. |
 | `remote command <server> <command> [--profile <id>]` | Send one console command. |
@@ -217,7 +217,7 @@ In the Windows grid, `Tab` selects the next console; left/right also switch cons
 |---------|--------------|
 | `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, clickable action bars, and the wizard's flows behind the cards and `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
 | `runtime start [instance] [--no-console]` | Safely sync dropins and start the instance, then open its console unless `--no-console`: tmux on macOS/Linux, a native terminal view on Windows. Locally modified instance jars are preserved with a warning. |
-| `runtime stop [instance] [--graceful]` | Force-stop the tracked runtime immediately. With `--graceful`, sends `stop` through tmux on macOS/Linux or RCON on Windows, waits up to 60s for a clean world-save shutdown, then force-stops on timeout. |
+| `runtime stop [instance] [--graceful\|--force]` | Send `stop` through tmux on macOS/Linux or RCON on Windows, allowing up to five seconds before forcing termination. `--graceful` is the default; `--force` skips the wait. Restart, delete, and reset use the same five-second stop policy. |
 | `runtime restart [instance] [--no-console]` | Stop and start again, then open its console unless `--no-console`. |
 | `runtime console [instance]` | Start the runtime if needed and open its console: tmux on macOS/Linux, native live logs and command input on Windows. |
 | `runtime consoles` | Open all running consoles in a tmux grid on macOS/Linux or a native terminal grid on Windows. |

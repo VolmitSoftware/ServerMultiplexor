@@ -389,6 +389,7 @@ Future<int> _runRuntime(List<String> rest) async {
     case 'stop':
       await handleRuntimeStop(<String, dynamic>{
         'instance': parsed.option('instance') ?? parsed.positionalOrNull(0),
+        'force': parsed.flag('force'),
       });
       return 0;
     case 'restart':

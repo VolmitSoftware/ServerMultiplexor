@@ -24,6 +24,7 @@ import 'monitor/metric_sample.dart';
 import 'native_console_terminal.dart';
 import 'rcon_client.dart';
 import 'runtime_state.dart';
+import 'runtime_stop.dart';
 import 'server_ping.dart';
 
 part 'native_command_help.dart';
@@ -560,7 +561,7 @@ class NativeCommandService {
       return await harness.run(run: run, write: io.write, error: io.error);
     } finally {
       if (startedHere && parsed.flag('stop-after')) {
-        await _runtimeGracefulStop(profile, instance, operationIo);
+        await _runtimeStop(profile, instance, operationIo);
       } else if (parsed.flag('stop-after') && wasRunning && !json) {
         io.write(
           '[INFO] $instance was already running; --stop-after left it running',
@@ -1555,15 +1556,15 @@ class NativeCommandService {
         await _runtimeConsoles(profile, io, layout: 'lateral');
         return 0;
       case 'stop':
-        final bool graceful = rest.contains('--graceful');
+        final bool force = rest.contains('--force');
         final List<String> stopPositional = rest
-            .where((String a) => a != '--graceful')
+            .where((String a) => a != '--graceful' && a != '--force')
             .toList(growable: false);
         final String? stopTarget = stopPositional.isNotEmpty
             ? stopPositional.first
             : null;
-        if (graceful) {
-          await _runtimeGracefulStop(profile, stopTarget, io);
+        if (force) {
+          await _runtimeForceStop(profile, stopTarget, io);
         } else {
           await _runtimeStop(profile, stopTarget, io);
         }
@@ -1614,7 +1615,7 @@ class NativeCommandService {
         return _dispatchRuntimeSettings(profile, rest, io);
       default:
         throw _NativeCommandException(
-          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (start/restart support --instance/--no-console; stop supports --graceful)',
+          'Usage: runtime <console|consoles|consoles-lateral|start|stop|restart|status|stats|states|metrics|list|settings> [instance|args] (start/restart support --instance/--no-console; stop supports --graceful/--force)',
           2,
         );
     }
@@ -7869,7 +7870,7 @@ class NativeCommandService {
     return env;
   }
 
-  Future<void> _runtimeStop(
+  Future<void> _runtimeForceStop(
     ConsumerProfile profile,
     String? inputInstance,
     _NativeIoBuffer io,
@@ -7882,7 +7883,11 @@ class NativeCommandService {
       throw _NativeCommandException('No active instance set', 2);
     }
 
-    final tmuxSession = _tmuxSessionName(profile, instance);
+    final String tmuxSession = _tmuxSessionName(profile, instance);
+    final Set<int> pids = <int>{
+      ?_readPid(_runtimeServerPidFile(profile, instance)),
+      ?_readPid(_runtimeConsolePidFile(profile, instance)),
+    };
     var stopped = false;
     if (!Platform.isWindows && await _tmuxSessionExists(tmuxSession)) {
       final killResult = await _runProcess('tmux', <String>[
@@ -7897,7 +7902,7 @@ class NativeCommandService {
 
     if (Platform.isWindows) {
       final int? hostPid = _readPid(_runtimeHostPidFile(profile, instance));
-      if (hostPid != null) {
+      if (hostPid != null && await _pidRunning(hostPid)) {
         if (!await _runtimeWindowsHostOwned(profile, instance)) {
           throw _NativeCommandException(
             'Refusing to stop unverified Windows runtime host pid $hostPid. '
@@ -7938,35 +7943,7 @@ class NativeCommandService {
       return;
     }
 
-    final pids = <int>{};
-    final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
-    final consolePid = _readPid(_runtimeConsolePidFile(profile, instance));
-    if (serverPid != null) {
-      pids.add(serverPid);
-    }
-    if (consolePid != null) {
-      pids.add(consolePid);
-    }
-
     if (pids.isNotEmpty) {
-      for (final int pid in pids) {
-        Process.killPid(pid, ProcessSignal.sigterm);
-      }
-
-      for (var i = 0; i < 20; i++) {
-        var allStopped = true;
-        for (final int pid in pids) {
-          if (await _pidRunning(pid)) {
-            allStopped = false;
-            break;
-          }
-        }
-        if (allStopped) {
-          break;
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 150));
-      }
-
       for (final int pid in pids) {
         if (await _pidRunning(pid)) {
           Process.killPid(pid, ProcessSignal.sigkill);
@@ -7985,12 +7962,12 @@ class NativeCommandService {
     }
   }
 
-  Future<void> _runtimeGracefulStop(
+  Future<void> _runtimeStop(
     ConsumerProfile profile,
     String? inputInstance,
     _NativeIoBuffer io,
   ) async {
-    final instance = inputInstance?.trim().isNotEmpty == true
+    final String? instance = inputInstance?.trim().isNotEmpty == true
         ? inputInstance!.trim()
         : _currentInstance(profile);
 
@@ -7998,67 +7975,50 @@ class NativeCommandService {
       throw _NativeCommandException('No active instance set', 2);
     }
 
-    final tmuxSession = _tmuxSessionName(profile, instance);
-    if (Platform.isWindows) {
-      final bool requested = await _instanceSendRconCommand(
-        profile,
-        instance,
-        'stop',
-      );
-      if (!requested) {
-        io.write('[WARN] RCON is unavailable; forcing: $instance');
-        await _runtimeStop(profile, instance, io);
-        return;
-      }
-      final int? serverPid = _readPid(_runtimeServerPidFile(profile, instance));
-      final DateTime deadline = DateTime.now().add(const Duration(seconds: 60));
-      while (serverPid != null &&
-          DateTime.now().isBefore(deadline) &&
-          await _pidRunning(serverPid)) {
-        await Future<void>.delayed(const Duration(milliseconds: 500));
-      }
-      if (serverPid != null && await _pidRunning(serverPid)) {
-        io.write('[WARN] Graceful stop timed out; forcing: $instance');
-        await _runtimeStop(profile, instance, io);
-        return;
-      }
-      File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
-      io.write('[OK] Runtime stopped (graceful): $instance');
-      return;
-    }
-    if (!await _tmuxSessionExists(tmuxSession)) {
-      // No live console to talk to; defer to the hard path so pid files are
-      // cleaned up and the result is reported once.
-      await _runtimeStop(profile, instance, io);
-      return;
-    }
+    final String tmuxSession = _tmuxSessionName(profile, instance);
+    final Set<int> pids = <int>{
+      ?_readPid(_runtimeServerPidFile(profile, instance)),
+      ?_readPid(_runtimeConsolePidFile(profile, instance)),
+      if (Platform.isWindows) ?_readPid(_runtimeHostPidFile(profile, instance)),
+    };
+    final bool exited = await stopRuntime(
+      requestStop: () async {
+        if (Platform.isWindows) {
+          if (pids.isEmpty) return;
+          if (await _instanceSendRconCommand(profile, instance, 'stop')) return;
+          // A native host without RCON has no graceful control channel.
+          throw TimeoutException('RCON is unavailable');
+        }
+        if (await _tmuxSessionExists(tmuxSession)) {
+          final ProcessResult result = await _runProcess('tmux', <String>[
+            'send-keys',
+            '-t',
+            tmuxSession,
+            'stop',
+            'Enter',
+          ]);
+          if (result.exitCode == 0) return;
+        }
+        for (final int pid in pids) {
+          Process.killPid(pid, ProcessSignal.sigterm);
+        }
+      },
+      isStopped: () async {
+        for (final int pid in pids) {
+          if (await _pidRunning(pid)) return false;
+        }
+        return Platform.isWindows ||
+            !await _tmuxSessionHasLivePane(tmuxSession);
+      },
+      forceStop: () async {
+        io.write('[WARN] Graceful stop did not complete; forcing: $instance');
+        await _runtimeForceStop(profile, instance, io);
+      },
+    );
+    if (!exited) return;
 
-    // Ask the server to shut down cleanly (flushes and saves worlds).
-    await _runProcess('tmux', <String>[
-      'send-keys',
-      '-t',
-      tmuxSession,
-      'stop',
-      'Enter',
-    ]);
-
-    final serverPid = _readPid(_runtimeServerPidFile(profile, instance));
-    final deadline = DateTime.now().add(const Duration(seconds: 60));
-    var exited = false;
-    while (DateTime.now().isBefore(deadline)) {
-      final sessionAlive = await _tmuxSessionExists(tmuxSession);
-      final pidAlive = serverPid != null && await _pidRunning(serverPid);
-      if (!sessionAlive && !pidAlive) {
-        exited = true;
-        break;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-    }
-
-    if (!exited) {
-      io.write('[WARN] Graceful stop timed out; forcing: $instance');
-      await _runtimeStop(profile, instance, io);
-      return;
+    if (!Platform.isWindows && await _tmuxSessionExists(tmuxSession)) {
+      await _runProcess('tmux', <String>['kill-session', '-t', tmuxSession]);
     }
 
     File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();

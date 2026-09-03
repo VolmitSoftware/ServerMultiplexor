@@ -32,6 +32,77 @@ void main() {
       }
     });
 
+    for (final bool force in <bool>[false, true]) {
+      test(
+        force
+            ? 'runtime stop --force immediately kills an unresponsive process'
+            : 'runtime stop gives an unresponsive process five seconds',
+        () async {
+          final File program = File('${root.path}/unresponsive.dart')
+            ..writeAsStringSync('''
+import 'dart:async';
+import 'dart:io';
+
+void main() {
+  ProcessSignal.sigterm.watch().listen((ProcessSignal signal) {});
+  Timer.periodic(const Duration(seconds: 1), (Timer timer) {});
+  stdout.writeln('ready');
+}
+''');
+          final Process runtime = await Process.start(
+            Platform.resolvedExecutable,
+            <String>[program.path],
+          );
+          addTearDown(() async {
+            runtime.kill(ProcessSignal.sigkill);
+            await runtime.exitCode;
+          });
+          runtime.stderr.drain<void>().ignore();
+          expect(
+            await runtime.stdout
+                .transform(utf8.decoder)
+                .transform(const LineSplitter())
+                .first,
+            'ready',
+          );
+          final String instance = p.basename(root.path);
+          final File pidFile =
+              File(
+                  '${consumerService.rootFor(ConsumerProfile.plugin)}'
+                  '/state/runtime/$instance.server.pid',
+                )
+                ..createSync(recursive: true)
+                ..writeAsStringSync('${runtime.pid}\n');
+          final Stopwatch elapsed = Stopwatch()..start();
+
+          final CapturedResult result = await service.execute(<String>[
+            'runtime',
+            'stop',
+            instance,
+            if (force) '--force',
+          ], stream: false);
+
+          expect(result.exitCode, 0, reason: result.stderr);
+          expect(
+            await runtime.exitCode.timeout(const Duration(seconds: 2)),
+            isNot(0),
+          );
+          expect(pidFile.existsSync(), isFalse);
+          if (force) {
+            expect(elapsed.elapsed, lessThan(const Duration(seconds: 3)));
+          } else {
+            expect(
+              elapsed.elapsed,
+              greaterThanOrEqualTo(const Duration(seconds: 5)),
+            );
+            expect(elapsed.elapsed, lessThan(const Duration(seconds: 8)));
+            expect(result.stdout, contains('forcing: $instance'));
+          }
+        },
+        skip: Platform.isWindows,
+      );
+    }
+
     test('server create refuses modded types in plugin consumer', () async {
       final result = await service.execute(<String>[
         'server',

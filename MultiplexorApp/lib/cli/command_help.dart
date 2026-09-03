@@ -97,7 +97,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'console [instance] [--instance <name>]',
     'consoles',
     'consoles-lateral',
-    'stop [instance] [--graceful]',
+    'stop [instance] [--graceful|--force]',
     'restart [instance] [--no-console]',
     'status [instance]',
     'stats [instance]',

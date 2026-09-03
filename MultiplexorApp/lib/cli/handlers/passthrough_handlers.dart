@@ -341,6 +341,9 @@ Future<void> handleRuntimeStop(Map<String, dynamic> args) async {
   if (instance != null) {
     cmd.add(instance);
   }
+  if (_flag(args, 'force')) {
+    cmd.add('--force');
+  }
   await _runAndExit(cmd);
 }
 

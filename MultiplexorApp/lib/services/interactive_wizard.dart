@@ -4154,7 +4154,7 @@ class InteractiveWizard {
     if (row == null || row.state == RuntimeState.stopped) {
       return;
     }
-    Ui.doing('Stopping $name (graceful)');
+    Ui.doing('Stopping $name (force after 5 seconds)');
     await _shellRun(<String>['runtime', 'stop', name, '--graceful']);
   }
 
@@ -4164,7 +4164,7 @@ class InteractiveWizard {
       return;
     }
     Ui.doing('Killing $name');
-    await _shellRun(<String>['runtime', 'stop', name]);
+    await _shellRun(<String>['runtime', 'stop', name, '--force']);
   }
 
   Future<void> _quickConsoles() async {

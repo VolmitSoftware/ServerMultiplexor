@@ -1,3 +1,4 @@
+import '../runtime_stop.dart';
 import 'pterodactyl_client.dart';
 import 'pterodactyl_console_protocol.dart';
 import 'pterodactyl_console_session.dart';
@@ -1115,10 +1116,33 @@ final class PterodactylService {
   ) async {
     final _ClientHandle handle = await _clientFor(_requireProfile(id));
     try {
-      await handle.client.sendPowerSignal(identifier, signal);
+      await _sendPower(handle.client, identifier, signal);
     } finally {
       handle.client.close();
     }
+  }
+
+  Future<void> _sendPower(
+    PterodactylClient client,
+    String identifier,
+    PterodactylPowerSignal signal,
+  ) async {
+    if (signal != PterodactylPowerSignal.stop) {
+      await client.sendPowerSignal(identifier, signal);
+      return;
+    }
+    await stopRuntime(
+      requestStop: () => client.sendPowerSignal(identifier, signal),
+      isStopped: () async {
+        final PterodactylResourceUsage usage = await client.getServerResources(
+          identifier,
+        );
+        return usage.currentState.trim().toLowerCase() == 'offline';
+      },
+      forceStop: () =>
+          client.sendPowerSignal(identifier, PterodactylPowerSignal.kill),
+      pollInterval: const Duration(milliseconds: 500),
+    );
   }
 
   Future<PterodactylBulkResult> bulkPower({
@@ -1141,7 +1165,7 @@ final class PterodactylService {
         targets: targets,
         concurrency: concurrency,
         operation: (PterodactylClientServer server) =>
-            handle.client.sendPowerSignal(server.identifier, signal),
+            _sendPower(handle.client, server.identifier, signal),
       );
     } finally {
       handle.client.close();
