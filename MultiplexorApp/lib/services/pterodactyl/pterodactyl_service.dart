@@ -1456,7 +1456,7 @@ final class PterodactylService {
     int? cpuPercent,
     int? ownerId,
     bool startOnCompletion = false,
-    int concurrency = 1,
+    int concurrency = 4,
   }) async {
     _requireBulkConcurrency(concurrency);
     final List<String> requestedNames = _validateBulkCreateNames(names);
@@ -1593,7 +1593,7 @@ final class PterodactylService {
     required String profileId,
     required Iterable<String> names,
     required PterodactylEggCreatePlan plan,
-    int concurrency = 1,
+    int concurrency = 4,
   }) async => (await _createEggBatch(
     profileId: profileId,
     names: names,

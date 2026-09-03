@@ -13,6 +13,7 @@ class _NativeIoBuffer {
 
   final bool stream;
   final File? logFile;
+  bool inlineProgress = true;
   final StringBuffer _stdout = StringBuffer();
   final StringBuffer _stderr = StringBuffer();
 

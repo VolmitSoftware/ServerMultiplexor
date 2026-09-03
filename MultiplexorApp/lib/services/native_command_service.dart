@@ -31,10 +31,15 @@ part 'native_command_help.dart';
 part 'native_cli_output.dart';
 
 class NativeCommandService {
-  NativeCommandService({required this.context, required this.consumerService});
+  NativeCommandService({
+    required this.context,
+    required this.consumerService,
+    ProcessRunner processRunner = const ProcessRunner(),
+  }) : _processRunner = processRunner;
 
   final ManagerContext context;
   final ConsumerService consumerService;
+  final ProcessRunner _processRunner;
   ConsumerProfile? _consumerOverride;
 
   /// Persistent RCON connections, reused across dashboard refreshes so the
@@ -1433,6 +1438,7 @@ class NativeCommandService {
     List<String> args,
     _NativeIoBuffer io,
   ) async {
+    io.inlineProgress = false;
     final options = _parseOptions(args);
     final typesRaw = options['types'];
     if (typesRaw == null || typesRaw.trim().isEmpty) {
@@ -1441,7 +1447,7 @@ class NativeCommandService {
         2,
       );
     }
-    final types = typesRaw
+    final List<String> types = typesRaw
         .split(',')
         .map((s) => s.trim().toLowerCase())
         .where((s) => s.isNotEmpty)
@@ -1457,20 +1463,53 @@ class NativeCommandService {
 
     int succeeded = 0;
     int skipped = 0;
-    for (final type in types) {
+    final Set<String> plannedTypes = <String>{};
+    final Set<int> reservedPorts = <int>{};
+    final List<({String type, String name, ConsumerProfile profile, int port})>
+    targets =
+        <({String type, String name, ConsumerProfile profile, int port})>[];
+    for (final String type in types) {
       final String name = prefix.isEmpty ? type : '$prefix-$type';
       try {
-        final profile = _consumerForServerType(type);
+        final ConsumerProfile profile = _consumerForServerType(type);
+        if (!plannedTypes.add(type)) {
+          io.write('[SKIP] $name is already included in this batch');
+          skipped++;
+          continue;
+        }
         if (_instanceExists(profile, name)) {
           io.write('[SKIP] $name already exists in ${profile.shortName}');
           skipped++;
           continue;
         }
-        final mc = mcOverride != null && mcOverride.isNotEmpty
+        final int port = await _findAvailableServerPort(
+          profile,
+          name,
+          avoidPorts: reservedPorts,
+        );
+        reservedPorts.add(port);
+        targets.add((type: type, name: name, profile: profile, port: port));
+      } on _NativeCommandException catch (error) {
+        io.error('[WARN] $type failed: ${error.message}');
+        skipped++;
+      } catch (error) {
+        io.error('[WARN] $type failed: $error');
+        skipped++;
+      }
+    }
+
+    Future<void> createTarget(
+      ({String type, String name, ConsumerProfile profile, int port}) target,
+    ) async {
+      final String type = target.type;
+      final String name = target.name;
+      final ConsumerProfile profile = target.profile;
+      try {
+        final String mc = mcOverride != null && mcOverride.isNotEmpty
             ? mcOverride
             : await _resolveLatestMcVersion(type);
 
-        var jarPath = _findCachedJar(
+        String? jarPath = _findCachedJar(
           profile,
           type: type,
           mc: mc,
@@ -1491,6 +1530,7 @@ class NativeCommandService {
           type: type,
           jarPath: jarPath,
           isolated: isolated,
+          port: target.port,
           io: io,
         );
         _configureMohistDropins(
@@ -1514,6 +1554,18 @@ class NativeCommandService {
         skipped++;
       }
     }
+
+    int nextIndex = 0;
+    Future<void> worker() async {
+      while (nextIndex < targets.length) {
+        final int index = nextIndex++;
+        await createTarget(targets[index]);
+      }
+    }
+
+    await Future.wait<void>(<Future<void>>[
+      for (int index = 0; index < min(4, targets.length); index++) worker(),
+    ]);
     io.write('[OK] create-many done: $succeeded created, $skipped skipped');
     return succeeded > 0 ? 0 : 1;
   }
@@ -5445,7 +5497,10 @@ class NativeCommandService {
     final out = File(outputPath);
     out.parent.createSync(recursive: true);
     Object? lastError;
-    final showProgress = (io?.stream ?? false) && stdout.hasTerminal;
+    final bool showProgress =
+        (io?.stream ?? false) &&
+        (io?.inlineProgress ?? false) &&
+        stdout.hasTerminal;
     final label = p.basename(outputPath);
 
     void clearProgressLine() {
@@ -6591,6 +6646,7 @@ class NativeCommandService {
     required String jarPath,
     bool importJar = false,
     bool isolated = false,
+    int? port,
     _NativeIoBuffer? io,
   }) async {
     if (name.trim().isEmpty) {
@@ -6613,13 +6669,14 @@ class NativeCommandService {
     }
 
     _instanceCreateBlank(profile, name, isolated: isolated, io: io);
+    if (port != null) _instanceSetServerPort(profile, name, port);
 
     final normalizedType = type.toLowerCase().trim();
     final installerBased =
         (normalizedType == 'forge' || normalizedType == 'neoforge') &&
         (sourceLooksLikeInstaller || _looksLikeInstallerJar(resolvedJarPath));
     if (installerBased) {
-      _serverCreateFromInstaller(
+      await _serverCreateFromInstaller(
         profile,
         name,
         normalizedType,
@@ -6785,22 +6842,21 @@ class NativeCommandService {
     return false;
   }
 
-  void _serverCreateFromInstaller(
+  Future<void> _serverCreateFromInstaller(
     ConsumerProfile profile,
     String instance,
     String type,
     String installerJarPath, {
     bool isolated = false,
-  }) {
+  }) async {
     final instanceDir = _instanceDir(profile, instance);
     final localInstaller = p.join(instanceDir, 'installer.jar');
     _replaceWithSymlink(localInstaller, File(installerJarPath).absolute.path);
 
-    final result = Process.runSync(
+    final CapturedResult result = await _processRunner.runCaptured(
       'java',
       <String>['-jar', localInstaller, '--installServer', '.'],
       workingDirectory: instanceDir,
-      runInShell: true,
     );
     if (result.exitCode != 0) {
       throw _NativeCommandException(

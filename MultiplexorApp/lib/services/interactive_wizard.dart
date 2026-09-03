@@ -4410,6 +4410,7 @@ class InteractiveWizard {
         .split(',')
         .map((String t) => t.trim().toLowerCase())
         .where((String t) => _serverTypes.contains(t))
+        .toSet()
         .toList(growable: false);
     if (types.isEmpty) {
       Ui.error('No valid types selected.');
@@ -4430,39 +4431,73 @@ class InteractiveWizard {
     );
     final bool isolated = !subscribe;
 
-    // Auto-refresh instead of asking: stale cached builds are refreshed
-    // up front, missing ones are fetched by create-many itself, and fresh
-    // caches are reused as-is.
+    // Each type has a dedicated consumer context so parallel builds never
+    // change the dashboard's active consumer or write to another cache.
+    final Map<String, PassthroughService> typeServices =
+        <String, PassthroughService>{
+          for (final String type in types)
+            type: PassthroughService(passthrough.context, consumerService)
+              ..setConsumerOverride(switch (type) {
+                'forge' || 'mohist' => ConsumerProfile.forge,
+                'fabric' => ConsumerProfile.fabric,
+                'neoforge' => ConsumerProfile.neoforge,
+                _ => ConsumerProfile.plugin,
+              }),
+        };
     final String? versionFilter = mc.trim().isEmpty ? null : mc.trim();
     final Map<String, Duration?> ages = <String, Duration?>{};
     await Ui.spin('Checking cached builds', () async {
-      for (final String type in types) {
-        ages[type] = newestCachedAge(
-          await _cachedBuilds(type),
-          version: versionFilter,
-        );
-      }
+      await Future.wait<void>(
+        types.map((String type) async {
+          final CapturedResult result = await typeServices[type]!.capture(
+            <String>['build', 'cache-info', type],
+          );
+          ages[type] = newestCachedAge(
+            result.success
+                ? BuildCacheEntry.parseAll(result.stdout)
+                : const <BuildCacheEntry>[],
+            version: versionFilter,
+          );
+        }),
+      );
     });
     Ui.note(
       'Cached builds: ${types.map((String t) => '$t ${formatBuildAgeShort(ages[t])}').join(' · ')}',
     );
-    for (final String type in types) {
-      final Duration? age = ages[type];
-      if (age == null ||
-          !BuildCachePolicy.shouldRefresh(type: type, cachedAge: age)) {
-        continue;
+    final List<String> staleTypes = types
+        .where(
+          (String type) =>
+              ages[type] != null &&
+              BuildCachePolicy.shouldRefresh(type: type, cachedAge: ages[type]),
+        )
+        .toList(growable: false);
+    await Ui.shielded(() async {
+      int nextIndex = 0;
+      Future<void> worker() async {
+        while (nextIndex < staleTypes.length) {
+          final String type = staleTypes[nextIndex++];
+          Ui.doing(
+            'Refreshing ${_serverTypeLabel(type)} build (cached ${formatBuildAge(ages[type]!)})',
+          );
+          final CapturedResult refreshed = await typeServices[type]!.capture(
+            <String>[
+              'build',
+              type,
+              if (versionFilter != null) ...<String>['--mc', versionFilter],
+            ],
+          );
+          stdout.write(refreshed.stdout);
+          stderr.write(refreshed.stderr);
+        }
       }
-      Ui.doing(
-        'Refreshing ${_serverTypeLabel(type)} build (cached ${formatBuildAge(age)})',
-      );
-      await _shellRun(<String>[
-        'build',
-        type,
-        if (versionFilter != null) ...<String>['--mc', versionFilter],
-      ]);
-    }
 
-    Ui.doing('Creating ${types.length} server(s)');
+      await Future.wait<void>(<Future<void>>[
+        for (int index = 0; index < 4 && index < staleTypes.length; index++)
+          worker(),
+      ]);
+    });
+
+    Ui.doing('Creating ${types.length} server(s) in parallel');
     await _shellRun(<String>[
       'server',
       'create-many',

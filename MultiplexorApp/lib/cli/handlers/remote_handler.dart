@@ -1150,7 +1150,7 @@ Future<int> _createMany(_RemoteArguments parsed) async {
         );
   final String profileId = _profileId(parsed);
   final int concurrency =
-      _integerInRange(parsed, 'concurrency', minimum: 1, maximum: 8) ?? 1;
+      _integerInRange(parsed, 'concurrency', minimum: 1, maximum: 8) ?? 4;
   final PterodactylBulkResult result;
   if (template != null) {
     _rejectEggOnlyCreationOptions(parsed);

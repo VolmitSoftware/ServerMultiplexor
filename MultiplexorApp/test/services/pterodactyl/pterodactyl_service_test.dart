@@ -426,6 +426,42 @@ void main() {
     );
   });
 
+  test('template create-many runs four requests concurrently by default', () async {
+    final List<String> names = List<String>.generate(
+      6,
+      (int index) => 'Clone $index',
+    );
+    final _ServiceTransport transport = _ServiceTransport(
+      <_ServiceReply>[
+        _ServiceReply(200, _applicationServerListResponse(empty: true)),
+        _ServiceReply(200, _applicationServerListResponse(empty: false)),
+        _ServiceReply(200, _userListResponse()),
+        _ServiceReply(200, _nodeListResponse(diskMiB: 100000)),
+        _ServiceReply(200, _allocationListResponse(names.length)),
+        for (final String name in names)
+          _ServiceReply(201, _applicationServerResponse(name: name)),
+      ],
+      delayCreateResponses: true,
+    );
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      transport,
+    ]);
+    addTearDown(fixture.close);
+
+    final PterodactylBulkResult result = await fixture.service
+        .bulkCreateFromTemplate(
+          profileId: fixture.profile.id,
+          template: 'server01',
+          names: names,
+          ownerId: 5,
+          memoryMiB: 1,
+        );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.items.map((PterodactylBulkItemResult item) => item.name), names);
+    expect(transport.maximumCreateRequests, 4);
+  });
+
   test(
     'bulk create aborts before mutation when allocations are insufficient',
     () async {
@@ -950,6 +986,7 @@ void main() {
       final _ServiceTransport transport = _eggCreateTransport(
         allocationCount: 2,
         createdNames: const <String>['Bootstrap One', 'Bootstrap Two'],
+        delayCreateResponses: true,
       );
       final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
         transport,
@@ -965,10 +1002,10 @@ void main() {
                 'REQUIRED_TOKEN': 'operator-value',
               },
             ),
-            concurrency: 2,
           );
 
       expect(result.isSuccess, isTrue);
+      expect(transport.maximumCreateRequests, 2);
       final List<Map<String, Object?>> payloads = transport.requests
           .where(
             (PterodactylTransportRequest request) =>
@@ -1861,6 +1898,7 @@ _ServiceTransport _eggCreateTransport({
   String requiredDefault = 'default-token',
   int allocationCount = 2,
   List<String> createdNames = const <String>[],
+  bool delayCreateResponses = false,
 }) => _ServiceTransport(<_ServiceReply>[
   _ServiceReply(200, _applicationServerListResponse(empty: true)),
   _ServiceReply(200, _userListResponse(ownerId: ownerId)),
@@ -1885,7 +1923,7 @@ _ServiceTransport _eggCreateTransport({
   _ServiceReply(200, _allocationListResponse(allocationCount)),
   for (final String name in createdNames)
     _ServiceReply(201, _applicationServerResponse(name: name)),
-]);
+], delayCreateResponses: delayCreateResponses);
 
 String _accountResponse(String username) => jsonEncode(<String, Object?>{
   'object': 'user',
@@ -2123,9 +2161,12 @@ final class _ServiceReply {
 }
 
 final class _ServiceTransport implements PterodactylTransport {
-  _ServiceTransport(this._replies);
+  _ServiceTransport(this._replies, {this.delayCreateResponses = false});
 
   final List<_ServiceReply> _replies;
+  final bool delayCreateResponses;
+  int _activeCreateRequests = 0;
+  int maximumCreateRequests = 0;
   final List<PterodactylTransportRequest> requests =
       <PterodactylTransportRequest>[];
 
@@ -2135,6 +2176,16 @@ final class _ServiceTransport implements PterodactylTransport {
   ) async {
     requests.add(request);
     final _ServiceReply reply = _replies.removeAt(0);
+    if (delayCreateResponses &&
+        request.method == 'POST' &&
+        request.uri.path == '/api/application/servers') {
+      _activeCreateRequests++;
+      if (_activeCreateRequests > maximumCreateRequests) {
+        maximumCreateRequests = _activeCreateRequests;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      _activeCreateRequests--;
+    }
     return PterodactylTransportResponse(
       statusCode: reply.statusCode,
       body: reply.body,
