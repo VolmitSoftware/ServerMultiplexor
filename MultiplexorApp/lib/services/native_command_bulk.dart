@@ -1,7 +1,7 @@
 part of 'native_command_service.dart';
 
 const String _instanceBulkUsage =
-    'Usage: instance bulk <start|stop|restart|delete> <name>... [--confirm <token>]';
+    'Usage: instance bulk <start|stop|restart|delete> <name>... [--concurrency <1-8>] [--confirm <token>]';
 
 extension _NativeBulkCommands on NativeCommandService {
   Future<int> _dispatchInstanceBulk(
@@ -19,6 +19,7 @@ extension _NativeBulkCommands on NativeCommandService {
     }
     final Set<String> selected = <String>{};
     String? confirmation;
+    int? requestedConcurrency;
     for (int index = 1; index < args.length; index++) {
       final String argument = args[index];
       if (argument == '--confirm') {
@@ -26,6 +27,19 @@ extension _NativeBulkCommands on NativeCommandService {
           throw _NativeCommandException(_instanceBulkUsage, 2);
         }
         confirmation = args[++index];
+      } else if (argument == '--concurrency') {
+        if (requestedConcurrency != null || index + 1 >= args.length) {
+          throw _NativeCommandException(_instanceBulkUsage, 2);
+        }
+        requestedConcurrency = int.tryParse(args[++index]);
+        if (requestedConcurrency == null ||
+            requestedConcurrency < 1 ||
+            requestedConcurrency > 8) {
+          throw _NativeCommandException(
+            'Concurrency must be between 1 and 8.',
+            2,
+          );
+        }
       } else {
         if (argument.startsWith('-') || argument.trim() != argument) {
           throw _NativeCommandException(_instanceBulkUsage, 2);
@@ -38,6 +52,8 @@ extension _NativeBulkCommands on NativeCommandService {
       throw _NativeCommandException(_instanceBulkUsage, 2);
     }
     final List<String> names = selected.toList(growable: false);
+    final int concurrency = requestedConcurrency ?? 4;
+    io.inlineProgress = false;
     // Validate every explicit target before touching runtime or instance state.
     for (final String name in names) {
       if (!_instanceExists(profile, name)) {
@@ -57,24 +73,26 @@ extension _NativeBulkCommands on NativeCommandService {
       }
     }
 
-    final List<_InstanceBulkTarget> plan = <_InstanceBulkTarget>[];
-    for (final String name in names) {
-      try {
-        plan.add(
-          _InstanceBulkTarget(
-            name,
-            skipReason: await _instanceBulkCurrentSkip(profile, name, action),
-          ),
-        );
-      } catch (error) {
-        plan.add(_InstanceBulkTarget(name, error: error));
-      }
-    }
+    final List<_InstanceBulkTarget> plan =
+        await boundedMap<String, _InstanceBulkTarget>(names, (
+          String name,
+        ) async {
+          try {
+            return _InstanceBulkTarget(
+              name,
+              skipReason: await _instanceBulkCurrentSkip(profile, name, action),
+            );
+          } catch (error) {
+            return _InstanceBulkTarget(name, error: error);
+          }
+        }, concurrency: concurrency);
 
     int succeeded = 0;
     int skipped = 0;
     int failed = 0;
-    for (final _InstanceBulkTarget target in plan) {
+    await boundedMap<_InstanceBulkTarget, void>(plan, (
+      _InstanceBulkTarget target,
+    ) async {
       try {
         if (target.error != null) throw target.error!;
         final String? reason =
@@ -83,7 +101,7 @@ extension _NativeBulkCommands on NativeCommandService {
         if (reason != null) {
           skipped++;
           io.write('[SKIP] ${target.name}: $reason');
-          continue;
+          return;
         }
         switch (action) {
           case InstanceBulkAction.start:
@@ -105,7 +123,7 @@ extension _NativeBulkCommands on NativeCommandService {
             : error.toString();
         io.error('[ERROR] ${target.name}: ${action.name} failed: $message');
       }
-    }
+    }, concurrency: concurrency);
     io.write(
       '[INFO] Bulk ${action.name}: $succeeded succeeded, $skipped skipped, $failed failed',
     );

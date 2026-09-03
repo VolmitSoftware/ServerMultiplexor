@@ -1,3 +1,4 @@
+import '../../utils/async_work_pool.dart';
 import '../runtime_stop.dart';
 import 'pterodactyl_client.dart';
 import 'pterodactyl_console_protocol.dart';
@@ -1046,40 +1047,32 @@ final class PterodactylService {
         handle.client,
         profile,
       );
-      final List<PterodactylFleetSample> result = <PterodactylFleetSample>[];
-      const int concurrency = 4;
-      for (int offset = 0; offset < servers.length; offset += concurrency) {
-        final int end = offset + concurrency < servers.length
-            ? offset + concurrency
-            : servers.length;
-        result.addAll(
-          await Future.wait<PterodactylFleetSample>(
-            servers.sublist(offset, end).map((
-              PterodactylClientServer server,
-            ) async {
-              try {
-                final PterodactylResourceUsage resources = await handle.client
-                    .getServerResources(server.identifier);
-                return PterodactylFleetSample(
-                  server: server,
-                  resources: resources,
-                );
-              } on PterodactylApiException catch (error) {
-                // A revoked key or a panel-wide throttle is not a per-server
-                // telemetry gap. Let the feed retain its last good snapshot
-                // and surface the connection error instead of erasing every
-                // metric one row at a time.
-                if (error.statusCode == 401 || error.isRateLimited) {
-                  rethrow;
-                }
-                return PterodactylFleetSample(server: server);
-              } on PterodactylException {
-                return PterodactylFleetSample(server: server);
-              }
-            }),
-          ),
-        );
-      }
+      PterodactylApiException? fatalError;
+      final List<PterodactylFleetSample> result = await boundedMap(servers, (
+        PterodactylClientServer server,
+      ) async {
+        // Stop admitting HTTP work on a panel-wide failure while the pool
+        // drains requests already in flight before this client's cleanup.
+        final PterodactylApiException? blocked = fatalError;
+        if (blocked != null) throw blocked;
+        try {
+          final PterodactylResourceUsage resources = await handle.client
+              .getServerResources(server.identifier);
+          return PterodactylFleetSample(server: server, resources: resources);
+        } on PterodactylApiException catch (error) {
+          // A revoked key or a panel-wide throttle is not a per-server
+          // telemetry gap. Let the feed retain its last good snapshot
+          // and surface the connection error instead of erasing every
+          // metric one row at a time.
+          if (error.statusCode == 401 || error.isRateLimited) {
+            fatalError ??= error;
+            rethrow;
+          }
+          return PterodactylFleetSample(server: server);
+        } on PterodactylException {
+          return PterodactylFleetSample(server: server);
+        }
+      });
       return List<PterodactylFleetSample>.unmodifiable(result);
     } finally {
       handle.client.close();
@@ -1187,11 +1180,11 @@ final class PterodactylService {
         profile,
         selectors: serverIdentifiers,
       );
-      final List<PterodactylClientServerAccess> access = await _boundedMap(
+      final List<PterodactylClientServerAccess> access = await boundedMap(
         targets,
-        concurrency,
         (PterodactylClientServer server) =>
             handle.client.getClientServerAccess(server.identifier),
+        concurrency: concurrency,
       );
       for (int index = 0; index < targets.length; index++) {
         if (access[index].server.identifier != targets[index].identifier) {
@@ -1523,43 +1516,41 @@ final class PterodactylService {
         },
         growable: false,
       );
-      final List<PterodactylBulkItemResult> items = await _boundedMap(
-        targets,
-        concurrency,
-        (_BulkCreateTarget target) async {
-          try {
-            final PterodactylApplicationServer created = await applicationHandle
-                .client
-                .createApplicationServer(
-                  _templateCreateRequest(
-                    template: applicationTemplate,
-                    ownerId: selectedOwnerId,
-                    name: target.name,
-                    defaultAllocationId: target.defaultAllocationId,
-                    additionalAllocationId: target.additionalAllocationId,
-                    memoryMiB: memoryMiB,
-                    diskMiB: diskMiB,
-                    cpuPercent: cpuPercent,
-                    startOnCompletion: startOnCompletion,
-                  ),
-                );
-            return PterodactylBulkItemResult(
-              target: target.name,
-              name: created.name,
-              identifier: created.identifier,
-              succeeded: true,
-            );
-          } on Object catch (error) {
-            return PterodactylBulkItemResult(
-              target: target.name,
-              name: target.name,
-              identifier: null,
-              succeeded: false,
-              error: _bulkErrorText(error),
-            );
-          }
-        },
-      );
+      final List<PterodactylBulkItemResult> items = await boundedMap(targets, (
+        _BulkCreateTarget target,
+      ) async {
+        try {
+          final PterodactylApplicationServer created = await applicationHandle
+              .client
+              .createApplicationServer(
+                _templateCreateRequest(
+                  template: applicationTemplate,
+                  ownerId: selectedOwnerId,
+                  name: target.name,
+                  defaultAllocationId: target.defaultAllocationId,
+                  additionalAllocationId: target.additionalAllocationId,
+                  memoryMiB: memoryMiB,
+                  diskMiB: diskMiB,
+                  cpuPercent: cpuPercent,
+                  startOnCompletion: startOnCompletion,
+                ),
+              );
+          return PterodactylBulkItemResult(
+            target: target.name,
+            name: created.name,
+            identifier: created.identifier,
+            succeeded: true,
+          );
+        } on Object catch (error) {
+          return PterodactylBulkItemResult(
+            target: target.name,
+            name: target.name,
+            identifier: null,
+            succeeded: false,
+            error: _bulkErrorText(error),
+          );
+        }
+      }, concurrency: concurrency);
       return PterodactylBulkResult(
         action: PterodactylBulkAction.create,
         items: items,
@@ -1739,43 +1730,41 @@ final class PterodactylService {
         ),
         growable: false,
       );
-      final List<_EggCreateOutcome> outcomes = await _boundedMap(
-        targets,
-        concurrency,
-        (_BulkCreateTarget target) async {
-          try {
-            final PterodactylApplicationServer created = await applicationHandle
-                .client
-                .createApplicationServer(
-                  _eggCreateRequest(
-                    name: target.name,
-                    plan: plan,
-                    environment: environment,
-                    allocationId: target.defaultAllocationId,
-                  ),
-                );
-            return _EggCreateOutcome(
-              server: created,
-              item: PterodactylBulkItemResult(
-                target: target.name,
-                name: created.name,
-                identifier: created.identifier,
-                succeeded: true,
-              ),
-            );
-          } on Object catch (error) {
-            return _EggCreateOutcome(
-              item: PterodactylBulkItemResult(
-                target: target.name,
-                name: target.name,
-                identifier: null,
-                succeeded: false,
-                error: _bulkErrorText(error),
-              ),
-            );
-          }
-        },
-      );
+      final List<_EggCreateOutcome> outcomes = await boundedMap(targets, (
+        _BulkCreateTarget target,
+      ) async {
+        try {
+          final PterodactylApplicationServer created = await applicationHandle
+              .client
+              .createApplicationServer(
+                _eggCreateRequest(
+                  name: target.name,
+                  plan: plan,
+                  environment: environment,
+                  allocationId: target.defaultAllocationId,
+                ),
+              );
+          return _EggCreateOutcome(
+            server: created,
+            item: PterodactylBulkItemResult(
+              target: target.name,
+              name: created.name,
+              identifier: created.identifier,
+              succeeded: true,
+            ),
+          );
+        } on Object catch (error) {
+          return _EggCreateOutcome(
+            item: PterodactylBulkItemResult(
+              target: target.name,
+              name: target.name,
+              identifier: null,
+              succeeded: false,
+              error: _bulkErrorText(error),
+            ),
+          );
+        }
+      }, concurrency: concurrency);
       return _EggCreateBatch(
         outcomes: List<_EggCreateOutcome>.unmodifiable(outcomes),
         result: PterodactylBulkResult(
@@ -1978,9 +1967,8 @@ final class PterodactylService {
     if (state == null) {
       filtered = selected;
     } else {
-      final List<PterodactylResourceUsage> resources = await _boundedMap(
+      final List<PterodactylResourceUsage> resources = await boundedMap(
         selected,
-        4,
         (PterodactylClientServer server) =>
             client.getServerResources(server.identifier),
       );
@@ -2012,55 +2000,28 @@ final class PterodactylService {
     required int concurrency,
     required Future<void> Function(PterodactylClientServer server) operation,
   }) async {
-    final List<PterodactylBulkItemResult> items = await _boundedMap(
-      targets,
-      concurrency,
-      (PterodactylClientServer server) async {
-        try {
-          await operation(server);
-          return PterodactylBulkItemResult(
-            target: server.identifier,
-            name: server.name,
-            identifier: server.identifier,
-            succeeded: true,
-          );
-        } on Object catch (error) {
-          return PterodactylBulkItemResult(
-            target: server.identifier,
-            name: server.name,
-            identifier: server.identifier,
-            succeeded: false,
-            error: _bulkErrorText(error),
-          );
-        }
-      },
-    );
-    return PterodactylBulkResult(action: action, items: items);
-  }
-
-  static Future<List<R>> _boundedMap<T, R>(
-    List<T> items,
-    int concurrency,
-    Future<R> Function(T item) operation,
-  ) async {
-    final List<R?> results = List<R?>.filled(items.length, null);
-    int nextIndex = 0;
-    Future<void> worker() async {
-      while (true) {
-        final int index = nextIndex;
-        if (index >= items.length) return;
-        nextIndex += 1;
-        results[index] = await operation(items[index]);
+    final List<PterodactylBulkItemResult> items = await boundedMap(targets, (
+      PterodactylClientServer server,
+    ) async {
+      try {
+        await operation(server);
+        return PterodactylBulkItemResult(
+          target: server.identifier,
+          name: server.name,
+          identifier: server.identifier,
+          succeeded: true,
+        );
+      } on Object catch (error) {
+        return PterodactylBulkItemResult(
+          target: server.identifier,
+          name: server.name,
+          identifier: server.identifier,
+          succeeded: false,
+          error: _bulkErrorText(error),
+        );
       }
-    }
-
-    final int workerCount = concurrency < items.length
-        ? concurrency
-        : items.length;
-    await Future.wait<void>(
-      List<Future<void>>.generate(workerCount, (_) => worker()),
-    );
-    return results.cast<R>();
+    }, concurrency: concurrency);
+    return PterodactylBulkResult(action: action, items: items);
   }
 
   static void _requireBulkConcurrency(int concurrency) {

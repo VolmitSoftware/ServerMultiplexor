@@ -253,7 +253,7 @@ final class AddonResolver {
         await sink.close();
       }
     } else {
-      File(resolved.location).copySync(target.path);
+      await File(resolved.location).copy(target.path);
     }
     final RandomAccessFile input = target.openSync();
     final List<int> magic;

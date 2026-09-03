@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
+import '../utils/async_work_pool.dart';
 import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
 import '../utils/terminal/theme.dart';
@@ -1093,21 +1094,9 @@ class InteractiveWizard {
       case WorkspaceModalAction.createMany:
         await _createMany();
       case WorkspaceModalAction.startAll:
-        final List<_InstanceRow> rows = await Ui.shielded(_loadInstanceRows);
-        if (!rows.any((_InstanceRow r) => r.state == RuntimeState.stopped)) {
-          Ui.note('No stopped servers.');
-          await Ui.pause();
-          return;
-        }
-        await _startAllStopped(rows);
+        await _runRuntimeBatch(InstanceBulkAction.start);
       case WorkspaceModalAction.stopAll:
-        final List<_InstanceRow> rows = await Ui.shielded(_loadInstanceRows);
-        if (!rows.any((_InstanceRow r) => r.state != RuntimeState.stopped)) {
-          Ui.note('No running servers.');
-          await Ui.pause();
-          return;
-        }
-        await _stopAllRunning(rows);
+        await _runRuntimeBatch(InstanceBulkAction.stop);
       case WorkspaceModalAction.wipe:
         await _wipeEverything();
       case WorkspaceModalAction.newInstance:
@@ -2833,8 +2822,7 @@ class InteractiveWizard {
       'Loading remote fleet',
       () => pterodactyl.captureFleet(profile.id),
     );
-    int succeeded = 0;
-    int eligible = 0;
+    final List<String> eligible = <String>[];
     for (final PterodactylFleetSample sample in fleet) {
       final PterodactylClientServer server = sample.server;
       final PterodactylResourceUsage? resources = sample.resources;
@@ -2852,15 +2840,31 @@ class InteractiveWizard {
           resources?.currentState.toLowerCase() != 'offline',
       };
       if (blocked || !wantedState) continue;
-      eligible += 1;
-      try {
-        await pterodactyl.power(profile.id, server.identifier, signal);
-        succeeded += 1;
-      } catch (error) {
-        Ui.warn('${_safeRemoteText(server.name)}: $error');
+      eligible.add(server.identifier);
+    }
+    if (eligible.isEmpty) {
+      Ui.note('No remote servers can ${signal.name} in their current state.');
+      await Ui.pause();
+      return;
+    }
+    final PterodactylBulkResult result = await Ui.spin(
+      '${signal.name}: ${eligible.length} remote servers in parallel',
+      () => pterodactyl.bulkPower(
+        profileId: profile.id,
+        serverIdentifiers: eligible,
+        signal: signal,
+      ),
+    );
+    for (final PterodactylBulkItemResult item in result.items) {
+      if (!item.succeeded) {
+        Ui.warn(
+          '${_safeRemoteText(item.name)}: ${_safeRemoteText(item.error ?? 'unknown failure')}',
+        );
       }
     }
-    Ui.success('${signal.name} sent to $succeeded/$eligible eligible servers');
+    Ui.success(
+      '${signal.name} sent to ${result.succeededCount}/${eligible.length} eligible servers',
+    );
     await Ui.pause();
   }
 
@@ -2907,7 +2911,8 @@ class InteractiveWizard {
     List<String>? checkedIdentifiers,
     PterodactylProfile? checkedProfile,
   }) async {
-    final PterodactylProfile profile = checkedProfile ?? _requireRemoteProfile();
+    final PterodactylProfile profile =
+        checkedProfile ?? _requireRemoteProfile();
     final List<PterodactylFleetSample> fleet = await Ui.spin(
       'Refreshing remote fleet',
       () => pterodactyl.captureFleet(profile.id),
@@ -4258,56 +4263,83 @@ class InteractiveWizard {
     }
   }
 
-  Future<void> _startAllStopped(List<_InstanceRow> rows) async {
-    final List<String> stopped = rows
-        .where((_InstanceRow r) => r.state == RuntimeState.stopped)
-        .map((_InstanceRow r) => r.name)
-        .toList(growable: false);
-    if (stopped.isEmpty) {
-      return;
-    }
-
-    await _syncDropinsAllTargets();
-    var started = 0;
-    var failed = 0;
-    final List<String> startedNames = <String>[];
-    for (final String name in stopped) {
-      Ui.doing('Starting $name');
-      final int code = await _shellRun(<String>[
-        'runtime',
-        'start',
-        name,
-        '--no-console',
-      ]);
-      if (code == 0) {
-        started++;
-        startedNames.add(name);
-      } else {
-        failed++;
+  Future<void> _runRuntimeBatch(InstanceBulkAction action) async {
+    final ConsumerProfile profile = _activeConsumer();
+    final PassthroughService scoped = _commandsForConsumer(profile);
+    try {
+      final List<_InstanceRow> rows = await Ui.shielded(
+        () => _loadInstanceRows(source: scoped),
+      );
+      final List<String> targets = rows
+          .where(
+            (_InstanceRow row) => action == InstanceBulkAction.start
+                ? row.state == RuntimeState.stopped
+                : row.state != RuntimeState.stopped,
+          )
+          .map((_InstanceRow row) => row.name)
+          .toList(growable: false);
+      if (targets.isEmpty) {
+        Ui.note(
+          action == InstanceBulkAction.start
+              ? 'No stopped servers.'
+              : 'No running servers.',
+        );
+        await Ui.pause();
+        return;
       }
-    }
+      Ui.doing('${action.name}: ${targets.length} servers in parallel');
+      final int code = await Ui.shielded(
+        () => scoped.run(<String>['instance', 'bulk', action.name, ...targets]),
+      );
+      if (code != 0) await Ui.pause();
+      if (action != InstanceBulkAction.start) return;
 
-    if (failed > 0) {
-      Ui.warn('Started $started instance(s), failed $failed.');
-      await Ui.pause();
-    }
-    if (started == 1) {
-      await _shellRun(<String>['runtime', 'console', startedNames.first]);
-    } else if (started > 1) {
-      await _shellRun(<String>['runtime', 'consoles']);
+      // The bulk engine settles every target before console attachment.
+      // Read actual state because a successful launch can exit immediately.
+      final Set<String> requested = targets.toSet();
+      final List<String> running =
+          (await Ui.shielded(() => _loadInstanceRows(source: scoped)))
+              .where(
+                (_InstanceRow row) =>
+                    requested.contains(row.name) &&
+                    row.state != RuntimeState.stopped,
+              )
+              .map((_InstanceRow row) => row.name)
+              .toList(growable: false);
+      if (running.isEmpty) return;
+      await Ui.shielded(
+        () => scoped.run(<String>[
+          'runtime',
+          if (running.length == 1) ...<String>['console', running.single] else
+            'consoles',
+        ]),
+      );
+    } finally {
+      scoped.disposeRcon();
     }
   }
 
-  Future<void> _stopAllRunning(List<_InstanceRow> rows) async {
-    final List<String> running = rows
-        .where((_InstanceRow r) => r.state != RuntimeState.stopped)
-        .map((_InstanceRow r) => r.name)
-        .toList(growable: false);
-    for (final String name in running) {
-      Ui.doing('Stopping $name');
-      await _shellRun(<String>['runtime', 'stop', name]);
-    }
-  }
+  PassthroughService _commandsForConsumer(ConsumerProfile profile) =>
+      PassthroughService(passthrough.context, consumerService)
+        ..setConsumerOverride(profile);
+
+  Future<List<CapturedResult>> _pullBuildsInParallel(
+    List<String> types,
+    Map<String, PassthroughService> services, {
+    String? version,
+  }) => Ui.shielded(
+    () => boundedMap<String, CapturedResult>(types, (String type) async {
+      Ui.doing('Pulling latest ${_serverTypeLabel(type)} build');
+      final CapturedResult result = await services[type]!.capture(<String>[
+        'build',
+        type,
+        if (version != null) ...<String>['--mc', version],
+      ]);
+      stdout.write(result.stdout);
+      stderr.write(result.stderr);
+      return result;
+    }),
+  );
 
   // ─── Create flow ─────────────────────────────────────────────────────
 
@@ -4502,19 +4534,18 @@ class InteractiveWizard {
     final Map<String, PassthroughService> typeServices =
         <String, PassthroughService>{
           for (final String type in types)
-            type: PassthroughService(passthrough.context, consumerService)
-              ..setConsumerOverride(switch (type) {
-                'forge' || 'mohist' => ConsumerProfile.forge,
-                'fabric' => ConsumerProfile.fabric,
-                'neoforge' => ConsumerProfile.neoforge,
-                _ => ConsumerProfile.plugin,
-              }),
+            type: _commandsForConsumer(switch (type) {
+              'forge' || 'mohist' => ConsumerProfile.forge,
+              'fabric' => ConsumerProfile.fabric,
+              'neoforge' => ConsumerProfile.neoforge,
+              _ => ConsumerProfile.plugin,
+            }),
         };
-    final String? versionFilter = mc.trim().isEmpty ? null : mc.trim();
-    final Map<String, Duration?> ages = <String, Duration?>{};
-    await Ui.spin('Checking cached builds', () async {
-      await Future.wait<void>(
-        types.map((String type) async {
+    try {
+      final String? versionFilter = mc.trim().isEmpty ? null : mc.trim();
+      final Map<String, Duration?> ages = <String, Duration?>{};
+      await Ui.spin('Checking cached builds', () async {
+        await boundedMap<String, void>(types, (String type) async {
           final CapturedResult result = await typeServices[type]!.capture(
             <String>['build', 'cache-info', type],
           );
@@ -4524,59 +4555,46 @@ class InteractiveWizard {
                 : const <BuildCacheEntry>[],
             version: versionFilter,
           );
-        }),
+        });
+      });
+      Ui.note(
+        'Cached builds: ${types.map((String t) => '$t ${formatBuildAgeShort(ages[t])}').join(' · ')}',
       );
-    });
-    Ui.note(
-      'Cached builds: ${types.map((String t) => '$t ${formatBuildAgeShort(ages[t])}').join(' · ')}',
-    );
-    final List<String> staleTypes = types
-        .where(
-          (String type) =>
-              ages[type] != null &&
-              BuildCachePolicy.shouldRefresh(type: type, cachedAge: ages[type]),
-        )
-        .toList(growable: false);
-    await Ui.shielded(() async {
-      int nextIndex = 0;
-      Future<void> worker() async {
-        while (nextIndex < staleTypes.length) {
-          final String type = staleTypes[nextIndex++];
-          Ui.doing(
-            'Refreshing ${_serverTypeLabel(type)} build (cached ${formatBuildAge(ages[type]!)})',
-          );
-          final CapturedResult refreshed = await typeServices[type]!.capture(
-            <String>[
-              'build',
-              type,
-              if (versionFilter != null) ...<String>['--mc', versionFilter],
-            ],
-          );
-          stdout.write(refreshed.stdout);
-          stderr.write(refreshed.stderr);
-        }
-      }
+      final List<String> staleTypes = types
+          .where(
+            (String type) =>
+                ages[type] != null &&
+                BuildCachePolicy.shouldRefresh(
+                  type: type,
+                  cachedAge: ages[type],
+                ),
+          )
+          .toList(growable: false);
+      await _pullBuildsInParallel(
+        staleTypes,
+        typeServices,
+        version: versionFilter,
+      );
 
-      await Future.wait<void>(<Future<void>>[
-        for (int index = 0; index < 4 && index < staleTypes.length; index++)
-          worker(),
+      Ui.doing('Creating ${types.length} server(s) in parallel');
+      await _shellRun(<String>[
+        'server',
+        'create-many',
+        '--types',
+        types.join(','),
+        if (prefix.trim().isNotEmpty) ...<String>['--prefix', prefix.trim()],
+        if (mc.trim().isNotEmpty) ...<String>['--mc', mc.trim()],
+        if (isolated) '--isolated',
       ]);
-    });
-
-    Ui.doing('Creating ${types.length} server(s) in parallel');
-    await _shellRun(<String>[
-      'server',
-      'create-many',
-      '--types',
-      types.join(','),
-      if (prefix.trim().isNotEmpty) ...<String>['--prefix', prefix.trim()],
-      if (mc.trim().isNotEmpty) ...<String>['--mc', mc.trim()],
-      if (isolated) '--isolated',
-    ]);
-    if (!isolated) {
-      await _syncDropinsAllTargets();
+      if (!isolated) {
+        await _syncDropinsAllTargets();
+      }
+      await Ui.pause();
+    } finally {
+      for (final PassthroughService service in typeServices.values) {
+        service.disposeRcon();
+      }
     }
-    await Ui.pause();
   }
 
   /// Force re-downloads the newest build of every platform the active
@@ -4584,22 +4602,31 @@ class InteractiveWizard {
   /// upstream Jenkins build is newer than the cached jar, so the bulk pull
   /// stays fast on the common path.
   Future<void> _refreshAllBuilds() async {
+    final ConsumerProfile profile = _activeConsumer();
     final List<String> types = _serverTypesForActiveConsumer();
     if (types.any(BuildCachePolicy.expensiveRebuild.contains)) {
       Ui.note(
         'spigot compiles with BuildTools when upstream moved — that step takes minutes.',
       );
     }
-    int pulled = 0;
-    final List<String> failed = <String>[];
-    for (final String type in types) {
-      Ui.doing('Pulling latest ${_serverTypeLabel(type)} build');
-      final int code = await _shellRun(<String>['build', type]);
-      if (code == 0) {
-        pulled++;
-      } else {
-        failed.add(_serverTypeLabel(type));
+    final Map<String, PassthroughService> services =
+        <String, PassthroughService>{
+          for (final String type in types) type: _commandsForConsumer(profile),
+        };
+    late final List<CapturedResult> results;
+    try {
+      results = await _pullBuildsInParallel(types, services);
+    } finally {
+      for (final PassthroughService service in services.values) {
+        service.disposeRcon();
       }
+    }
+    final int pulled = results
+        .where((CapturedResult result) => result.success)
+        .length;
+    final List<String> failed = <String>[];
+    for (int index = 0; index < types.length; index++) {
+      if (!results[index].success) failed.add(_serverTypeLabel(types[index]));
     }
     if (failed.isNotEmpty) {
       Ui.warn(
@@ -4836,10 +4863,22 @@ class InteractiveWizard {
       final String dropinLabel = plugins ? 'plugins' : 'mods';
       late final _RuntimeSettings settings;
       late final List<BuildCacheEntry> cache;
-      await Ui.spin('Loading build & tuning state', () async {
-        settings = await _runtimeSettings();
-        cache = await _cachedBuilds('all');
-      });
+      final PassthroughService scoped = _commandsForConsumer(_activeConsumer());
+      try {
+        await Ui.spin(
+          'Loading build & tuning state',
+          () => Future.wait<void>(<Future<void>>[
+            () async {
+              settings = await _runtimeSettings(source: scoped);
+            }(),
+            () async {
+              cache = await _cachedBuilds('all', source: scoped);
+            }(),
+          ]),
+        );
+      } finally {
+        scoped.disposeRcon();
+      }
       final String heap = settings.heap ?? '4G';
       final String profile = settings.profile ?? 'aikar';
       final String wrap = settings.consoleWrap ?? 'off';
@@ -5048,11 +5087,25 @@ class InteractiveWizard {
     late final List<String> supported;
     late final String latest;
     late final List<BuildCacheEntry> cache;
-    await Ui.spin('Fetching $label versions', () async {
-      supported = await _resolveSupportedVersions(type);
-      latest = await _resolveLatestVersion(type);
-      cache = await _cachedBuilds(type);
-    });
+    final PassthroughService scoped = _commandsForConsumer(_activeConsumer());
+    try {
+      await Ui.spin(
+        'Fetching $label versions',
+        () => Future.wait<void>(<Future<void>>[
+          () async {
+            supported = await _resolveSupportedVersions(type, source: scoped);
+          }(),
+          () async {
+            latest = await _resolveLatestVersion(type, source: scoped);
+          }(),
+          () async {
+            cache = await _cachedBuilds(type, source: scoped);
+          }(),
+        ]),
+      );
+    } finally {
+      scoped.disposeRcon();
+    }
 
     Future<_BuildVersionChoice> manualEntry() async {
       final String manual = await Ui.input(
@@ -5166,12 +5219,13 @@ class InteractiveWizard {
     return false;
   }
 
-  Future<List<BuildCacheEntry>> _cachedBuilds(String type) async {
-    final CapturedResult result = await passthrough.capture(<String>[
-      'build',
-      'cache-info',
-      type,
-    ]);
+  Future<List<BuildCacheEntry>> _cachedBuilds(
+    String type, {
+    PassthroughService? source,
+  }) async {
+    final CapturedResult result = await (source ?? passthrough).capture(
+      <String>['build', 'cache-info', type],
+    );
     if (!result.success) {
       return const <BuildCacheEntry>[];
     }
@@ -5304,12 +5358,12 @@ class InteractiveWizard {
     return cleaned.isEmpty ? null : cleaned;
   }
 
-  Future<_RuntimeSettings> _runtimeSettings() async {
-    final CapturedResult result = await passthrough.capture(<String>[
-      'runtime',
-      'settings',
-      'show',
-    ]);
+  Future<_RuntimeSettings> _runtimeSettings({
+    PassthroughService? source,
+  }) async {
+    final CapturedResult result = await (source ?? passthrough).capture(
+      <String>['runtime', 'settings', 'show'],
+    );
     if (!result.success) {
       return const _RuntimeSettings();
     }
@@ -5329,12 +5383,13 @@ class InteractiveWizard {
     );
   }
 
-  Future<String> _resolveLatestVersion(String type) async {
-    final CapturedResult result = await passthrough.capture(<String>[
-      'build',
-      'latest',
-      type,
-    ]);
+  Future<String> _resolveLatestVersion(
+    String type, {
+    PassthroughService? source,
+  }) async {
+    final CapturedResult result = await (source ?? passthrough).capture(
+      <String>['build', 'latest', type],
+    );
     if (!result.success) {
       return '1.21.1';
     }
@@ -5351,12 +5406,13 @@ class InteractiveWizard {
     return '1.21.1';
   }
 
-  Future<List<String>> _resolveSupportedVersions(String type) async {
-    final CapturedResult result = await passthrough.capture(<String>[
-      'build',
-      'versions',
-      type,
-    ]);
+  Future<List<String>> _resolveSupportedVersions(
+    String type, {
+    PassthroughService? source,
+  }) async {
+    final CapturedResult result = await (source ?? passthrough).capture(
+      <String>['build', 'versions', type],
+    );
     if (!result.success) {
       return const <String>[];
     }

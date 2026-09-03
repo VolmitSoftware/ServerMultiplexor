@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:unorm_dart/unorm_dart.dart' as unicode;
 
+import '../../utils/async_work_pool.dart';
 import 'pterodactyl_models.dart';
 import 'pterodactyl_profile.dart';
 import 'pterodactyl_sftp_key_store.dart';
@@ -905,13 +906,12 @@ final class PterodactylSmbService {
         mounts: const <PterodactylSmbMountStatus>[],
       );
     }
-    final List<PterodactylSmbMountStatus> mounts =
-        <PterodactylSmbMountStatus>[];
-    for (final PterodactylSmbRuntimeMount mount in runtime.mounts) {
-      final String? description = await _runner.describeProcess(mount.pid);
-      final bool visible = await _mountIsVisible(mount.mountPath);
-      mounts.add(
-        PterodactylSmbMountStatus(
+    final List<PterodactylSmbMountStatus> mounts = await boundedMap(
+      runtime.mounts,
+      (PterodactylSmbRuntimeMount mount) async {
+        final String? description = await _runner.describeProcess(mount.pid);
+        final bool visible = await _mountIsVisible(mount.mountPath);
+        return PterodactylSmbMountStatus(
           profileId: mount.profileId,
           serverIdentifier: mount.serverIdentifier,
           serverName: mount.serverName,
@@ -921,9 +921,9 @@ final class PterodactylSmbService {
               visible &&
               description != null &&
               _isOwnedRclone(description, mount),
-        ),
-      );
-    }
+        );
+      },
+    );
     final bool shareRegistered =
         runtime.shareRegistered &&
         await _shareManager.exists(runtime.shareName);
@@ -1758,13 +1758,19 @@ final class PterodactylSmbService {
   Future<List<PterodactylSmbMountTarget>> _loadTargets(
     PterodactylSmbSettings configured,
   ) async {
-    final List<PterodactylSmbMountTarget> targets =
-        <PterodactylSmbMountTarget>[];
+    // Validate saved accounts before dispatching independent Panel reads.
     for (final PterodactylSftpAccount account in configured.enabledAccounts) {
       _requireProfile(account.profileId);
+    }
+    final List<List<PterodactylSmbMountTarget>>
+    groups = await boundedMap(configured.enabledAccounts, (
+      PterodactylSftpAccount account,
+    ) async {
       final List<PterodactylClientServer> servers = await _loadServers(
         account.profileId,
       );
+      final List<PterodactylSmbMountTarget> targets =
+          <PterodactylSmbMountTarget>[];
       for (final PterodactylClientServer server in servers) {
         if (server.sftpHost.trim().isEmpty ||
             server.sftpPort < 1 ||
@@ -1780,7 +1786,11 @@ final class PterodactylSmbService {
           ),
         );
       }
-    }
+      return targets;
+    });
+    final List<PterodactylSmbMountTarget> targets = groups
+        .expand((List<PterodactylSmbMountTarget> group) => group)
+        .toList();
     targets.sort((
       PterodactylSmbMountTarget left,
       PterodactylSmbMountTarget right,

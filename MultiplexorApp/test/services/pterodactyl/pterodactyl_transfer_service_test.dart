@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_files.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_link_store.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_models.dart';
@@ -12,6 +13,87 @@ import 'package:test/test.dart';
 
 void main() {
   group('transfer file engine', () {
+    test(
+      'hashes four files concurrently and preserves manifest order',
+      () async {
+        final Directory root = Directory.systemTemp.createTempSync(
+          'multiplexor-hash-pool-',
+        );
+        addTearDown(() => root.deleteSync(recursive: true));
+        for (int index = 0; index < 6; index++) {
+          _write(root.path, '$index.txt', 'contents-$index');
+        }
+        final _ControlledFileHasher hasher = _ControlledFileHasher();
+        addTearDown(hasher.releaseAll);
+        final PterodactylTransferFileEngine engine =
+            PterodactylTransferFileEngine(fileHasher: hasher.hash);
+        final Future<PterodactylTransferFileManifest> scanning = engine.scan(
+          root.path,
+        );
+        await hasher.started[3].future.timeout(const Duration(seconds: 2));
+        expect(hasher.active, 4);
+        hasher.release[1].complete();
+        await hasher.started[4].future.timeout(const Duration(seconds: 2));
+        expect(hasher.release.first.isCompleted, isFalse);
+        hasher.releaseAll();
+
+        final PterodactylTransferFileManifest manifest = await scanning;
+        expect(hasher.maximumActive, 4);
+        expect(hasher.active, 0);
+        expect(manifest.files.keys, <String>[
+          '0.txt',
+          '1.txt',
+          '2.txt',
+          '3.txt',
+          '4.txt',
+          '5.txt',
+        ]);
+        for (int index = 0; index < 6; index++) {
+          expect(
+            manifest.files['$index.txt']!.sha256,
+            sha256.convert(utf8.encode('contents-$index')).toString(),
+          );
+        }
+      },
+    );
+
+    test('hashing failure drains file reads before the scan fails', () async {
+      final Directory root = Directory.systemTemp.createTempSync(
+        'multiplexor-hash-drain-',
+      );
+      addTearDown(() => root.deleteSync(recursive: true));
+      for (int index = 0; index < 6; index++) {
+        _write(root.path, '$index.txt', 'contents-$index');
+      }
+      final _ControlledFileHasher hasher = _ControlledFileHasher(
+        failedIndex: 0,
+      );
+      addTearDown(hasher.releaseAll);
+      final PterodactylTransferFileEngine engine =
+          PterodactylTransferFileEngine(fileHasher: hasher.hash);
+      bool settled = false;
+      final Future<void> failure = expectLater(
+        engine.scan(root.path).whenComplete(() => settled = true),
+        throwsStateError,
+      );
+      await hasher.started[3].future.timeout(const Duration(seconds: 2));
+      hasher.release[0].complete();
+      await hasher.started[4].future.timeout(const Duration(seconds: 2));
+      expect(settled, isFalse);
+      hasher.release[4].complete();
+      await hasher.started[5].future.timeout(const Duration(seconds: 2));
+      expect(settled, isFalse);
+      hasher.releaseAll();
+
+      await failure;
+      expect(
+        hasher.started.every((Completer<void> item) => item.isCompleted),
+        isTrue,
+      );
+      expect(hasher.active, 0);
+      expect(settled, isTrue);
+    });
+
     test(
       'shared exclusion policy covers nested transfer artifacts exactly',
       () {
@@ -2040,4 +2122,40 @@ Future<void> _copyManifest({
 
 bool _fakeTransferExcluded(String relativePath) {
   return PterodactylTransferPathPolicy.excludes(relativePath);
+}
+
+final class _ControlledFileHasher {
+  _ControlledFileHasher({this.failedIndex});
+
+  final int? failedIndex;
+  final List<Completer<void>> started = List<Completer<void>>.generate(
+    6,
+    (_) => Completer<void>(),
+  );
+  final List<Completer<void>> release = List<Completer<void>>.generate(
+    6,
+    (_) => Completer<void>(),
+  );
+  int active = 0;
+  int maximumActive = 0;
+
+  Future<String> hash(File file) async {
+    final int index = int.parse(p.basenameWithoutExtension(file.path));
+    active++;
+    if (active > maximumActive) maximumActive = active;
+    started[index].complete();
+    try {
+      await release[index].future;
+      if (index == failedIndex) throw StateError('simulated hash failure');
+      return sha256.convert(await file.readAsBytes()).toString();
+    } finally {
+      active--;
+    }
+  }
+
+  void releaseAll() {
+    for (final Completer<void> item in release) {
+      if (!item.isCompleted) item.complete();
+    }
+  }
 }

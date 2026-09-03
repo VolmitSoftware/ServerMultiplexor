@@ -96,7 +96,9 @@ Pull latest builds refreshes the newest build of every platform the active consu
 
 Local server setup includes an **Addons** checklist before the first launch. To change an existing server, stop it and open its card → **Addons**. Use Space, Enter, or a click to toggle entries, then Done to apply. The checked selection is saved per instance. ViaBackwards includes ViaVersion automatically. Cancelling or a failed install leaves the new server stopped.
 
-For batches, use the main dashboard's left-hand checkboxes and selected action bar. Batch starts stay headless, so they do not attach a console for each server. Local operations use the same `instance bulk` command available to scripts; Remote operations reuse the existing bounded fleet engine with only the checked IDs.
+For batches, use the main dashboard's left-hand checkboxes and selected action bar. Batch starts stay headless, so they do not attach a console for each server. Local operations use the same `instance bulk` command available to scripts; Remote operations reuse the fleet engine with only the checked IDs. Both run up to four servers concurrently by default; headless bulk commands accept `--concurrency 1-8`. Restart still stops each server before starting that server again. Workspace Start all and Stop all use the same parallel engines, with consoles opened after the start batch finishes.
+
+Independent builds, repository syncs, addon preparation, Remote fleet polling, Drive checks, and transfer-file hashes also use rolling pools of up to four workers. Completed work immediately frees a slot. Port allocation and shared watcher startup are coordinated, and addon/transfer commit and rollback steps keep their required order. Every started operation finishes before failure cleanup runs.
 
 ## Concepts
 
@@ -189,7 +191,7 @@ For CI/non-macOS sessions, set both an origin-bound key and its companion origin
 | Command | What it does |
 |---------|--------------|
 | `instance list` | List instances in the active profile; the active one is tagged `(active)`. |
-| `instance bulk <start\|stop\|restart\|delete> <name>... [--confirm <token>]` | Operate on an explicit nonempty set in the active consumer. Validates every target before any mutation, skips ineligible states/locked deletions, and reports each outcome. Start/restart are headless. Delete first prints the exact required confirmation token; repeat with `--confirm` to apply. Partial failures return nonzero. |
+| `instance bulk <start\|stop\|restart\|delete> <name>... [--concurrency <1-8>] [--confirm <token>]` | Operate on an explicit nonempty set in the active consumer, with four concurrent workers by default. Validates every target before any mutation, skips ineligible states/locked deletions, and reports each outcome. Start/restart are headless. Delete first prints the exact required confirmation token; repeat with `--confirm` to apply. Partial failures return nonzero. |
 | `instance current` | Print the active instance name. |
 | `instance create <name> [--isolated]` | Create a blank instance (no jar wired up). `--isolated` skips shared drop-ins, Iris packs, and plugin ops; Remote Pull uses this mode so copied servers cannot inherit unrelated Local shared state. |
 | `instance clone <source> <target>` | Copy an instance verbatim, then re-wire shared links. |
@@ -317,7 +319,7 @@ The bundled catalog offers EssentialsX (core), FastAsyncWorldEdit (FAWE), ViaVer
 | `addons set [instance] (--select <id,id,...>\|--none) [--mc <version>]` | Apply the complete checked selection, automatically including declared dependencies. Requires a stopped server. |
 | `addons update [instance] [--mc <version>]` | Refresh the selected addons from their configured sources. Requires a stopped server. |
 
-Downloads are staged and validated before the selection is committed. Modrinth hashes and available GitHub asset hashes are verified. Jars are installed directly as `plugins/multiplexor-<id>.jar` or `mods/multiplexor-<id>.jar`, with ownership and checksums in `.multiplexor-addons.json`. An unchanged selection reuses its installed jars. Unchecking removes managed jars, retaining plugin configuration folders. Existing unmanaged conflicts and locally modified managed jars require moving the conflicting file aside first. Normal drop-in sync, including `--clean`, preserves selected addons and skips conflicting source filenames. Addons work on isolated instances too. Factory reset clears both their jars and selection; clone and backup preserve them.
+Addon metadata resolution and jar download/hash preparation run up to four at a time. Downloads are staged and validated before the selection is committed; dependency checks and the final installation remain ordered. Modrinth hashes and available GitHub asset hashes are verified. Jars are installed directly as `plugins/multiplexor-<id>.jar` or `mods/multiplexor-<id>.jar`, with ownership and checksums in `.multiplexor-addons.json`. An unchanged selection reuses its installed jars. Unchecking removes managed jars, retaining plugin configuration folders. Existing unmanaged conflicts and locally modified managed jars require moving the conflicting file aside first. Normal drop-in sync, including `--clean`, preserves selected addons and skips conflicting source filenames. Addons work on isolated instances too. Factory reset clears both their jars and selection; clone and backup preserve them.
 
 ProtocolLib uses the official stable `5.4.0` release through Minecraft 1.21.8. For 1.21.9–1.21.11 and 26.1–26.1.2 it uses the official `dev-build` Spigot-compatible artifact, including on Paper. For 26.2 it uses the Paper artifact on Paper derivatives and the Spigot artifact on Spigot. The checklist labels these **ProtocolLib (development)**. The modern Paper artifact requires Paper API 26.2 and cannot be substituted on older servers. These rules are based on [ProtocolLib's artifacts and support declarations](https://github.com/dmulloy2/ProtocolLib). Unknown newer versions need a catalog update before ProtocolLib is offered.
 
@@ -387,7 +389,7 @@ Each source can restrict `serverTypes` and `minecraftVersions` to exact lists. U
 | `build cache-info [type] [--mc <v>]` | Machine-readable jar-cache report: one `<type>\t<jar>\t<ageSeconds>` line per cached jar, newest first. Drives the wizard's automatic refresh decisions and its "builds updated" footer. |
 | `build list` | Show what's in the active profile's cache. |
 | `build list-all [type]` | Show cache contents across profiles. |
-| `build test-latest [--spigot-mc <v>]` | Sanity-check the latest of every type, spigot included. `--spigot-mc` pins spigot to its own version, since it lags the others on a fresh Minecraft release. |
+| `build test-latest [--spigot-mc <v>]` | Sanity-check the latest of every type with up to four concurrent builds, spigot included. `--spigot-mc` pins spigot to its own version, since it lags the others on a fresh Minecraft release. |
 | `build prune [all\|type]` | Sweep every consumer's build cache: drop superseded jars and remove leftover BuildTools work directories. Builds prune themselves, so this is only needed to clean up history. |
 
 **Build caches keep one jar per Minecraft version.** Every successful build deletes the older builds of that same version, so upstream build-number churn stops accumulating. Two things are never pruned: a jar an instance still launches from (instances stay pinned to whatever they were created with until you update them), and the newest jar of every *other* Minecraft version — switching back to an older version still hits the cache instead of re-downloading or, for spigot, recompiling.
@@ -398,7 +400,7 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 
 | Command | What it does |
 |---------|--------------|
-| `repos sync [all\|paper\|purpur\|folia\|canvas\|leaf]` | Clone or pull upstream repos used for version discovery. Build commands resolve metadata over HTTP, so this is mostly used for Spigot/BuildTools. |
+| `repos sync [all\|paper\|purpur\|folia\|canvas\|leaf]` | Clone or pull upstream repos used for version discovery, with up to four repos concurrently for `all`. Build commands resolve metadata over HTTP, so this is mostly used for Spigot/BuildTools. |
 
 ### config — per-instance config plumbing
 
@@ -431,7 +433,7 @@ The Local dashboard's `g` or `G` opens the same grid. Use `Shift+R` to repaint t
 ./start.sh runtime watch --once >> monitor.log
 
 # Start or stop only these named Local servers (dashboard: check rows, then START/STOP)
-./start.sh instance bulk start lobby survival
+./start.sh instance bulk start lobby survival --concurrency 4
 ./start.sh instance bulk stop lobby survival
 
 # Preview deletion of only this set, then repeat with the printed exact token

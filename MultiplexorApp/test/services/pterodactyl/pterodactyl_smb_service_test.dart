@@ -15,6 +15,117 @@ import 'package:multiplexor/services/pterodactyl/pterodactyl_smb_settings_store.
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'Drive doctor overlaps account inventory with a four-request limit',
+    () async {
+      final _Fixture fixture = _Fixture();
+      addTearDown(fixture.close);
+      fixture.settingsStore.save(
+        fixture.settings().copyWith(
+          accounts: <PterodactylSftpAccount>[
+            for (int index = 0; index < 6; index++)
+              PterodactylSftpAccount(
+                profileId: 'account$index',
+                panelUsername: 'operator',
+              ),
+          ],
+        ),
+      );
+      final _ProbeGate probes = _ProbeGate();
+      addTearDown(probes.releaseAll);
+      final PterodactylSmbService service = fixture.service(
+        loadProfile: (String id) => _profile(id: id),
+        loadServers: (String id) async {
+          await probes.wait(int.parse(id.substring(7)));
+          return fixture.servers;
+        },
+      );
+      final Future<PterodactylSmbDoctorReport> checking = service.doctor();
+      await probes.started[3].future.timeout(const Duration(seconds: 2));
+      expect(probes.active, 4);
+      probes.release[1].complete();
+      await probes.started[4].future.timeout(const Duration(seconds: 2));
+      expect(probes.release.first.isCompleted, isFalse);
+      probes.releaseAll();
+
+      final PterodactylSmbDoctorReport report = await checking;
+      expect(probes.maximumActive, 4);
+      expect(probes.active, 0);
+      expect(
+        report.checks
+            .where(
+              (PterodactylSmbCheck check) => check.name.startsWith('account:'),
+            )
+            .map((PterodactylSmbCheck check) => check.name),
+        <String>[
+          'account:account0',
+          'account:account1',
+          'account:account2',
+          'account:account3',
+          'account:account4',
+          'account:account5',
+        ],
+      );
+    },
+  );
+
+  test(
+    'Drive status overlaps four mount probes and preserves row order',
+    () async {
+      final _Fixture fixture = _Fixture();
+      addTearDown(fixture.close);
+      fixture.runtimeStore.save(
+        PterodactylSmbRuntimeState(
+          shareName: 'Multiplexor',
+          mountRoot: fixture.mountRoot.path,
+          startedAt: DateTime.utc(2026),
+          shareRegistered: false,
+          mounts: <PterodactylSmbRuntimeMount>[
+            for (int index = 0; index < 6; index++)
+              PterodactylSmbRuntimeMount(
+                profileId: 'remote',
+                serverIdentifier: 'server$index',
+                serverName: 'Server $index',
+                mountPath: '${fixture.mountRoot.path}/server$index',
+                remoteName: 'mx_remote_server$index',
+                pid: index + 1,
+              ),
+          ],
+        ),
+      );
+      final _ProbeGate probes = _ProbeGate();
+      addTearDown(probes.releaseAll);
+      fixture.runner.describeProcessOverride = (int pid) async {
+        await probes.wait(pid - 1);
+        return null;
+      };
+      final Future<PterodactylSmbStatus> checking = fixture.service().status();
+      await probes.started[3].future.timeout(const Duration(seconds: 2));
+      expect(probes.active, 4);
+      probes.release[1].complete();
+      await probes.started[4].future.timeout(const Duration(seconds: 2));
+      expect(probes.release.first.isCompleted, isFalse);
+      probes.releaseAll();
+
+      final PterodactylSmbStatus status = await checking;
+      expect(probes.maximumActive, 4);
+      expect(probes.active, 0);
+      expect(
+        status.mounts.map(
+          (PterodactylSmbMountStatus mount) => mount.serverIdentifier,
+        ),
+        <String>[
+          'server0',
+          'server1',
+          'server2',
+          'server3',
+          'server4',
+          'server5',
+        ],
+      );
+    },
+  );
+
   test('configures passwordless account from Client API callbacks', () async {
     final _Fixture fixture = _Fixture();
     addTearDown(fixture.close);
@@ -2074,6 +2185,8 @@ final class _Fixture {
   );
 
   PterodactylSmbService service({
+    PterodactylSmbProfileLoader? loadProfile,
+    PterodactylSmbServerLoader? loadServers,
     PterodactylSmbPanelUsernameLoader? loadPanelUsername,
     PterodactylSmbSshKeyRegistrar? ensureSshPublicKey,
     PterodactylSftpPasswordProvider? passwordProvider,
@@ -2083,12 +2196,14 @@ final class _Fixture {
     Duration lifecycleLockTimeout = const Duration(seconds: 30),
   }) => PterodactylSmbService(
     metadataDirectoryPath: metadata.path,
-    loadProfile: (String id) => switch (id) {
-      'remote' => _profile(),
-      'secondary' => _profile(id: 'secondary'),
-      _ => null,
-    },
-    loadServers: (String id) async => servers,
+    loadProfile:
+        loadProfile ??
+        (String id) => switch (id) {
+          'remote' => _profile(),
+          'secondary' => _profile(id: 'secondary'),
+          _ => null,
+        },
+    loadServers: loadServers ?? (String id) async => servers,
     loadPanelUsername: loadPanelUsername,
     ensureSshPublicKey: ensureSshPublicKey,
     settingsStore: settingsStore,
@@ -2110,6 +2225,7 @@ final class _FakeRunner implements PterodactylSmbProcessRunner {
   final List<_StartedProcess> started = <_StartedProcess>[];
   final List<_RunCommand> runs = <_RunCommand>[];
   final Map<int, String> externalDescriptions = <int, String>{};
+  Future<String?> Function(int pid)? describeProcessOverride;
   final List<int> killedPids = <int>[];
   final List<ProcessSignal> killSignals = <ProcessSignal>[];
   bool shareRegistered = false;
@@ -2320,6 +2436,7 @@ final class _FakeRunner implements PterodactylSmbProcessRunner {
 
   @override
   Future<String?> describeProcess(int pid) async {
+    if (describeProcessOverride != null) return describeProcessOverride!(pid);
     final String? external = externalDescriptions[pid];
     if (external != null) return external;
     for (final _StartedProcess process in started) {
@@ -2365,6 +2482,36 @@ final class _FakeRunner implements PterodactylSmbProcessRunner {
     if (entered != null && !entered.isCompleted) entered.complete();
     await releaseStart?.future;
     return process;
+  }
+}
+
+final class _ProbeGate {
+  final List<Completer<void>> started = List<Completer<void>>.generate(
+    6,
+    (_) => Completer<void>(),
+  );
+  final List<Completer<void>> release = List<Completer<void>>.generate(
+    6,
+    (_) => Completer<void>(),
+  );
+  int active = 0;
+  int maximumActive = 0;
+
+  Future<void> wait(int index) async {
+    active++;
+    if (active > maximumActive) maximumActive = active;
+    started[index].complete();
+    try {
+      await release[index].future;
+    } finally {
+      active--;
+    }
+  }
+
+  void releaseAll() {
+    for (final Completer<void> item in release) {
+      if (!item.isCompleted) item.complete();
+    }
   }
 }
 

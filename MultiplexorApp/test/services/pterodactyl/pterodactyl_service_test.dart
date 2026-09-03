@@ -14,6 +14,93 @@ import 'package:multiplexor/services/pterodactyl/pterodactyl_service.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'fleet polling refills four request slots without chunk barriers',
+    () async {
+      final _FleetTransport transport = _FleetTransport();
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        transport,
+      ]);
+      addTearDown(fixture.close);
+      addTearDown(transport.releaseAll);
+      final Future<List<PterodactylFleetSample>> capture = fixture.service
+          .captureFleet(fixture.profile.id);
+      await transport.started[3].future.timeout(const Duration(seconds: 2));
+      expect(transport.active, 4);
+
+      transport.release[1].complete();
+      await transport.started[4].future.timeout(const Duration(seconds: 2));
+      expect(transport.release.first.isCompleted, isFalse);
+      transport.release[4].complete();
+      await transport.started[5].future.timeout(const Duration(seconds: 2));
+      expect(transport.maximumActive, 4);
+      transport.releaseAll();
+
+      final List<PterodactylFleetSample> samples = await capture;
+      expect(
+        samples.map(
+          (PterodactylFleetSample sample) => sample.server.identifier,
+        ),
+        <String>[
+          'server01',
+          'server02',
+          'server03',
+          'server04',
+          'server05',
+          'server06',
+        ],
+      );
+      expect(
+        samples.every(
+          (PterodactylFleetSample sample) => sample.resources != null,
+        ),
+        isTrue,
+      );
+      expect(transport.active, 0);
+    },
+  );
+
+  for (final int statusCode in <int>[401, 429]) {
+    test(
+      'fleet polling stops queued HTTP calls and drains active calls after $statusCode',
+      () async {
+        final _FleetTransport transport = _FleetTransport(
+          failedIndex: 0,
+          failureStatus: statusCode,
+        );
+        final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+          transport,
+        ]);
+        addTearDown(fixture.close);
+        addTearDown(transport.releaseAll);
+        bool settled = false;
+        final Future<void> failure = expectLater(
+          fixture.service
+              .captureFleet(fixture.profile.id)
+              .whenComplete(() => settled = true),
+          throwsA(isA<PterodactylApiException>()),
+        );
+        await transport.started[3].future.timeout(const Duration(seconds: 2));
+        transport.release[0].complete();
+        await Future<void>.delayed(Duration.zero);
+        expect(transport.started[4].isCompleted, isFalse);
+        expect(transport.started[5].isCompleted, isFalse);
+        expect(transport.active, 3);
+        expect(settled, isFalse);
+        transport.releaseAll();
+
+        await failure;
+        expect(
+          transport.started.where((Completer<void> item) => item.isCompleted),
+          hasLength(4),
+        );
+        expect(transport.maximumActive, 4);
+        expect(settled, isTrue);
+        expect(transport.active, 0);
+      },
+    );
+  }
+
   test('remote polling stays at the Panel cache floor for small fleets', () {
     expect(
       PterodactylService.recommendedPollInterval(10),
@@ -426,13 +513,14 @@ void main() {
     );
   });
 
-  test('template create-many runs four requests concurrently by default', () async {
-    final List<String> names = List<String>.generate(
-      6,
-      (int index) => 'Clone $index',
-    );
-    final _ServiceTransport transport = _ServiceTransport(
-      <_ServiceReply>[
+  test(
+    'template create-many runs four requests concurrently by default',
+    () async {
+      final List<String> names = List<String>.generate(
+        6,
+        (int index) => 'Clone $index',
+      );
+      final _ServiceTransport transport = _ServiceTransport(<_ServiceReply>[
         _ServiceReply(200, _applicationServerListResponse(empty: true)),
         _ServiceReply(200, _applicationServerListResponse(empty: false)),
         _ServiceReply(200, _userListResponse()),
@@ -440,27 +528,29 @@ void main() {
         _ServiceReply(200, _allocationListResponse(names.length)),
         for (final String name in names)
           _ServiceReply(201, _applicationServerResponse(name: name)),
-      ],
-      delayCreateResponses: true,
-    );
-    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
-      transport,
-    ]);
-    addTearDown(fixture.close);
+      ], delayCreateResponses: true);
+      final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+        transport,
+      ]);
+      addTearDown(fixture.close);
 
-    final PterodactylBulkResult result = await fixture.service
-        .bulkCreateFromTemplate(
-          profileId: fixture.profile.id,
-          template: 'server01',
-          names: names,
-          ownerId: 5,
-          memoryMiB: 1,
-        );
+      final PterodactylBulkResult result = await fixture.service
+          .bulkCreateFromTemplate(
+            profileId: fixture.profile.id,
+            template: 'server01',
+            names: names,
+            ownerId: 5,
+            memoryMiB: 1,
+          );
 
-    expect(result.isSuccess, isTrue);
-    expect(result.items.map((PterodactylBulkItemResult item) => item.name), names);
-    expect(transport.maximumCreateRequests, 4);
-  });
+      expect(result.isSuccess, isTrue);
+      expect(
+        result.items.map((PterodactylBulkItemResult item) => item.name),
+        names,
+      );
+      expect(transport.maximumCreateRequests, 4);
+    },
+  );
 
   test(
     'bulk create aborts before mutation when allocations are insufficient',
@@ -2216,6 +2306,83 @@ final class _StalledStopTransport extends _ServiceTransport {
       return const PterodactylTransportResponse(statusCode: 204, body: '');
     }
     throw StateError('Unexpected request: ${request.uri}');
+  }
+}
+
+final class _FleetTransport extends _ServiceTransport {
+  _FleetTransport({this.failedIndex, this.failureStatus = 401})
+    : super(const <_ServiceReply>[]);
+
+  final int? failedIndex;
+  final int failureStatus;
+  final List<Completer<void>> started = List<Completer<void>>.generate(
+    6,
+    (_) => Completer<void>(),
+  );
+  final List<Completer<void>> release = List<Completer<void>>.generate(
+    6,
+    (_) => Completer<void>(),
+  );
+  int active = 0;
+  int maximumActive = 0;
+
+  void releaseAll() {
+    for (final Completer<void> item in release) {
+      if (!item.isCompleted) item.complete();
+    }
+  }
+
+  @override
+  Future<PterodactylTransportResponse> send(
+    PterodactylTransportRequest request,
+  ) async {
+    requests.add(request);
+    if (request.uri.path == '/api/client') {
+      if (request.uri.queryParameters['type'] == 'admin-all') {
+        return PterodactylTransportResponse(
+          statusCode: 200,
+          body: _serverListResponse(empty: true),
+        );
+      }
+      return PterodactylTransportResponse(
+        statusCode: 200,
+        body: jsonEncode(<String, Object?>{
+          'object': 'list',
+          'data': <Object?>[
+            for (int index = 1; index <= 6; index++)
+              <String, Object?>{
+                'object': 'server',
+                'attributes': <String, Object?>{
+                  ..._clientServerAttributes(),
+                  'identifier': 'server0$index',
+                  'internal_id': index,
+                  'uuid': '00000000-0000-0000-0000-00000000000$index',
+                  'name': 'Server $index',
+                },
+              },
+          ],
+          'meta': _pagination(6),
+        }),
+      );
+    }
+    if (!request.uri.path.endsWith('/resources')) {
+      throw StateError('Unexpected request: ${request.uri}');
+    }
+    final int index = int.parse(request.uri.pathSegments[3].substring(6)) - 1;
+    active++;
+    if (active > maximumActive) maximumActive = active;
+    started[index].complete();
+    try {
+      await release[index].future;
+      return PterodactylTransportResponse(
+        statusCode: index == failedIndex ? failureStatus : 200,
+        body: index == failedIndex
+            ? '{"errors":[{"code":"Unauthorized"}]}'
+            : _resourceResponse('running'),
+      );
+    } finally {
+      active--;
+    }
   }
 }
 

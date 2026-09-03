@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
+import '../../utils/async_work_pool.dart';
 import 'pterodactyl_transfer_models.dart';
 
 final class PterodactylTransferFileEntry {
@@ -76,10 +77,16 @@ final class PterodactylTransferFileManifest {
 }
 
 typedef PterodactylTransferPathExclusion = bool Function(String relativePath);
+typedef PterodactylTransferFileHasher = Future<String> Function(File file);
+typedef _TransferScanFile = ({String relativePath, String sourcePath});
 
 /// Deterministic file manifest and staged-copy implementation.
 final class PterodactylTransferFileEngine {
-  const PterodactylTransferFileEngine();
+  const PterodactylTransferFileEngine({
+    PterodactylTransferFileHasher? fileHasher,
+  }) : _fileHasher = fileHasher;
+
+  final PterodactylTransferFileHasher? _fileHasher;
 
   Future<PterodactylTransferFileManifest> scan(
     String rootPath, {
@@ -99,11 +106,10 @@ final class PterodactylTransferFileEngine {
       for (final String path in allowedSymlinkRoots)
         Directory(path).resolveSymbolicLinksSync(),
     ];
-    final Map<String, PterodactylTransferFileEntry> files =
-        <String, PterodactylTransferFileEntry>{};
+    final List<_TransferScanFile> pendingFiles = <_TransferScanFile>[];
     final Set<String> directories = <String>{};
     final Set<String> excludedContentDirectories = <String>{};
-    await _walk(
+    _walk(
       physicalDirectory: canonicalRoot,
       logicalDirectory: '',
       sourceRoot: canonicalRoot,
@@ -111,13 +117,30 @@ final class PterodactylTransferFileEngine {
       allowSymlinks: allowSymlinks,
       exclude: exclude,
       ancestorDirectories: <String>{canonicalRoot},
-      files: files,
+      files: pendingFiles,
       directories: directories,
       excludedContentDirectories: excludedContentDirectories,
     );
+    // Validate traversal first, then overlap independent reads without changing
+    // directory traversal order or the surrounding transfer transaction.
+    final List<PterodactylTransferFileEntry> entries = await boundedMap(
+      pendingFiles,
+      (_TransferScanFile pending) async {
+        final File file = File(pending.sourcePath);
+        return PterodactylTransferFileEntry(
+          path: pending.relativePath,
+          sourcePath: file.path,
+          size: file.lengthSync(),
+          sha256: await _hashFile(file),
+        );
+      },
+    );
     return PterodactylTransferFileManifest(
       rootPath: root.path,
-      files: files,
+      files: <String, PterodactylTransferFileEntry>{
+        for (final PterodactylTransferFileEntry entry in entries)
+          entry.path: entry,
+      },
       directories: directories,
       excludedContentDirectories: excludedContentDirectories,
     );
@@ -410,11 +433,12 @@ final class PterodactylTransferFileEngine {
   }
 
   Future<String> _hashFile(File file) async {
+    if (_fileHasher != null) return _fileHasher(file);
     final Digest digest = await sha256.bind(file.openRead()).first;
     return digest.toString();
   }
 
-  Future<bool> _walk({
+  bool _walk({
     required String physicalDirectory,
     required String logicalDirectory,
     required String sourceRoot,
@@ -422,10 +446,10 @@ final class PterodactylTransferFileEngine {
     required bool allowSymlinks,
     required PterodactylTransferPathExclusion? exclude,
     required Set<String> ancestorDirectories,
-    required Map<String, PterodactylTransferFileEntry> files,
+    required List<_TransferScanFile> files,
     required Set<String> directories,
     required Set<String> excludedContentDirectories,
-  }) async {
+  }) {
     bool containsExcludedContent = false;
     final List<FileSystemEntity> entities =
         Directory(physicalDirectory).listSync(followLinks: false)..sort(
@@ -473,7 +497,7 @@ final class PterodactylTransferFileEngine {
           );
         }
         directories.add(relative);
-        final bool childContainsExcludedContent = await _walk(
+        final bool childContainsExcludedContent = _walk(
           physicalDirectory: canonical,
           logicalDirectory: relative,
           sourceRoot: sourceRoot,
@@ -490,13 +514,7 @@ final class PterodactylTransferFileEngine {
           containsExcludedContent = true;
         }
       } else if (effectiveType == FileSystemEntityType.file) {
-        final File file = File(physicalPath);
-        files[relative] = PterodactylTransferFileEntry(
-          path: relative,
-          sourcePath: file.path,
-          size: file.lengthSync(),
-          sha256: await _hashFile(file),
-        );
+        files.add((relativePath: relative, sourcePath: physicalPath));
       } else {
         throw StateError('Unsupported transfer entry: $relative');
       }

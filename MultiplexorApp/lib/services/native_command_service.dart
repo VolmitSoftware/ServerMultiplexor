@@ -10,6 +10,8 @@ import 'package:yaml/yaml.dart';
 
 import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
+import '../utils/async_work_pool.dart';
+import '../utils/delete_path.dart';
 import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
 import '../utils/table.dart';
@@ -40,11 +42,18 @@ class NativeCommandService {
     required this.context,
     required this.consumerService,
     ProcessRunner processRunner = const ProcessRunner(),
-  }) : _processRunner = processRunner;
+    Future<ProcessResult> Function(String, List<String>)? processExecutor,
+  }) : _processRunner = processRunner,
+       _processExecutor = processExecutor;
 
   final ManagerContext context;
   final ConsumerService consumerService;
   final ProcessRunner _processRunner;
+  final Future<ProcessResult> Function(String, List<String>)? _processExecutor;
+  static final AsyncGate _runtimePortGate = AsyncGate();
+  static final Set<int> _reservedRuntimePorts = <int>{};
+  static final Map<String, Future<void>> _startingWatchers =
+      <String, Future<void>>{};
   ConsumerProfile? _consumerOverride;
 
   /// Persistent RCON connections, reused across dashboard refreshes so the
@@ -1564,17 +1573,7 @@ class NativeCommandService {
       }
     }
 
-    int nextIndex = 0;
-    Future<void> worker() async {
-      while (nextIndex < targets.length) {
-        final int index = nextIndex++;
-        await createTarget(targets[index]);
-      }
-    }
-
-    await Future.wait<void>(<Future<void>>[
-      for (int index = 0; index < min(4, targets.length); index++) worker(),
-    ]);
+    await boundedMap(targets, createTarget);
     io.write('[OK] create-many done: $succeeded created, $skipped skipped');
     return succeeded > 0 ? 0 : 1;
   }
@@ -1657,17 +1656,23 @@ class NativeCommandService {
         }
         return 0;
       case 'states':
-        for (final name in _instanceNames(profile)) {
-          final state = await _runtimeStateOf(profile, name);
-          final port = _instanceGetServerPort(profile, name);
-          final pid = _readPid(_runtimeServerPidFile(profile, name));
-          final locked = _instanceLocked(profile, name) ? 'locked' : 'unlocked';
-          final isolated = _instanceIsolated(profile, name)
+        final List<String>
+        rows = await boundedMap<String, String>(_instanceNames(profile), (
+          String name,
+        ) async {
+          final RuntimeState state = await _runtimeStateOf(profile, name);
+          final int port = _instanceGetServerPort(profile, name);
+          final int? pid = _readPid(_runtimeServerPidFile(profile, name));
+          final String locked = _instanceLocked(profile, name)
+              ? 'locked'
+              : 'unlocked';
+          final String isolated = _instanceIsolated(profile, name)
               ? 'isolated'
               : 'shared';
-          io.write(
-            '$name\t${state.name}\t$port\t${pid ?? '-'}\t$locked\t$isolated',
-          );
+          return '$name\t${state.name}\t$port\t${pid ?? '-'}\t$locked\t$isolated';
+        });
+        for (final String row in rows) {
+          io.write(row);
         }
         return 0;
       case 'metrics':
@@ -4037,7 +4042,8 @@ class NativeCommandService {
       ),
     };
 
-    for (final type in types) {
+    io.inlineProgress = false;
+    await boundedMap<String, void>(types, (String type) async {
       final url = _repoUrl(type);
       final dir = _repoDir(profile, type);
       final gitDir = Directory(p.join(dir, '.git'));
@@ -4072,7 +4078,7 @@ class NativeCommandService {
       }
 
       io.write('[OK] Repo ready: $type -> $dir');
-    }
+    });
   }
 
   Future<int> _pluginsWatchStart(
@@ -4585,11 +4591,12 @@ class NativeCommandService {
       'leaf',
       'spigot',
     ];
-    final failures = <String>[];
-    final spigotMc = options['spigot-mc']?.trim();
-
-    for (final type in targets) {
-      final pinned =
+    final String? spigotMc = options['spigot-mc']?.trim();
+    io.inlineProgress = false;
+    final List<String?> results = await boundedMap<String, String?>(targets, (
+      String type,
+    ) async {
+      final bool pinned =
           type == 'spigot' && spigotMc != null && spigotMc.isNotEmpty;
       try {
         await _buildTarget(
@@ -4598,10 +4605,14 @@ class NativeCommandService {
           pinned ? <String, String>{'mc': spigotMc} : const <String, String>{},
           io,
         );
-      } catch (e) {
-        failures.add('$type: $e');
+        return null;
+      } catch (error) {
+        return '$type: $error';
       }
-    }
+    });
+    final List<String> failures = results.whereType<String>().toList(
+      growable: false,
+    );
 
     if (failures.isNotEmpty) {
       throw _NativeCommandException(
@@ -5816,8 +5827,18 @@ class NativeCommandService {
     _NativeIoBuffer io,
   ) async {
     if (target == 'all') {
-      for (final type in _allBuildTypes) {
-        await _buildVersions(profile, type, io);
+      final List<String> groups = await boundedMap<String, String>(
+        _allBuildTypes,
+        (String type) async {
+          final _NativeIoBuffer captured = _NativeIoBuffer(stream: false);
+          await _buildVersions(profile, type, captured);
+          return captured.result(0).stdout;
+        },
+      );
+      for (final String group in groups) {
+        for (final String line in group.trimRight().split('\n')) {
+          io.write(line);
+        }
         io.write('');
       }
       return;
@@ -7007,111 +7028,124 @@ class NativeCommandService {
       );
     }
 
-    await _runtimePrepareInstancePort(profile, instance, io);
-    _ensureRconConfigured(profile, instance);
-    await _runtimePrepareRconPort(profile, instance, io);
+    // Port probing and property updates share one short critical section.
+    // Keep the reservations until launch completes, while other servers start.
+    final Set<int> reserved = await _runtimePortGate.run(() async {
+      await _runtimePrepareInstancePort(profile, instance, io);
+      _ensureRconConfigured(profile, instance);
+      final int? rconPort = await _runtimePrepareRconPort(profile, instance, io);
+      final Set<int> ports = <int>{
+        _instanceGetServerPort(profile, instance),
+        ?rconPort,
+      };
+      _reservedRuntimePorts.addAll(ports);
+      return ports;
+    });
+    try {
+      final launch = _runtimeLaunchTarget(profile, instance);
+      if (!File(launch.path).existsSync()) {
+        throw _NativeCommandException(
+          'No launch target found for instance: $instance (${launch.path})',
+          2,
+        );
+      }
 
-    final launch = _runtimeLaunchTarget(profile, instance);
-    if (!File(launch.path).existsSync()) {
-      throw _NativeCommandException(
-        'No launch target found for instance: $instance (${launch.path})',
-        2,
-      );
+      final runtimeDir = _runtimeDir(profile);
+      Directory(runtimeDir).createSync(recursive: true);
+
+      final logFile = File(_runtimeLogFile(profile, instance));
+      logFile
+        ..createSync(recursive: true)
+        ..writeAsStringSync('');
+      final settings = _runtimeSettingsLoad(profile);
+      final launchWorkingDir = _runtimeLaunchWorkingDir(profile, instance);
+      String? log4jPath;
+      if (settings.consoleLogFormat == 'minimal') {
+        log4jPath = _ensureMinimalLog4jConfig(profile, instance);
+      }
+      final javaCommandParts = <String>[
+        'java',
+        ..._javaArgsForLaunch(
+          launch,
+          settings,
+          workingDirectory: launchWorkingDir,
+          log4jConfigPath: log4jPath,
+        ),
+      ];
+
+      if (Platform.isWindows) {
+        await _runtimeStartWindowsHost(profile, instance, logFile, io);
+        return;
+      }
+
+      final javaCommand = javaCommandParts.map(_shellQuote).join(' ');
+      final serverPidFile = _runtimeServerPidFile(profile, instance);
+
+      // DECAWM-off prevents tmux's pane from wrapping long server lines. The
+      // log file is unaffected since this only touches the terminal renderer.
+      final String wrapPrefix = settings.noLineWrap
+          ? r'printf '
+                "'\\033[?7l'"
+                ' && '
+          : '';
+      final runScript =
+          'cd ${_shellQuote(launchWorkingDir)} && '
+          'printf "%s\\n" "\$\$" > ${_shellQuote(serverPidFile)} && '
+          '$wrapPrefix'
+          'exec $javaCommand';
+      final tmuxSession = _tmuxSessionName(profile, instance);
+
+      // Clear stale runtime markers when switching to tmux-backed runtime.
+      File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
+      File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
+
+      if (!Platform.isWindows && await _tmuxSessionExists(tmuxSession)) {
+        await _runProcess('tmux', <String>['kill-session', '-t', tmuxSession]);
+      }
+
+      final startResult = await _runProcess('tmux', <String>[
+        'new-session',
+        '-d',
+        '-s',
+        tmuxSession,
+        ..._tmuxDetachedSizeArgs(),
+        'sh -lc ${_shellQuote(runScript)}',
+      ]);
+      if (startResult.exitCode != 0) {
+        throw _NativeCommandException(
+          'Failed to start runtime for $instance: ${startResult.stderr}',
+          1,
+        );
+      }
+      await _tmuxEnablePaneLogging(tmuxSession, logFile.path);
+
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final running = await _tmuxSessionExists(tmuxSession);
+      if (!running) {
+        throw _NativeCommandException(
+          'Failed to start runtime for $instance. Check log: ${logFile.path}',
+          1,
+        );
+      }
+
+      await _tmuxConfigureConsoleSession(tmuxSession);
+      await _tmuxSetRuntimeUiLabel(tmuxSession, 'jvm-starting');
+
+      // The relaunch happened; clear any pending-restart marker so state
+      // reporting flips from "restarting" to "starting".
+      File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
+
+      io.write('[OK] Runtime started: $instance');
+      io.write('[INFO] tmux session: $tmuxSession');
+      final serverPid = await _awaitRuntimeServerPid(profile, instance);
+      if (serverPid != null) {
+        await _tmuxSetRuntimeUiLabel(tmuxSession, 'jvm-$serverPid');
+        io.write('[INFO] server pid: $serverPid');
+      }
+      io.write('[INFO] Log: ${logFile.path}');
+    } finally {
+      _reservedRuntimePorts.removeAll(reserved);
     }
-
-    final runtimeDir = _runtimeDir(profile);
-    Directory(runtimeDir).createSync(recursive: true);
-
-    final logFile = File(_runtimeLogFile(profile, instance));
-    logFile
-      ..createSync(recursive: true)
-      ..writeAsStringSync('');
-    final settings = _runtimeSettingsLoad(profile);
-    final launchWorkingDir = _runtimeLaunchWorkingDir(profile, instance);
-    String? log4jPath;
-    if (settings.consoleLogFormat == 'minimal') {
-      log4jPath = _ensureMinimalLog4jConfig(profile, instance);
-    }
-    final javaCommandParts = <String>[
-      'java',
-      ..._javaArgsForLaunch(
-        launch,
-        settings,
-        workingDirectory: launchWorkingDir,
-        log4jConfigPath: log4jPath,
-      ),
-    ];
-
-    if (Platform.isWindows) {
-      await _runtimeStartWindowsHost(profile, instance, logFile, io);
-      return;
-    }
-
-    final javaCommand = javaCommandParts.map(_shellQuote).join(' ');
-    final serverPidFile = _runtimeServerPidFile(profile, instance);
-
-    // DECAWM-off prevents tmux's pane from wrapping long server lines. The
-    // log file is unaffected since this only touches the terminal renderer.
-    final String wrapPrefix = settings.noLineWrap
-        ? r'printf '
-              "'\\033[?7l'"
-              ' && '
-        : '';
-    final runScript =
-        'cd ${_shellQuote(launchWorkingDir)} && '
-        'printf "%s\\n" "\$\$" > ${_shellQuote(serverPidFile)} && '
-        '$wrapPrefix'
-        'exec $javaCommand';
-    final tmuxSession = _tmuxSessionName(profile, instance);
-
-    // Clear stale runtime markers when switching to tmux-backed runtime.
-    File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
-    File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
-
-    if (!Platform.isWindows && await _tmuxSessionExists(tmuxSession)) {
-      await _runProcess('tmux', <String>['kill-session', '-t', tmuxSession]);
-    }
-
-    final startResult = await _runProcess('tmux', <String>[
-      'new-session',
-      '-d',
-      '-s',
-      tmuxSession,
-      ..._tmuxDetachedSizeArgs(),
-      'sh -lc ${_shellQuote(runScript)}',
-    ]);
-    if (startResult.exitCode != 0) {
-      throw _NativeCommandException(
-        'Failed to start runtime for $instance: ${startResult.stderr}',
-        1,
-      );
-    }
-    await _tmuxEnablePaneLogging(tmuxSession, logFile.path);
-
-    await Future<void>.delayed(const Duration(milliseconds: 350));
-    final running = await _tmuxSessionExists(tmuxSession);
-    if (!running) {
-      throw _NativeCommandException(
-        'Failed to start runtime for $instance. Check log: ${logFile.path}',
-        1,
-      );
-    }
-
-    await _tmuxConfigureConsoleSession(tmuxSession);
-    await _tmuxSetRuntimeUiLabel(tmuxSession, 'jvm-starting');
-
-    // The relaunch happened; clear any pending-restart marker so state
-    // reporting flips from "restarting" to "starting".
-    File(_runtimeRestartPendingFile(profile, instance)).deleteSyncSafe();
-
-    io.write('[OK] Runtime started: $instance');
-    io.write('[INFO] tmux session: $tmuxSession');
-    final serverPid = await _awaitRuntimeServerPid(profile, instance);
-    if (serverPid != null) {
-      await _tmuxSetRuntimeUiLabel(tmuxSession, 'jvm-$serverPid');
-      io.write('[INFO] server pid: $serverPid');
-    }
-    io.write('[INFO] Log: ${logFile.path}');
   }
 
   Future<void> _runtimeStartWindowsHost(
@@ -7337,36 +7371,47 @@ class NativeCommandService {
     String instance,
     _NativeIoBuffer io,
   ) async {
-    for (final String sourceKind in _instanceDropinSources(profile, instance)) {
+    await boundedMap<String, void>(_instanceDropinSources(profile, instance), (
+      String sourceKind,
+    ) async {
       final ConsumerProfile sourceProfile = _dropinSourceProfile(
         profile,
         sourceKind,
       );
       final bool mods = sourceKind == 'mods';
-      final String session = _pluginsWatchSessionName(
+      final String key = '${context.rootDir}:${sourceProfile.name}:$sourceKind';
+      final Future<void>? pending = _startingWatchers[key];
+      if (pending != null) return pending;
+      final Future<void> start = _runtimeEnsureSourceWatcher(
         sourceProfile,
-        mods: mods,
+        mods,
+        io,
       );
-      bool running = false;
-      if (Platform.isWindows) {
-        final int? watcherPid = _readPid(
-          _pluginsWatchPidFile(sourceProfile, mods: mods),
-        );
-        running =
-            watcherPid != null &&
-            await _windowsWatcherOwned(sourceProfile, mods);
-      } else {
-        running = await _tmuxSessionExists(session);
-      }
-      if (running) {
-        continue;
-      }
-
+      _startingWatchers[key] = start;
       try {
-        await _pluginsWatchStart(sourceProfile, io, mods: mods);
-      } catch (e) {
-        io.error('[WARN] Could not auto-start $sourceKind watcher: $e');
+        await start;
+      } finally {
+        _startingWatchers.remove(key);
       }
+    });
+  }
+
+  Future<void> _runtimeEnsureSourceWatcher(
+    ConsumerProfile profile,
+    bool mods,
+    _NativeIoBuffer io,
+  ) async {
+    try {
+      final bool running = Platform.isWindows
+          ? await _windowsWatcherOwned(profile, mods)
+          : await _tmuxSessionExists(
+              _pluginsWatchSessionName(profile, mods: mods),
+            );
+      if (!running) await _pluginsWatchStart(profile, io, mods: mods);
+    } catch (error) {
+      io.error(
+        '[WARN] Could not auto-start ${mods ? 'mods' : 'plugins'} watcher: $error',
+      );
     }
   }
 
@@ -8173,11 +8218,21 @@ class NativeCommandService {
       }
       targets.add((profile, instance));
     } else {
-      for (final candidate in ConsumerProfile.values) {
-        for (final name in _instanceNames(candidate)) {
-          if (await _runtimeRunning(candidate, name)) {
-            targets.add((candidate, name));
-          }
+      final List<(ConsumerProfile, String)> candidates =
+          <(ConsumerProfile, String)>[
+            for (final ConsumerProfile candidate in ConsumerProfile.values)
+              for (final String name in _instanceNames(candidate))
+                (candidate, name),
+          ];
+      final List<bool> running =
+          await boundedMap<(ConsumerProfile, String), bool>(
+            candidates,
+            ((ConsumerProfile, String) target) =>
+                _runtimeRunning(target.$1, target.$2),
+          );
+      for (int index = 0; index < candidates.length; index++) {
+        if (running[index]) {
+          targets.add(candidates[index]);
         }
       }
     }
@@ -8374,13 +8429,15 @@ class NativeCommandService {
   }
 
   Future<List<String>> _runtimeListRunning(ConsumerProfile profile) async {
-    final running = <String>[];
-    for (final name in _instanceNames(profile)) {
-      if (await _runtimeRunning(profile, name)) {
-        running.add(name);
-      }
-    }
-    return running;
+    final List<String> names = _instanceNames(profile);
+    final List<bool> running = await boundedMap<String, bool>(
+      names,
+      (String name) => _runtimeRunning(profile, name),
+    );
+    return <String>[
+      for (int index = 0; index < names.length; index++)
+        if (running[index]) names[index],
+    ];
   }
 
   Future<bool> _runtimeRunning(ConsumerProfile profile, String instance) async {
@@ -9121,7 +9178,8 @@ class NativeCommandService {
   ) async {
     var port = 25565;
     while (port <= 65535) {
-      if (!await _runtimePortInUse(profile, instance, port)) {
+      if (!_reservedRuntimePorts.contains(port) &&
+          !await _runtimePortInUse(profile, instance, port)) {
         final current = _instanceGetServerPort(profile, instance);
         if (current != port) {
           _instanceSetServerPort(profile, instance, port);
@@ -9145,8 +9203,12 @@ class NativeCommandService {
         if (candidateProfile == profile && other == instance) {
           continue;
         }
-        if (await _runtimeRunning(candidateProfile, other) &&
-            _instanceGetServerPort(candidateProfile, other) == port) {
+        final int? otherRcon = int.tryParse(
+          _instanceGetProperty(candidateProfile, other, 'rcon.port') ?? '',
+        );
+        if ((_instanceGetServerPort(candidateProfile, other) == port ||
+                otherRcon == port) &&
+            await _runtimeRunning(candidateProfile, other)) {
           return true;
         }
       }
@@ -9159,13 +9221,13 @@ class NativeCommandService {
     return false;
   }
 
-  Future<void> _runtimePrepareRconPort(
+  Future<int?> _runtimePrepareRconPort(
     ConsumerProfile profile,
     String instance,
     _NativeIoBuffer io,
   ) async {
     if (_instanceGetProperty(profile, instance, 'enable-rcon') != 'true') {
-      return;
+      return null;
     }
     final int serverPort = _instanceGetServerPort(profile, instance);
     final int configured =
@@ -9175,7 +9237,10 @@ class NativeCommandService {
         (serverPort + 10000 <= 65535 ? serverPort + 10000 : serverPort - 10000);
 
     Future<bool> available(int candidate) async {
-      if (candidate < 1 || candidate > 65535 || candidate == serverPort) {
+      if (candidate < 1 ||
+          candidate > 65535 ||
+          candidate == serverPort ||
+          _reservedRuntimePorts.contains(candidate)) {
         return false;
       }
       for (final ConsumerProfile candidateProfile in ConsumerProfile.values) {
@@ -9200,13 +9265,14 @@ class NativeCommandService {
     int candidate = configured.clamp(1, 65535);
     for (var attempt = 0; attempt < 65535; attempt++) {
       if (await available(candidate)) {
-        if (candidate != configured) {
+        if (_instanceGetProperty(profile, instance, 'rcon.port') !=
+            '$candidate') {
           _instanceSetProperties(profile, instance, <String, String>{
             'rcon.port': '$candidate',
           });
           io.write('[INFO] Auto-assigned RCON port for $instance: $candidate');
         }
-        return;
+        return candidate;
       }
       candidate = candidate == 65535 ? 1024 : candidate + 1;
     }
@@ -10601,7 +10667,7 @@ class NativeCommandService {
       await _runtimeStop(profile, name, io ?? _NativeIoBuffer(stream: false));
     }
 
-    _deletePathEntity(instancePath, recursive: true);
+    await deletePath(instancePath);
     File(_runtimeServerPidFile(profile, name)).deleteSyncSafe();
     File(_runtimeConsolePidFile(profile, name)).deleteSyncSafe();
     File(_runtimeHostPidFile(profile, name)).deleteSyncSafe();
@@ -10646,16 +10712,16 @@ class NativeCommandService {
 
     final active = _currentInstance(profile);
     var activeDeleted = false;
-    for (final instance in names) {
+    await boundedMap<String, void>(names, (String instance) async {
       if (_instanceLocked(profile, instance)) {
         stdout.writeln('[SKIP] $instance is locked; left untouched');
-        continue;
+        return;
       }
       await _instanceDelete(profile, instance, io: io);
       if (instance == active) {
         activeDeleted = true;
       }
-    }
+    });
 
     // Only clear the active markers if the instance they point at was actually
     // removed; a surviving locked instance keeps its active status.
@@ -11433,12 +11499,13 @@ class NativeCommandService {
   }
 
   Future<ProcessResult> _runProcess(String executable, List<String> args) {
-    return Process.run(
-      executable,
-      args,
-      workingDirectory: context.rootDir,
-      runInShell: true,
-    );
+    return _processExecutor?.call(executable, args) ??
+        Process.run(
+          executable,
+          args,
+          workingDirectory: context.rootDir,
+          runInShell: true,
+        );
   }
 
   Future<void> _runAndRequireSuccess(

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
+import '../../utils/async_work_pool.dart';
 import 'addon_catalog.dart';
 import 'addon_resolver.dart';
 
@@ -186,68 +187,103 @@ final class AddonInstaller {
       stage = Directory(
         instancePath,
       ).createTempSync('.multiplexor-addons-stage-');
-      final Map<String, InstalledAddon> next = <String, InstalledAddon>{};
-      final Map<String, File> downloads = <String, File>{};
-      for (final String id in selected) {
+      final List<String> refreshIds = selected
+          .where(refresh.contains)
+          .toList(growable: false);
+      for (final String id in refreshIds) {
         final AddonDefinition definition = catalog.entries[id]!;
-        final InstalledAddon? old = previous.entries[id];
-        if (!refresh.contains(id) &&
-            old != null &&
-            old.json['minecraft'] == minecraft &&
-            old.json['serverType'] == serverType &&
-            File(p.join(instancePath, old.file)).existsSync()) {
-          next[id] = old;
-          continue;
-        }
         report(
           '[INFO] Resolving ${definition.name} for $serverType Minecraft $minecraft',
         );
-        final ResolvedAddon resolved = await resolver.resolve(
-          definition,
-          serverType,
-          minecraft,
-        );
-        for (final String project in resolved.requiredProjects) {
-          final bool included = next.values.any(
-            (InstalledAddon dependency) =>
-                dependency.json['projectId'] == project,
+      }
+      final List<ResolvedAddon> resolutions =
+          await boundedMap<String, ResolvedAddon>(
+            refreshIds,
+            (String id) =>
+                resolver.resolve(catalog.entries[id]!, serverType, minecraft),
           );
-          if (!included) {
+      final Map<String, ResolvedAddon> resolvedById = <String, ResolvedAddon>{
+        for (int index = 0; index < refreshIds.length; index++)
+          refreshIds[index]: resolutions[index],
+      };
+
+      // Resolve independently, then validate in dependency order before any
+      // downloads. Completion order cannot change which dependencies qualify.
+      final Map<String, Set<String?>> projectVersions =
+          <String, Set<String?>>{};
+      for (final String id in selected) {
+        final ResolvedAddon? resolved = resolvedById[id];
+        for (final String project
+            in resolved?.requiredProjects ?? const <String>[]) {
+          final Set<String?>? versions = projectVersions[project];
+          final String name = catalog.entries[id]!.name;
+          if (versions == null) {
             throw StateError(
-              '${definition.name} requires Modrinth project $project. Add it to the catalog and dependencies.',
+              '$name requires Modrinth project $project. Add it to the catalog and dependencies.',
             );
           }
-          final String? requiredVersion = resolved.requiredVersions[project];
-          if (requiredVersion != null &&
-              !next.values.any(
-                (InstalledAddon dependency) =>
-                    dependency.json['projectId'] == project &&
-                    dependency.json['versionId'] == requiredVersion,
-              )) {
+          final String? requiredVersion = resolved!.requiredVersions[project];
+          if (requiredVersion != null && !versions.contains(requiredVersion)) {
             throw StateError(
-              '${definition.name} requires Modrinth project $project version $requiredVersion. Set that dependency source\'s versionId to $requiredVersion.',
+              '$name requires Modrinth project $project version $requiredVersion. Set that dependency source\'s versionId to $requiredVersion.',
             );
           }
         }
-        final File download = File(p.join(stage.path, '$id.jar'));
-        await resolver.download(resolved, download);
-        next[id] = InstalledAddon(<String, Object?>{
-          'id': id,
-          'file': definition.file,
-          'sha256': _hash(download),
-          'version': resolved.version,
-          'source': resolved.location,
-          if (resolved.projectId != null) 'projectId': resolved.projectId,
-          if (resolved.versionId != null) 'versionId': resolved.versionId,
-          'minecraft': minecraft,
-          'serverType': serverType,
-          'filePrefixes': definition.filePrefixes,
-        });
-        downloads[id] = download;
-        report('[INFO] Ready: ${definition.name} ${resolved.version}');
+        final String? projectId = resolved == null
+            ? previous.entries[id]!.json['projectId'] as String?
+            : resolved.projectId;
+        final String? versionId = resolved == null
+            ? previous.entries[id]!.json['versionId'] as String?
+            : resolved.versionId;
+        if (projectId != null) {
+          projectVersions
+              .putIfAbsent(projectId, () => <String?>{})
+              .add(versionId);
+        }
+      }
+
+      final Directory transaction = stage;
+      final List<_PreparedAddon> prepared =
+          await boundedMap<String, _PreparedAddon>(refreshIds, (
+            String id,
+          ) async {
+            final AddonDefinition definition = catalog.entries[id]!;
+            final ResolvedAddon resolved = resolvedById[id]!;
+            final File download = File(p.join(transaction.path, '$id.jar'));
+            await resolver.download(resolved, download);
+            final InstalledAddon entry = InstalledAddon(<String, Object?>{
+              'id': id,
+              'file': definition.file,
+              'sha256': (await sha256.bind(download.openRead()).first)
+                  .toString(),
+              'version': resolved.version,
+              'source': resolved.location,
+              if (resolved.projectId != null) 'projectId': resolved.projectId,
+              if (resolved.versionId != null) 'versionId': resolved.versionId,
+              'minecraft': minecraft,
+              'serverType': serverType,
+              'filePrefixes': definition.filePrefixes,
+            });
+            return _PreparedAddon(entry, download);
+          });
+      final Map<String, InstalledAddon> preparedEntries =
+          <String, InstalledAddon>{
+            for (final _PreparedAddon item in prepared)
+              item.entry.id: item.entry,
+          };
+      final Map<String, InstalledAddon> next = <String, InstalledAddon>{
+        for (final String id in selected)
+          id: preparedEntries[id] ?? previous.entries[id]!,
+      };
+      final Map<String, File> downloads = <String, File>{
+        for (final _PreparedAddon item in prepared) item.entry.id: item.file,
+      };
+      for (final _PreparedAddon item in prepared) {
+        report(
+          '[INFO] Ready: ${catalog.entries[item.entry.id]!.name} ${item.entry.json['version']}',
+        );
       }
       await beforeCommit();
-      final Directory transaction = stage;
       commit(() {
         _regularDirectory(instancePath);
         _checkExisting(previous);
@@ -381,6 +417,13 @@ final class AddonInstaller {
       }
     }
   }
+}
+
+final class _PreparedAddon {
+  const _PreparedAddon(this.entry, this.file);
+
+  final InstalledAddon entry;
+  final File file;
 }
 
 String _hash(File file) => sha256.convert(file.readAsBytesSync()).toString();
