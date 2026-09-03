@@ -49,10 +49,19 @@ void main() {
     });
 
     test('maps the uppercase quick actions to their instance commands', () {
-      expect(monitorActionForEvent(typed('R')), MonitorAction.restart);
       expect(monitorActionForEvent(typed('S')), MonitorAction.stop);
       expect(monitorActionForEvent(typed('X')), MonitorAction.kill);
       expect(monitorActionForEvent(typed('O')), MonitorAction.console);
+    });
+
+    test('Shift+R repaints while plain r still cycles the chart range', () {
+      expect(monitorActionForEvent(typed('R')), MonitorAction.repaint);
+      expect(monitorActionForEvent(typed('r')), MonitorAction.cycleRange);
+    });
+
+    test('opens all consoles with either case of G', () {
+      expect(monitorActionForEvent(typed('g')), MonitorAction.consolesGrid);
+      expect(monitorActionForEvent(typed('G')), MonitorAction.consolesGrid);
     });
 
     test('maps the lowercase navigation keys to their screen commands', () {
@@ -79,7 +88,6 @@ void main() {
     test('does not confuse the two cases of a bound letter', () {
       expect(monitorActionForEvent(typed('r')), MonitorAction.cycleRange);
       expect(monitorActionForEvent(typed('D')), MonitorAction.none);
-      expect(monitorActionForEvent(typed('G')), MonitorAction.none);
       expect(monitorActionForEvent(typed('N')), MonitorAction.none);
       expect(monitorActionForEvent(typed('B')), MonitorAction.none);
       expect(monitorActionForEvent(typed('C')), MonitorAction.none);

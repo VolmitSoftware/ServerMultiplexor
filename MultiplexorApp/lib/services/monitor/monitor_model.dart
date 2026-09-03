@@ -47,7 +47,7 @@ const String _hintSeparator = ' · ';
 /// Local footer key hints in display order — the row exactly as it renders on
 /// a terminal wide enough for all of it.
 const String _localFooterHints =
-    '[tab] local/remote · [enter] open · d detail · R restart · S stop · X kill · O console · '
+    '[tab] local/remote · [enter] open · d detail · Shift+R repaint · S stop · X kill · O console · '
     'g consoles · n new · b build · w workspace · c consumer · r range · '
     'q quit';
 
@@ -55,25 +55,26 @@ const String _localFooterHints =
 /// menu and connection card. The workspace shortcut remains visible because
 /// that card also owns files and create-many.
 const String _remoteFooterHints =
-    '[tab] local/remote · [enter] open · d detail · R restart · S stop · X kill · '
+    '[tab] local/remote · [enter] open · d detail · Shift+R repaint · S stop · X kill · '
     'O live console · n new · b bulk · w workspace · c connection · r range · '
     'q quit';
 
 /// The order hints are given up in when the terminal is too narrow for all
 /// of them (comma-separated). A hint always leaves whole — a footer clipped
-/// mid-word hides a binding without admitting to it — and the three absent
-/// here (`[enter] open`, `d detail`, `q quit`) are never dropped at all.
+/// mid-word hides a binding without admitting to it — and the four absent
+/// here (`[enter] open`, `d detail`, `Shift+R repaint`, `q quit`) are never
+/// dropped at all.
 ///
 /// `b build` goes first even though `w workspace` was added after it: the
 /// workspace card `w` raises carries Build & tuning itself, so giving up the
 /// shortcut costs a keystroke, while giving up `w` would leave the card
 /// reachable by mouse alone.
 const String _localFooterDropOrder =
-    'b build,c consumer,n new,g consoles,O console,X kill,S stop,R restart,'
+    'b build,c consumer,n new,g consoles,O console,X kill,S stop,'
     'r range,w workspace';
 
 const String _remoteFooterDropOrder =
-    'n new,c connection,X kill,S stop,R restart,O live console,r range';
+    'n new,c connection,X kill,S stop,O live console,r range';
 
 /// The selection action bar's chips. Which set is drawn follows the
 /// selection's own state: you cannot stop what is not running, and starting

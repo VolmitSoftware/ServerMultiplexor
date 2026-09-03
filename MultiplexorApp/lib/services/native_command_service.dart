@@ -14,12 +14,14 @@ import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
 import '../utils/table.dart';
 import '../utils/terminal/ansi.dart';
+import '../utils/terminal/term_io.dart';
 import 'consumer_service.dart';
 import 'dropin_sync_policy.dart';
 import 'gameplay_test_service.dart';
 import 'manager_context.dart';
 import 'minimal_log4j_config.dart';
 import 'monitor/metric_sample.dart';
+import 'native_console_terminal.dart';
 import 'rcon_client.dart';
 import 'runtime_state.dart';
 import 'server_ping.dart';
@@ -7364,14 +7366,7 @@ class NativeCommandService {
         io.write('[INFO] Runtime is not running. Starting $instance...');
         await _runtimeStart(profile, instance, io);
       }
-      io.write(
-        '[INFO] Windows runs the server in the background; interactive tmux '
-        'attachment is unavailable.',
-      );
-      io.write(
-        '[INFO] Server log: ${p.join(_instanceDir(profile, instance), 'logs', 'latest.log')}',
-      );
-      io.write('[INFO] Multiplexor log: ${_runtimeLogFile(profile, instance)}');
+      await _runtimeNativeConsoles(profile, <String>[instance], io);
       return;
     }
 
@@ -7413,14 +7408,11 @@ class NativeCommandService {
         return;
       }
       running.sort();
-      for (final String instance in running) {
-        io.write(
-          '$instance\t${p.join(_instanceDir(profile, instance), 'logs', 'latest.log')}',
-        );
-      }
-      io.write(
-        '[INFO] Windows background runtimes do not support a combined '
-        'interactive console.',
+      await _runtimeNativeConsoles(
+        profile,
+        running,
+        io,
+        lateral: layout == 'lateral',
       );
       return;
     }
@@ -7604,6 +7596,35 @@ class NativeCommandService {
     if (exit != 0) {
       io.error('[ERROR] Failed to attach all consoles view (tmux exit=$exit).');
     }
+  }
+
+  Future<void> _runtimeNativeConsoles(
+    ConsumerProfile profile,
+    List<String> instances,
+    _NativeIoBuffer io, {
+    bool lateral = false,
+  }) async {
+    final List<NativeConsoleTarget> targets = <NativeConsoleTarget>[
+      for (final String instance in instances)
+        NativeConsoleTarget(
+          name: instance,
+          port: _instanceGetServerPort(profile, instance),
+          logPath: _runtimeLogFile(profile, instance),
+        ),
+    ];
+    if (!io.stream || !TermIo.instance.hasTerminal) {
+      for (final NativeConsoleTarget target in targets) {
+        io.write('${target.name}\t${target.logPath}');
+      }
+      io.write('[INFO] Open an interactive terminal to view live consoles.');
+      return;
+    }
+    await NativeConsoleTerminal(
+      targets: targets,
+      lateral: lateral,
+      sendCommand: (NativeConsoleTarget target, String command) =>
+          _instanceRconCommand(profile, target.name, command),
+    ).run();
   }
 
   Future<void> _runtimeAttachTmux(
@@ -10999,6 +11020,12 @@ class NativeCommandService {
     ConsumerProfile profile,
     String instance,
     String command,
+  ) async => await _instanceRconCommand(profile, instance, command) != null;
+
+  Future<String?> _instanceRconCommand(
+    ConsumerProfile profile,
+    String instance,
+    String command,
   ) async {
     final String? portRaw = _instanceGetProperty(
       profile,
@@ -11020,20 +11047,19 @@ class NativeCommandService {
         port == null ||
         password == null ||
         password.isEmpty) {
-      return false;
+      return null;
     }
     final String configuredHost = _instanceGetServerIp(profile, instance);
     final String host = configuredHost == '0.0.0.0' || configuredHost == '::'
         ? '127.0.0.1'
         : configuredHost;
-    final String? response = await _rconPool.command(
+    return _rconPool.command(
       host,
       port,
       password,
       command,
       timeout: const Duration(seconds: 2),
     );
-    return response != null;
   }
 
   /// Queries live TPS over RCON. Null when RCON is unreachable, the server is

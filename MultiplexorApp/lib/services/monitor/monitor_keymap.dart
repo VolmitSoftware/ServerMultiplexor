@@ -29,6 +29,7 @@ enum MonitorAction {
   switchConsumer,
   cycleRange,
   refresh,
+  repaint,
   quit,
   back,
   none,
@@ -76,9 +77,10 @@ Duration nextRange(Duration current) {
 /// to nothing.
 ///
 /// Character bindings are case-sensitive and deliberately so: the uppercase
-/// keys (`R`, `S`, `X`, `O`) are the destructive-ish per-instance quick
+/// keys (`S`, `X`, `O`) are the per-instance quick
 /// actions carried over from the legacy dashboard, and their lowercase
-/// counterparts must never trigger them by a slipped shift key.
+/// counterparts must never trigger them by a slipped shift key. Shift+R
+/// repaints the current screen; plain `r` still cycles the chart range.
 MonitorAction monitorActionForEvent(TermEvent event) {
   switch (event.kind) {
     case TermEventKind.arrowUp:
@@ -116,11 +118,11 @@ MonitorAction monitorActionForEvent(TermEvent event) {
 
 MonitorAction _charAction(String char) => switch (char) {
   'd' => MonitorAction.detail,
-  'R' => MonitorAction.restart,
+  'R' => MonitorAction.repaint,
   'S' => MonitorAction.stop,
   'X' => MonitorAction.kill,
   'O' => MonitorAction.console,
-  'g' => MonitorAction.consolesGrid,
+  'g' || 'G' => MonitorAction.consolesGrid,
   'n' => MonitorAction.newInstance,
   'b' => MonitorAction.buildMenu,
   'w' => MonitorAction.workspaceCard,

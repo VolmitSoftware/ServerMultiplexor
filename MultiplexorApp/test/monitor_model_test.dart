@@ -865,7 +865,7 @@ void main() {
         '[tab] local/remote',
         '[enter] open',
         'd detail',
-        'R restart',
+        'Shift+R repaint',
         'S stop',
         'X kill',
         'O console',
@@ -882,6 +882,7 @@ void main() {
         final String footer = rows.last.trimRight();
         expect(footer, contains('[enter] open'), reason: 'at $columns');
         expect(footer, contains('d detail'), reason: 'at $columns');
+        expect(footer, contains('Shift+R repaint'), reason: 'at $columns');
         expect(footer, endsWith('q quit'), reason: 'at $columns');
         for (final String hint in footer.split(' · ')) {
           expect(allHints, contains(hint), reason: 'partial hint at $columns');
@@ -913,7 +914,7 @@ void main() {
       final String footer = rows.last.trimRight();
 
       expect(footer, contains('[tab] local/remote'));
-      expect(footer, contains('R restart'));
+      expect(footer, contains('Shift+R repaint'));
       expect(footer, contains('S stop'));
       expect(footer, contains('X kill'));
       expect(footer, contains('O live console'));

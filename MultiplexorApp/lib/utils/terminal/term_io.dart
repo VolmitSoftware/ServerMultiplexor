@@ -226,7 +226,8 @@ class TermIo {
         return null;
       }
       if (byte < 0) {
-        _parser.timeout();
+        final TermEvent? resolved = _parser.timeout();
+        if (resolved != null) _queue.add(resolved);
         continue;
       }
       for (final TermEvent event in _parser.add(byte)) {

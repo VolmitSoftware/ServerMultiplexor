@@ -29,7 +29,7 @@ List<MenuEntry<String>> menuEntries() => <MenuEntry<String>>[
 
 const String menuTitle = 'Multiplexor';
 const String menuHint =
-    '↑↓ move · enter open · R restart · S stop · X kill · O console · esc back';
+    '↑↓ move · enter open · Shift+R repaint · S stop · X kill · O console · esc back';
 const String menuFooter =
     'builds  paper 4d · purpur 4d · folia 4d · canvas 4d · leaf 4d · '
     'spigot 28d  ·  auto-refresh after 24h';

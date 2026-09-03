@@ -353,15 +353,6 @@ bool remoteCreationCatalogAccessAvailable(
   PterodactylVerification verification,
 ) => verification.capabilities.contains(PterodactylCapability.configure);
 
-Future<bool> remoteCreateStepOrBack(Future<void> Function() operation) async {
-  try {
-    await operation();
-    return true;
-  } on PromptBackNavigation {
-    return false;
-  }
-}
-
 final class RemoteCreateResultRow {
   const RemoteCreateResultRow({
     required this.position,
@@ -674,14 +665,6 @@ class InteractiveWizard {
     stdout.writeln('  ./start.sh server create demo --type purpur');
   }
 
-  Future<void> _runStep(Future<void> Function() step) async {
-    try {
-      await step();
-    } on PromptBackNavigation {
-      // Escape returns to the dashboard.
-    }
-  }
-
   // ─── Monitor ─────────────────────────────────────────────────────────
 
   /// One monitor session, against whichever consumer is active when it
@@ -903,7 +886,11 @@ class InteractiveWizard {
       rethrow;
     } catch (error) {
       Ui.error('$error');
-      await Ui.pause();
+      try {
+        await Ui.pause();
+      } on PromptBackNavigation {
+        // The error acknowledgement has the same dashboard exit as the form.
+      }
     }
   }
 
@@ -927,10 +914,9 @@ class InteractiveWizard {
     }
   }
 
-  /// Per-instance quick actions, on the same commands the legacy dashboard's
-  /// R/S/X/O keys ran. The consoles grid is workspace-level and ignores the
-  /// instance it is handed (which may be empty). Every other action the
-  /// monitor can report is handled by the screen itself.
+  /// Quick actions use the same commands as the server action buttons.
+  /// The consoles grid ignores the selected instance, which may be empty.
+  /// Every other action is handled by the monitor itself.
   Future<void> _monitorQuickAction(
     String instance,
     MonitorAction action,
@@ -949,7 +935,7 @@ class InteractiveWizard {
       case MonitorAction.console:
         await _quickConsole(instance);
       case MonitorAction.consolesGrid:
-        await _shellRun(<String>['runtime', 'consoles']);
+        await _quickConsoles();
       case MonitorAction.up:
       case MonitorAction.down:
       case MonitorAction.open:
@@ -961,6 +947,7 @@ class InteractiveWizard {
       case MonitorAction.switchConsumer:
       case MonitorAction.cycleRange:
       case MonitorAction.refresh:
+      case MonitorAction.repaint:
       case MonitorAction.quit:
       case MonitorAction.back:
       case MonitorAction.none:
@@ -1133,7 +1120,7 @@ class InteractiveWizard {
             if (action == MonitorAction.console) {
               Ui.note(
                 'Remote console is unavailable while $identifier is offline. '
-                'Press R to start it.',
+                'Use Start on its server card.',
               );
               await Ui.pause();
             }
@@ -1168,6 +1155,7 @@ class InteractiveWizard {
       case MonitorAction.switchConsumer:
       case MonitorAction.cycleRange:
       case MonitorAction.refresh:
+      case MonitorAction.repaint:
       case MonitorAction.quit:
       case MonitorAction.back:
       case MonitorAction.none:
@@ -1363,60 +1351,56 @@ class InteractiveWizard {
       final RemoteTransferDestination destination = destinations[selected];
       if (destination == RemoteTransferDestination.done) return;
 
-      try {
-        switch (destination) {
-          case RemoteTransferDestination.linked:
-            if (!await _prepareDirectTransferFiles(
-              profileId: link!.profileId,
-              serverIdentifier: link.serverIdentifier,
-            )) {
-              return;
-            }
-            final PterodactylTransferMode mode =
-                await _chooseRemoteTransferMode();
-            await _pushLocalToExisting(
-              localName: localName,
-              mode: mode,
-              relink: false,
-            );
+      switch (destination) {
+        case RemoteTransferDestination.linked:
+          if (!await _prepareDirectTransferFiles(
+            profileId: link!.profileId,
+            serverIdentifier: link.serverIdentifier,
+          )) {
             return;
-          case RemoteTransferDestination.existing:
-            final PterodactylProfile profile = await _chooseTransferProfile();
-            final PterodactylClientServer? server = await _chooseTransferServer(
-              profile,
-            );
-            if (server == null) return;
-            if (!await _prepareDirectTransferFiles(
-              profileId: profile.id,
-              serverIdentifier: server.identifier,
-            )) {
-              return;
-            }
-            final PterodactylTransferMode mode =
-                await _chooseRemoteTransferMode();
-            final bool relink = await Ui.confirm(
-              'Use ${_safeRemoteText(server.name)} as the linked target for future pushes?',
-              defaultValue: remoteTransferRelinkDefault(
-                hasExistingLink: link != null,
-              ),
-            );
-            await _pushLocalToExisting(
-              localName: localName,
-              mode: mode,
-              profile: profile,
-              server: server,
-              relink: relink,
-            );
+          }
+          final PterodactylTransferMode mode =
+              await _chooseRemoteTransferMode();
+          await _pushLocalToExisting(
+            localName: localName,
+            mode: mode,
+            relink: false,
+          );
+          return;
+        case RemoteTransferDestination.existing:
+          final PterodactylProfile profile = await _chooseTransferProfile();
+          final PterodactylClientServer? server = await _chooseTransferServer(
+            profile,
+          );
+          if (server == null) return;
+          if (!await _prepareDirectTransferFiles(
+            profileId: profile.id,
+            serverIdentifier: server.identifier,
+          )) {
             return;
-          case RemoteTransferDestination.createNew:
-            final PterodactylProfile profile = await _chooseTransferProfile();
-            await _createRemoteAndPush(localName, profile, existingLink: link);
-            return;
-          case RemoteTransferDestination.done:
-            return;
-        }
-      } on PromptBackNavigation {
-        // Escape unwinds the target form back to this destination card.
+          }
+          final PterodactylTransferMode mode =
+              await _chooseRemoteTransferMode();
+          final bool relink = await Ui.confirm(
+            'Use ${_safeRemoteText(server.name)} as the linked target for future pushes?',
+            defaultValue: remoteTransferRelinkDefault(
+              hasExistingLink: link != null,
+            ),
+          );
+          await _pushLocalToExisting(
+            localName: localName,
+            mode: mode,
+            profile: profile,
+            server: server,
+            relink: relink,
+          );
+          return;
+        case RemoteTransferDestination.createNew:
+          final PterodactylProfile profile = await _chooseTransferProfile();
+          await _createRemoteAndPush(localName, profile, existingLink: link);
+          return;
+        case RemoteTransferDestination.done:
+          return;
       }
     }
   }
@@ -1689,6 +1673,10 @@ class InteractiveWizard {
 
       try {
         await _prepareTransferAccount(profile.id);
+      } on PromptBackNavigation {
+        rethrow;
+      } on PromptInputUnavailable {
+        rethrow;
       } on Object catch (error) {
         Ui.warn(
           'Remote file account preparation failed: '
@@ -2120,6 +2108,10 @@ class InteractiveWizard {
         ),
       );
       return true;
+    } on PromptBackNavigation {
+      rethrow;
+    } on PromptInputUnavailable {
+      rethrow;
     } on Object catch (error) {
       Ui.warn(
         'Direct Remote file access is not ready: '
@@ -2870,15 +2862,10 @@ class InteractiveWizard {
       ]);
       final RemoteBulkAction action = actions[selected];
       if (action == RemoteBulkAction.done) return;
-      try {
-        if (action == RemoteBulkAction.createMany) {
-          await _remoteCreateMany();
-        } else {
-          await _runRemoteBulkAction(action, selectedIdentifier);
-        }
-      } on PromptBackNavigation {
-        // Escape inside target selection or confirmation returns to the bulk
-        // action list. Escape on that outer list returns to the dashboard.
+      if (action == RemoteBulkAction.createMany) {
+        await _remoteCreateMany();
+      } else {
+        await _runRemoteBulkAction(action, selectedIdentifier);
       }
     }
   }
@@ -3049,12 +3036,10 @@ class InteractiveWizard {
         'Continue with ${selectedIds.length} selected',
         'Back to bulk actions',
       ];
-      final int choice;
-      try {
-        choice = await Ui.choose('Select ${action.name} targets', options);
-      } on PromptBackNavigation {
-        return null;
-      }
+      final int choice = await Ui.choose(
+        'Select ${action.name} targets',
+        options,
+      );
       if (choice < presets.length) {
         selectedIds
           ..clear()
@@ -3173,32 +3158,21 @@ class InteractiveWizard {
       hasPanelEggs: usableEggs.isNotEmpty,
       hasTemplates: catalog.templates.isNotEmpty,
     );
+    RemoteCreateSource source = sources.first;
     if (usableEggs.isNotEmpty && catalog.templates.isNotEmpty) {
-      while (true) {
-        final int sourceIndex = await Ui.choose(
-          many ? 'Create many servers from' : 'Create server from',
-          <String>[
-            'Panel egg · works without an existing server',
-            'Clone an existing server configuration',
-            'Back',
-          ],
-        );
-        final RemoteCreateSource source = sources[sourceIndex];
-        if (source == RemoteCreateSource.done) return;
-        final bool completed = await remoteCreateStepOrBack(
-          () => _runRemoteCreateSource(
-            source: source,
-            profile: profile,
-            catalog: catalog,
-            usableEggs: usableEggs,
-            many: many,
-          ),
-        );
-        if (completed) return;
-      }
+      final int sourceIndex = await Ui.choose(
+        many ? 'Create many servers from' : 'Create server from',
+        <String>[
+          'Panel egg · works without an existing server',
+          'Clone an existing server configuration',
+          'Back',
+        ],
+      );
+      source = sources[sourceIndex];
+      if (source == RemoteCreateSource.done) return;
     }
     await _runRemoteCreateSource(
-      source: sources.first,
+      source: source,
       profile: profile,
       catalog: catalog,
       usableEggs: usableEggs,
@@ -3903,7 +3877,6 @@ class InteractiveWizard {
       pterodactyl.selectProfile(profile.id);
       _remoteProfileId = profile.id;
       _showRemoteVerification(verification);
-      await Ui.pause();
     } catch (_) {
       await pterodactyl.removeCredential(
         profile,
@@ -3915,6 +3888,8 @@ class InteractiveWizard {
       );
       rethrow;
     }
+    _remoteConnectionChanged = true;
+    await Ui.pause();
   }
 
   Future<PterodactylCredentialRole> _promptAnyPterodactylCredential(
@@ -4190,6 +4165,25 @@ class InteractiveWizard {
     }
     Ui.doing('Killing $name');
     await _shellRun(<String>['runtime', 'stop', name]);
+  }
+
+  Future<void> _quickConsoles() async {
+    final CapturedResult running = await Ui.shielded(
+      () => passthrough.capture(<String>['runtime', 'list']),
+    );
+    if (!running.success) {
+      Ui.error(running.stderr.trim());
+      await Ui.pause();
+      return;
+    }
+    if (running.stdout.trim().isEmpty) {
+      Ui.note('No running servers. Start a server before opening consoles.');
+      await Ui.pause();
+      return;
+    }
+    if (await _shellRun(<String>['runtime', 'consoles']) != 0) {
+      await Ui.pause();
+    }
   }
 
   Future<void> _quickConsole(String name) async {
@@ -4817,7 +4811,7 @@ class InteractiveWizard {
 
       switch (action) {
         case _BuildAct.build:
-          await _runStep(_buildServerArtifact);
+          await _buildServerArtifact();
           break;
         case _BuildAct.pullAll:
           await _refreshAllBuilds();
@@ -4840,80 +4834,69 @@ class InteractiveWizard {
           await Ui.pause();
           break;
         case _BuildAct.heap:
-          await _runStep(() async {
-            int index = heapOptions.indexWhere(
-              (String candidate) =>
-                  candidate.toUpperCase() == heap.toUpperCase(),
-            );
-            if (index < 0) {
-              index = 1;
-            }
-            final String selected = await Ui.pick(
-              'Heap size (Xms/Xmx)',
-              heapOptions,
-              initialIndex: index,
-            );
-            await _shellRun(<String>[
-              'runtime',
-              'settings',
-              'set-heap',
-              selected,
-            ]);
-          });
+          int index = heapOptions.indexWhere(
+            (String candidate) => candidate.toUpperCase() == heap.toUpperCase(),
+          );
+          if (index < 0) {
+            index = 1;
+          }
+          final String selected = await Ui.pick(
+            'Heap size (Xms/Xmx)',
+            heapOptions,
+            initialIndex: index,
+          );
+          await _shellRun(<String>[
+            'runtime',
+            'settings',
+            'set-heap',
+            selected,
+          ]);
           break;
         case _BuildAct.flags:
-          await _runStep(() async {
-            final List<String> labels = presetLabels.keys.toList(
-              growable: false,
-            );
-            int index = labels.indexWhere(
-              (String label) => presetLabels[label] == profile.toLowerCase(),
-            );
-            if (index < 0) {
-              index = 0;
-            }
-            final String selected = await Ui.pick(
-              'JVM flag profile',
-              labels,
-              initialIndex: index,
-            );
-            await _shellRun(<String>[
-              'runtime',
-              'settings',
-              'set-preset',
-              presetLabels[selected]!,
-            ]);
-          });
+          final List<String> labels = presetLabels.keys.toList(growable: false);
+          int index = labels.indexWhere(
+            (String label) => presetLabels[label] == profile.toLowerCase(),
+          );
+          if (index < 0) {
+            index = 0;
+          }
+          final String selected = await Ui.pick(
+            'JVM flag profile',
+            labels,
+            initialIndex: index,
+          );
+          await _shellRun(<String>[
+            'runtime',
+            'settings',
+            'set-preset',
+            presetLabels[selected]!,
+          ]);
           break;
         case _BuildAct.wrap:
-          await _runStep(() async {
-            final String selected = await Ui.pick(
-              'Console line wrap',
-              const <String>['off', 'on'],
-              initialIndex: wrap.startsWith('on') ? 1 : 0,
-            );
-            await _shellRun(<String>[
-              'runtime',
-              'settings',
-              'set-wrap',
-              selected,
-            ]);
-          });
+          final String selected = await Ui.pick(
+            'Console line wrap',
+            const <String>['off', 'on'],
+            initialIndex: wrap.startsWith('on') ? 1 : 0,
+          );
+          await _shellRun(<String>[
+            'runtime',
+            'settings',
+            'set-wrap',
+            selected,
+          ]);
           break;
         case _BuildAct.logFormat:
-          await _runStep(() async {
-            final String selected = await Ui.pick(
-              'Console log format',
-              const <String>['minimal', 'default'],
-              initialIndex: logFormat.startsWith('default') ? 1 : 0,
-            );
-            await _shellRun(<String>[
-              'runtime',
-              'settings',
-              'set-log-format',
-              selected,
-            ]);
-          });
+          final String selected = await Ui.pick(
+            'Console log format',
+            const <String>['minimal', 'default'],
+            initialIndex: logFormat.startsWith('default') ? 1 : 0,
+          );
+          await _shellRun(<String>[
+            'runtime',
+            'settings',
+            'set-log-format',
+            selected,
+          ]);
           break;
         case _BuildAct.resetJvm:
           await _shellRun(<String>['runtime', 'settings', 'reset']);

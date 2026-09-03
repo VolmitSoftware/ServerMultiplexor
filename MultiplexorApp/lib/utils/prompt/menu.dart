@@ -81,7 +81,8 @@ class MenuTick<T> {
 /// Interactive menu with keyboard and mouse support.
 ///
 /// Keys: arrows/wheel move, Enter activates, Escape goes back, digits jump,
-/// shortcut letters activate their entry directly. Mouse: click selects,
+/// shortcut letters activate their entry directly, Shift+R clears and repaints.
+/// Mouse: click selects,
 /// click on the selected entry activates.
 Future<T> menuSelect<T>(
   String title,
@@ -111,7 +112,8 @@ Future<T> menuSelect<T>(
       ? initialIndex
       : selectable.first;
 
-  final String hintText = hint ?? '↑↓ move · enter select · esc back · click';
+  final String hintText =
+      '${hint ?? '↑↓ move · enter select · esc back · click'} · Shift+R repaint';
   String? currentFooter = footer;
   // Two border rows carry the title and the hint; a footer, when the menu has
   // one, is a content row just above the bottom border.
@@ -428,6 +430,19 @@ Future<T> menuSelect<T>(
           }
           break;
         case TermEventKind.char:
+          if (event.char == 'R') {
+            // Rebuild from a known cursor origin before callbacks or
+            // case-insensitive shortcuts can treat this as an action.
+            stdout.write('${Ansi.eraseScreen}\x1B[H');
+            frameTop = null;
+            restingRow = null;
+            lastColumns = io.terminalColumns;
+            lastLines = io.terminalLines;
+            io.hideCursor();
+            io.enableMouse();
+            draw(repaint: false);
+            break;
+          }
           if (onActionKey != null) {
             final T? actionValue = onActionKey(event.char, entries[selected]);
             if (actionValue != null) {

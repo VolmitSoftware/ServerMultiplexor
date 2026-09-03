@@ -736,6 +736,18 @@ class MonitorScreen {
 
   Future<MonitorResult?> _handleEvent(TermEvent event) async {
     _clampSelection();
+    final MonitorAction action = monitorActionForEvent(event);
+    if (action == MonitorAction.repaint) {
+      // Repaint precedes modal hotkeys, which otherwise accept uppercase
+      // letters and could treat Shift+R as the modal's restart shortcut.
+      _last = null;
+      _forceFull = true;
+      _incrementalCharactersSinceFullFrame = 0;
+      _geometry.reset();
+      _clearPointer();
+      TermIo.instance.enableMouse();
+      return null;
+    }
     if (event.kind == TermEventKind.mouseMove) {
       _hoveredId = _hitAt(event);
       return null;
@@ -750,7 +762,6 @@ class MonitorScreen {
     if (_modal != null) {
       return _handleModalKeyboard(event);
     }
-    final MonitorAction action = monitorActionForEvent(event);
     if (event.kind == TermEventKind.wheelUp ||
         event.kind == TermEventKind.wheelDown) {
       return _handleWheel(event, action);
@@ -1135,6 +1146,9 @@ class MonitorScreen {
       case MonitorAction.refresh:
         _kickRefresh();
         return null;
+      case MonitorAction.repaint:
+        // Handled before modal hotkeys in _handleEvent.
+        return null;
       case MonitorAction.quit:
         return const MonitorQuit();
       case MonitorAction.none:
@@ -1209,6 +1223,8 @@ class MonitorScreen {
     try {
       await suspend(flow);
     } finally {
+      _detailMode = false;
+      _detailInstance = '';
       _enterScreen(io);
       // Whatever the flow drew is gone with the alternate screen swap, and
       // anything typed at it must not reach the dashboard as commands. The

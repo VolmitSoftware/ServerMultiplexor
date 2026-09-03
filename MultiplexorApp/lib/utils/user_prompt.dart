@@ -5,8 +5,7 @@ library;
 import 'dart:async';
 import 'dart:io';
 
-import 'package:dart_console/dart_console.dart';
-
+import 'prompt/line_input.dart';
 import 'prompt/menu.dart';
 import 'terminal/ansi.dart';
 import 'terminal/term_events.dart';
@@ -19,8 +18,6 @@ export 'terminal/term_io.dart';
 
 class Ui {
   Ui._();
-
-  static final Console _console = Console();
 
   /// The theme every prompt and menu renders with: [MonitorTheme.cached],
   /// surfaced here so callers of this facade have one place to look.
@@ -159,7 +156,9 @@ class Ui {
 
   /// Waits for any key (Enter/Space/click). Drains stale input first so a
   /// key pressed during preceding work cannot skip the pause.
-  static Future<void> pause({String message = 'any key to continue'}) async {
+  static Future<void> pause({
+    String message = 'any key to continue · esc back',
+  }) async {
     if (!hasTerminal) {
       return;
     }
@@ -176,6 +175,9 @@ class Ui {
             io.restoreTerminal();
             stdout.writeln();
             exit(130);
+          case TermEventKind.escape:
+            stdout.write('\r${Ansi.eraseLine}');
+            throw const PromptBackNavigation();
           case TermEventKind.mouseDown:
           case TermEventKind.wheelUp:
           case TermEventKind.wheelDown:
@@ -254,7 +256,8 @@ class Ui {
         entries,
         initialIndex: initialIndex,
         echoSelection: false,
-        hint: 'up/down move · enter/space toggle · a all · x none · d done',
+        hint:
+            'up/down · enter/space toggle · a all · x none · d done · esc back',
         footer: '${selected.length} of ${options.length} selected',
         onActionKey: (String rawChar, MenuEntry<int> highlighted) =>
             rawChar == ' ' ? highlighted.value : null,
@@ -320,19 +323,7 @@ class Ui {
     while (true) {
       String? raw;
       if (hasTerminal) {
-        TermIo.instance.drainInput();
-        stdout.write(_inputPrompt(prompt, hint: defaultValue));
-        try {
-          raw = _console.readLine(cancelOnEscape: true);
-        } on StdinException {
-          throw PromptInputUnavailable(
-            'stdin is not readable while waiting for input "$prompt"',
-          );
-        }
-        if (raw == null) {
-          stdout.writeln('');
-          throw const PromptBackNavigation();
-        }
+        raw = _readTerminalLine(prompt, defaultValue: defaultValue);
       } else {
         stdout.write(
           defaultValue == null || defaultValue.isEmpty
@@ -371,63 +362,60 @@ class Ui {
     if (!hasTerminal) {
       stdout.write('$prompt: ');
       try {
-        return (stdin.readLineSync() ?? '').trim();
+        final String? value = stdin.readLineSync();
+        if (value != null) return value.trim();
       } catch (_) {
         throw PromptInputUnavailable(
           'stdin is not readable while waiting for "$prompt"',
         );
       }
+      throw PromptInputUnavailable(
+        'stdin is not readable while waiting for "$prompt"',
+      );
     }
 
+    final String value = _readTerminalLine(prompt, masked: true);
+    _inputAccepted(prompt, '•' * value.runes.length);
+    return value;
+  }
+
+  static String _readTerminalLine(
+    String prompt, {
+    String? defaultValue,
+    bool masked = false,
+  }) {
     final TermIo io = TermIo.instance;
+    io.disableMouse();
     io.drainInput();
-    stdout.write(_inputPrompt(prompt));
+    final String hint = <String>[
+      if (defaultValue != null && defaultValue.isNotEmpty) defaultValue,
+      'esc back',
+    ].join(' · ');
+    // Keep the field on its own line. Long URLs and pasted keys scroll within
+    // it instead of wrapping over the prompt or requiring cursor reports.
+    stdout.writeln(_inputPrompt(prompt, hint: hint));
     io.setRawMode(true);
-    io.hideCursor();
-    final StringBuffer buffer = StringBuffer();
-
-    // Leave raw mode before printing anything ending in "\n": with OPOST
-    // off, "\n" does not return the carriage and the next line starts
-    // mid-column (the stair-step bug).
-    void finishLine({required bool accepted}) {
-      io.setRawMode(false);
-      stdout.write('\r${Ansi.eraseLine}');
-      if (accepted) {
-        _inputAccepted(prompt, '•' * buffer.length);
-      }
-    }
-
+    io.showCursor();
     try {
-      while (true) {
-        final TermEvent event = io.readEvent();
-        switch (event.kind) {
-          case TermEventKind.enter:
-            finishLine(accepted: true);
-            return buffer.toString();
-          case TermEventKind.escape:
-            finishLine(accepted: false);
-            throw const PromptBackNavigation();
-          case TermEventKind.ctrlC:
-            io.restoreTerminal();
-            stdout.writeln();
-            exit(130);
-          case TermEventKind.backspace:
-            if (buffer.isNotEmpty) {
-              final String current = buffer.toString();
-              buffer
-                ..clear()
-                ..write(current.substring(0, current.length - 1));
-              stdout.write('\b \b');
-            }
-            break;
-          case TermEventKind.char:
-            buffer.write(event.char);
-            stdout.write('*');
-            break;
-          default:
-            break;
-        }
-      }
+      return readPromptLine(
+        readEvent: io.readEvent,
+        redraw: (List<String> characters, int cursor) {
+          final int width = (io.terminalColumns - 4).clamp(1, 10000);
+          final int start = (cursor - width + 1).clamp(0, characters.length);
+          final int end = (start + width).clamp(start, characters.length);
+          final String visible = masked
+              ? '*' * (end - start)
+              : characters.sublist(start, end).join();
+          stdout.write('\r${Ansi.eraseLine}  $visible');
+          final int back = end - cursor;
+          if (back > 0) stdout.write('\x1B[${back}D');
+        },
+        onInterrupt: () {
+          io.restoreTerminal();
+          stdout.writeln();
+          exit(130);
+        },
+      );
     } on TermInputUnavailable {
       throw PromptInputUnavailable(
         'stdin is not readable while waiting for "$prompt"',
@@ -435,16 +423,23 @@ class Ui {
     } finally {
       io.showCursor();
       io.setRawMode(false);
+      stdout.write('\r${Ansi.eraseLine}');
     }
   }
 
   /// Single-key confirmation: y/n, Enter accepts the configured default,
   /// Esc backs out.
   static Future<bool> confirm(String prompt, {bool defaultValue = true}) async {
-    final hint = defaultValue ? 'Y/n' : 'y/N';
+    final String hint = defaultValue ? 'Y/n' : 'y/N';
     if (!hasTerminal) {
       stdout.write('$prompt [$hint]: ');
-      final String value = (stdin.readLineSync() ?? '').trim().toLowerCase();
+      final String? raw = stdin.readLineSync();
+      if (raw == null) {
+        throw PromptInputUnavailable(
+          'stdin is not readable while waiting for confirmation "$prompt"',
+        );
+      }
+      final String value = raw.trim().toLowerCase();
       if (value.isEmpty) {
         return defaultValue;
       }
@@ -470,7 +465,7 @@ class Ui {
     stdout.write(
       '${theme.paint('?', '${theme.bold}${theme.accent}')} '
       '${theme.paint(prompt, '${theme.bold}${theme.text}')} '
-      '$chips ${theme.paint('›', theme.faint)} ',
+      '$chips ${theme.paint('(esc back) ›', theme.faint)} ',
     );
     io.setRawMode(true);
 

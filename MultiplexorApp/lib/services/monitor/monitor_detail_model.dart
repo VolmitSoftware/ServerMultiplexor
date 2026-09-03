@@ -33,7 +33,7 @@ const int _gridMinColumns = 100;
 const double _bytesPerMib = 1048576;
 
 const String _detailFooterHint =
-    '[esc] back · r range · R restart · S stop · X kill · O console';
+    '[esc] back · r range · Shift+R repaint · S stop · X kill · O console';
 
 /// Splits log paths on either separator so a recorded Windows path still
 /// yields its filename on a POSIX host.

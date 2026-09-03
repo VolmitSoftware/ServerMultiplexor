@@ -7,7 +7,6 @@ import 'package:multiplexor/services/pterodactyl/pterodactyl_errors.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_profile.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_service.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_models.dart';
-import 'package:multiplexor/utils/user_prompt.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -854,16 +853,6 @@ void main() {
 
     test('final creation confirmation is default-No', () {
       expect(remoteCreateFinalConfirmationDefault, isFalse);
-    });
-
-    test('Escape unwinds one creation source step', () async {
-      expect(
-        await remoteCreateStepOrBack(() async {
-          throw const PromptBackNavigation();
-        }),
-        isFalse,
-      );
-      expect(await remoteCreateStepOrBack(() async {}), isTrue);
     });
 
     test('create-many result rows retain service order and positions', () {

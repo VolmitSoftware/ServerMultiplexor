@@ -49,8 +49,9 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 | `enter`, click | Open the selected server's card; inside a card, run the focused button. A second click on the selected row, or `[ MORE ]`, also opens the card. |
 | button letter | Run that button directly while its modal card is open; the hotkey is printed at the start of each button when space permits. |
 | `d` | Detail screen for the selected server. |
-| `R` `S` `X` `O` | Restart, stop (graceful), kill (force), open console — on the selected server. Uppercase on purpose, so a slipped key can never fire one. |
-| `g` | Open every running console in a tmux grid. |
+| `S` `X` `O` | Stop, kill (force), open console on the selected server. Restart is available on its action bar and server card. |
+| `Shift+R` | Clear and repaint the entire screen, preserving selection, chart range, and any open card. |
+| `g`, `G` | Open all running Local consoles: a native terminal grid on Windows, a tmux grid on macOS/Linux. |
 | `n` | Create a new instance. Mohist creation offers a persistent Mods/Plugins source checklist; other isolated servers offer per-artifact one-time copies. |
 | `b` | Open Remote bulk actions, or Local Build & tuning. The remaining workspace actions live behind `[ MORE ]`. |
 | `w` | Open the workspace card — the keyboard twin of `[ MORE ]` on the workspace bar. Landing view only. |
@@ -64,7 +65,11 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
+`Shift+R` also repaints wizard menus without activating an action or changing the selection.
+
 `./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc. Local keeps the existing state-aware server and workspace actions. Remote exposes permission-aware power, console, history, account, lifecycle, settings, creation, transfer, and Multiplexor Drive workflows. **Pull to Local** copies a Remote server into a new, stopped Local instance and links the pair. **Push to Remote** shows a file diff before it can update the linked server, another existing server, or a newly created stopped server. Remote creation can clone an existing configuration or build directly from a Panel egg, so a completely empty panel can create its first server. Its workspace card includes Create many and Bulk actions; `b` opens the bulk selector directly, with all/selected/running/stopped presets, per-server toggles, bounded execution, progress, and an outcome for every target. Suspended, installing, maintenance, unavailable, and otherwise non-runnable servers retain their rows but have mutating actions disabled. Mirror push, kill, reinstall, and delete default to no and require typed confirmation.
+
+Press `Esc` from any wizard menu, text field, masked key/PIN field, confirmation, checklist, or result pause to return to the dashboard. Required fields and validation errors never trap navigation; cancelling a setup form leaves unsubmitted settings unchanged.
 
 The Remote console has a persistent server/resource header, severity colors, safe Minecraft `§` formatting, prefix and routine-noise trimming, and batched history rendering. `Tab` completes common commands, commands already used in the session, selectors, and player names learned from recent/live join, leave, login, and `list` output; press it again to cycle ambiguous matches. `Esc`, `Ctrl-C`, or `:exit` immediately restores the dashboard without stopping the server.
 
@@ -204,17 +209,19 @@ Single `server create` and `build <type>` commands must run under the consumer t
 
 ### runtime — start, stop, attach
 
-macOS/Linux runtimes use named `tmux` sessions. `Tab` is passed through to the server; Paper, Purpur, Folia, Canvas, and Leaf retain their native JLine/Brigadier completion for real server/plugin commands and current player names even with Multiplexor's minimal console format. Windows uses a native background host built into `multiplexor.exe`, so the release executable does not require Git Bash, `sh`, `chmod`, or `tmux`. Runtime output is captured under `consumers/<profile>/state/runtime/<instance>.log`; the Minecraft server also writes `logs/latest.log` inside its instance. Windows start/stop/status, watchers, and `/restart` are supported, while interactive and combined console attachment remain tmux-only.
+macOS/Linux runtimes use named `tmux` sessions. `Tab` is passed through to the server; Paper, Purpur, Folia, Canvas, and Leaf retain their native JLine/Brigadier completion for real server/plugin commands and current player names even with Multiplexor's minimal console format. Windows uses a native background host built into `multiplexor.exe`, so the release executable does not require Git Bash, `sh`, `chmod`, or `tmux`. Runtime output is captured under `consumers/<profile>/state/runtime/<instance>.log`; the Minecraft server also writes `logs/latest.log` inside its instance. Windows consoles show live runtime logs in a native terminal grid and send commands to the selected server through its configured RCON connection.
+
+In the Windows grid, `Tab` selects the next console; left/right also switch consoles when the command line is empty. Type a command and press `Enter` to send it. `Esc` or `Ctrl-C` returns to the dashboard while the servers keep running. Without an interactive terminal, console commands print the runtime log paths.
 
 | Command | What it does |
 |---------|--------------|
 | `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, clickable action bars, and the wizard's flows behind the cards and `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
-| `runtime start [instance] [--no-console]` | Safely sync dropins and start the instance. On macOS/Linux it attaches the tmux console unless `--no-console`; Windows starts the native background host and prints its log paths. Locally modified instance jars are preserved with a warning. |
+| `runtime start [instance] [--no-console]` | Safely sync dropins and start the instance, then open its console unless `--no-console`: tmux on macOS/Linux, a native terminal view on Windows. Locally modified instance jars are preserved with a warning. |
 | `runtime stop [instance] [--graceful]` | Force-stop the tracked runtime immediately. With `--graceful`, sends `stop` through tmux on macOS/Linux or RCON on Windows, waits up to 60s for a clean world-save shutdown, then force-stops on timeout. |
-| `runtime restart [instance] [--no-console]` | Stop and start again. Attaches the tmux console on macOS/Linux unless `--no-console`; Windows prints the background runtime's log paths. |
-| `runtime console [instance]` | Attach to a tmux console on macOS/Linux. On Windows, ensure the background runtime is started and print its server and Multiplexor log paths. |
-| `runtime consoles` | Open every running console in a tmux grid on macOS/Linux; list Windows runtime log paths. |
-| `runtime consoles-lateral` | Open every running console side-by-side on macOS/Linux; list Windows runtime log paths. |
+| `runtime restart [instance] [--no-console]` | Stop and start again, then open its console unless `--no-console`. |
+| `runtime console [instance]` | Start the runtime if needed and open its console: tmux on macOS/Linux, native live logs and command input on Windows. |
+| `runtime consoles` | Open all running consoles in a tmux grid on macOS/Linux or a native terminal grid on Windows. |
+| `runtime consoles-lateral` | Open running consoles side-by-side using tmux on macOS/Linux or the native terminal view on Windows. |
 | `runtime status [instance]` | Print the runtime state of one instance. |
 | `runtime stats [instance]` | Show live stats for running servers: player count (`online/max`), state, CPU, memory, uptime, port, and version, plus the names of online players. With no instance, scans every consumer for running servers; with an instance, reports that one. Player counts come from a Server List Ping, so neither `enable-query` nor `enable-rcon` is required. `CPU` (`4.2%`) and `MEM` (resident set, e.g. `2.4G`) come from a single batched `ps` over the tracked server pids; `CPU`, `MEM`, and `UPTIME` read `n/a` when the value is unavailable rather than showing a zero. |
 | `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked<TAB>isolated`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`; the final two columns are `locked`/`unlocked` and `isolated`/`shared`. |
@@ -335,6 +342,15 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 | `config status [instance]` | Print which config files are symlinked vs localized. |
 
 ## Common Workflows
+
+**Windows consoles**
+
+```powershell
+.\multiplexor.exe runtime start demo --no-console
+.\multiplexor.exe runtime consoles
+```
+
+The Local dashboard's `g` or `G` opens the same grid. Use `Shift+R` to repaint the dashboard or an open wizard menu.
 
 ```bash
 # Create a paper server on the latest upstream version, refreshing the cache first
