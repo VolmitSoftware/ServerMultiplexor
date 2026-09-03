@@ -14,10 +14,9 @@ final class InstalledAddon {
       file = addonString(json, 'file'),
       hash = addonString(json, 'sha256') {
     if (!RegExp(r'^[a-z0-9][a-z0-9-]*$').hasMatch(id) ||
-        !<String>{
-          'plugins/multiplexor-$id.jar',
-          'mods/multiplexor-$id.jar',
-        }.contains(file) ||
+        !const <String>{'plugins', 'mods'}.contains(p.posix.dirname(file)) ||
+        !isAddonJarFileName(p.posix.basename(file)) ||
+        file != '${p.posix.dirname(file)}/${p.posix.basename(file)}' ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(hash)) {
       throw const FormatException('Invalid installed addon');
     }
@@ -29,17 +28,11 @@ final class InstalledAddon {
   final String file;
   final String hash;
 
-  bool protects(String path) {
-    if (path.toLowerCase() == file.toLowerCase()) return true;
-    if (p.posix.dirname(path) != p.posix.dirname(file)) return false;
-    final String name = p.posix.basename(path).toLowerCase();
-    return name.endsWith('.jar') &&
-        addonStrings(
-          json,
-          'filePrefixes',
-          optional: true,
-        ).any((String prefix) => name.startsWith(prefix.toLowerCase()));
-  }
+  bool protects(String path) => matchesAddonJar(
+    path,
+    file,
+    addonStrings(json, 'filePrefixes', optional: true),
+  );
 }
 
 final class AddonState {
@@ -66,10 +59,14 @@ final class AddonState {
       throw const FormatException('Invalid addon state');
     }
     final Map<String, InstalledAddon> entries = <String, InstalledAddon>{};
+    final Set<String> files = <String>{};
     for (final Object? raw in json['entries']! as List<Object?>) {
       final InstalledAddon entry = InstalledAddon(addonObject(raw));
       if (entries.containsKey(entry.id)) {
         throw const FormatException('Duplicate installed addon');
+      }
+      if (!files.add(entry.file.toLowerCase())) {
+        throw const FormatException('Duplicate installed addon file');
       }
       entries[entry.id] = entry;
     }
@@ -108,16 +105,17 @@ final class AddonInstaller {
       'instance': instance,
       'type': serverType,
       'minecraft': minecraft,
+      'versionRequired':
+          minecraft.isEmpty &&
+          catalog.entries.values.any(
+            (AddonDefinition addon) =>
+                addon.requiresMinecraftVersion(serverType),
+          ),
       'entries': <Map<String, Object?>>[
         for (final AddonDefinition addon in catalog.entries.values)
           <String, Object?>{
             ...addon.toJson(),
-            if (addon.sources.any(
-              (AddonSource source) =>
-                  source.supports(serverType, minecraft) &&
-                  source.json['label'] == 'development',
-            ))
-              'name': '${addon.name} (development)',
+            'name': addon.displayName(serverType, minecraft),
             'selected': state.entries.containsKey(addon.id),
             'available':
                 addon.unavailableReason(serverType, minecraft: minecraft) ==
@@ -174,11 +172,14 @@ final class AddonInstaller {
         for (final String id in selected)
           if (update ||
               previous.entries[id] == null ||
+              previous.entries[id]!.file != catalog.entries[id]!.file ||
               previous.entries[id]!.json['minecraft'] != minecraft ||
               previous.entries[id]!.json['serverType'] != serverType ||
-              !File(
-                p.join(instancePath, previous.entries[id]!.file),
-              ).existsSync())
+              FileSystemEntity.typeSync(
+                    p.join(instancePath, previous.entries[id]!.file),
+                    followLinks: false,
+                  ) !=
+                  FileSystemEntityType.file)
             id,
       };
       // A newly resolved dependent may require a newer dependency than the
@@ -291,7 +292,11 @@ final class AddonInstaller {
             jsonEncode(previous.toJson())) {
           throw StateError('Addon selection changed during download. Retry.');
         }
-        _checkConflicts(previous, next);
+        final Set<String> replacements = _replacementPaths(
+          previous,
+          next,
+          downloads.keys.toSet(),
+        );
         final Map<String, String> backups = <String, String>{};
         final Set<String> installedPaths = <String>{};
         final String statePath = p.join(instancePath, AddonState.filename);
@@ -301,14 +306,12 @@ final class AddonInstaller {
             : null;
         bool stateWritten = false;
         try {
-          for (final InstalledAddon old in previous.entries.values) {
-            if (next.containsKey(old.id) && !downloads.containsKey(old.id)) {
-              continue;
-            }
-            final String path = p.join(instancePath, old.file);
-            if (!File(path).existsSync()) continue;
-            final String backup = p.join(transaction.path, 'old-${old.id}.jar');
-            File(path).renameSync(backup);
+          for (final String path in replacements) {
+            final String backup = p.join(
+              transaction.path,
+              'old-${backups.length}.jar',
+            );
+            _moveJar(path, backup);
             backups[path] = backup;
           }
           for (final MapEntry<String, File> download in downloads.entries) {
@@ -334,7 +337,7 @@ final class AddonInstaller {
               File(path).deleteSync();
             }
             for (final MapEntry<String, String> backup in backups.entries) {
-              File(backup.value).renameSync(backup.key);
+              _moveJar(backup.value, backup.key);
             }
             if (stateWritten) {
               if (previousState == null) {
@@ -377,45 +380,62 @@ final class AddonInstaller {
           FileSystemEntityType.notFound) {
         _regularDirectory(directory);
       }
-      _regularFileOrMissing(path);
-      final File file = File(path);
-      if (file.existsSync() && _hash(file) != addon.hash) {
-        throw StateError(
-          'Managed addon was modified locally: $path. Move it aside before changing addons.',
-        );
-      }
+      _jarOrMissing(path);
     }
   }
 
-  void _checkConflicts(AddonState previous, Map<String, InstalledAddon> next) {
-    for (final InstalledAddon addon in next.values) {
-      final String directory = p.join(
-        instancePath,
-        p.posix.dirname(addon.file),
-      );
+  Set<String> _replacementPaths(
+    AddonState previous,
+    Map<String, InstalledAddon> next,
+    Set<String> refreshing,
+  ) {
+    final List<InstalledAddon> addons = <InstalledAddon>[
+      ...previous.entries.values,
+      ...next.values,
+    ];
+    final Map<String, String> retained = <String, String>{
+      for (final InstalledAddon addon in next.values)
+        if (!refreshing.contains(addon.id))
+          addon.file.toLowerCase(): addon.file,
+    };
+    final Set<String> directories = <String>{
+      for (final InstalledAddon addon in addons) p.posix.dirname(addon.file),
+    };
+    final Set<String> replacements = <String>{};
+    for (final String subdirectory in directories) {
+      final String directory = p.join(instancePath, subdirectory);
       final FileSystemEntityType type = FileSystemEntity.typeSync(
         directory,
         followLinks: false,
       );
       if (type == FileSystemEntityType.notFound) continue;
       _regularDirectory(directory);
-      for (final FileSystemEntity entity in Directory(
-        directory,
-      ).listSync(followLinks: false)) {
-        final String relative =
-            '${p.basename(directory)}/${p.basename(entity.path)}';
-        if (previous.entries.values.any(
-          (InstalledAddon old) => old.file == relative,
-        )) {
+      final Map<String, FileSystemEntity> files = <String, FileSystemEntity>{
+        for (final FileSystemEntity entity in Directory(
+          directory,
+        ).listSync(followLinks: false))
+          '$subdirectory/${p.basename(entity.path)}': entity,
+      };
+      for (final MapEntry<String, FileSystemEntity> entry in files.entries) {
+        final String relative = entry.key;
+        final FileSystemEntity entity = entry.value;
+        final String? kept = retained[relative.toLowerCase()];
+        if (kept != null &&
+            (relative == kept ||
+                !files.containsKey(kept) &&
+                    FileSystemEntity.identicalSync(
+                      p.join(instancePath, kept),
+                      entity.path,
+                    ))) {
           continue;
         }
-        if (addon.protects(relative)) {
-          throw StateError(
-            'Existing unmanaged addon conflicts with ${addon.id}: ${entity.path}. Move it aside first.',
-          );
+        if (addons.any((InstalledAddon addon) => addon.protects(relative))) {
+          _jarOrMissing(entity.path);
+          replacements.add(entity.path);
         }
       }
     }
+    return replacements;
   }
 }
 
@@ -426,7 +446,26 @@ final class _PreparedAddon {
   final File file;
 }
 
-String _hash(File file) => sha256.convert(file.readAsBytesSync()).toString();
+void _moveJar(String source, String target) {
+  if (FileSystemEntity.typeSync(source, followLinks: false) ==
+      FileSystemEntityType.link) {
+    Link(source).renameSync(target);
+  } else {
+    File(source).renameSync(target);
+  }
+}
+
+void _jarOrMissing(String path) {
+  final FileSystemEntityType type = FileSystemEntity.typeSync(
+    path,
+    followLinks: false,
+  );
+  if (type != FileSystemEntityType.file &&
+      type != FileSystemEntityType.link &&
+      type != FileSystemEntityType.notFound) {
+    throw FileSystemException('Addon target must be a jar file', path);
+  }
+}
 
 void _regularDirectory(String path) {
   if (FileSystemEntity.typeSync(path, followLinks: false) !=

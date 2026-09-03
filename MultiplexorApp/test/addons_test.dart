@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:multiplexor/models/consumer_profile.dart';
+import 'package:multiplexor/services/addons/addon_catalog.dart';
 import 'package:multiplexor/services/consumer_service.dart';
 import 'package:multiplexor/services/manager_context.dart';
 import 'package:multiplexor/services/native_command_service.dart';
@@ -73,6 +74,8 @@ void main() {
       String kind = 'plugin',
       List<String> serverTypes = const <String>['paper'],
       Map<String, Object?>? source,
+      String? fileName,
+      List<String> filePrefixes = const <String>[],
     }) => <String, Object?>{
       'id': id,
       'name': 'Test $id',
@@ -80,6 +83,8 @@ void main() {
       'kind': kind,
       'serverTypes': serverTypes,
       'dependencies': dependencies,
+      'fileName': ?fileName,
+      'filePrefixes': filePrefixes,
       'source':
           source ?? <String, Object?>{'type': 'file', 'path': jar(id).path},
     };
@@ -137,7 +142,107 @@ void main() {
         (Map<String, Object?> entry) => entry['id'] == 'viabackwards',
       );
       expect(backwards['dependencies'], contains('viaversion'));
+      expect(
+        AddonCatalog.load(root.path).entries.map(
+          (String id, AddonDefinition addon) =>
+              MapEntry<String, String>(id, addon.file),
+        ),
+        <String, String>{
+          'essentialsx': 'plugins/EssentialsX.jar',
+          'fawe': 'plugins/FastAsyncWorldEdit.jar',
+          'viaversion': 'plugins/ViaVersion.jar',
+          'viabackwards': 'plugins/ViaBackwards.jar',
+          'protocollib': 'plugins/ProtocolLib.jar',
+        },
+      );
     });
+
+    test('existing Leaf jars supply the checklist Minecraft version', () async {
+      final String instance = await createInstance(type: 'leaf', minecraft: '');
+      final File launch = jar('leaf-26.2-96');
+      final File metadata = File(p.join(instance, '.server-source'));
+      final String source = 'type=leaf\nlaunch=jar\njar=${launch.path}\n';
+      metadata.writeAsStringSync(source);
+
+      final Map<String, Object?> status = await list();
+
+      expect(status['minecraft'], '26.2');
+      expect(status['versionRequired'], isFalse);
+      expect(_entries(status), hasLength(5));
+      expect(
+        _entries(
+          status,
+        ).every((Map<String, Object?> entry) => entry['available'] == true),
+        isTrue,
+      );
+      expect(
+        _entries(status).first['name'],
+        'EssentialsX (development fallback)',
+      );
+      expect(metadata.readAsStringSync(), source);
+    });
+
+    test(
+      'unknown plugin version requests input without a platform error',
+      () async {
+        await createInstance(type: 'leaf', minecraft: '');
+
+        final Map<String, Object?> status = await list();
+
+        expect(status['versionRequired'], isTrue);
+        for (final Map<String, Object?> entry in _entries(status)) {
+          expect(entry['available'], isFalse);
+          expect(entry['reason'], contains('Minecraft version is unknown'));
+        }
+      },
+    );
+
+    test(
+      'unsupported addon platforms do not request a Minecraft version',
+      () async {
+        await createInstance(type: 'fabric', minecraft: '');
+        expect((await list())['versionRequired'], isFalse);
+      },
+    );
+
+    test(
+      'inferred version is used for installing version-scoped addons',
+      () async {
+        registry(<Map<String, Object?>>[
+          definition(
+            'example',
+            serverTypes: <String>['leaf'],
+            source: <String, Object?>{
+              'type': 'file',
+              'path': jar('example').path,
+              'minecraftVersions': <String>['26.2'],
+            },
+          ),
+        ]);
+        final String instance = await createInstance(
+          type: 'leaf',
+          minecraft: '',
+        );
+        File(p.join(instance, '.server-source')).writeAsStringSync(
+          'type=leaf\nlaunch=jar\njar=${jar('leaf-26.2-96').path}\nisolated=true\n',
+        );
+
+        await select('example');
+
+        final Map<String, Object?> state = _object(
+          jsonDecode(
+            File(
+              p.join(instance, '.multiplexor-addons.json'),
+            ).readAsStringSync(),
+          ),
+        );
+        expect(_entries(state).single['minecraft'], '26.2');
+        expect(
+          File(p.join(instance, 'plugins', 'example.jar')).readAsBytesSync(),
+          _jarBytes,
+        );
+      },
+    );
 
     test('installs local addons and persists per-instance selection', () async {
       registry(<Map<String, Object?>>[definition('example')]);
@@ -146,9 +251,7 @@ void main() {
       await select('example');
 
       expect(
-        File(
-          p.join(instance, 'plugins', 'multiplexor-example.jar'),
-        ).readAsBytesSync(),
+        File(p.join(instance, 'plugins', 'example.jar')).readAsBytesSync(),
         _jarBytes,
       );
       expect(
@@ -175,11 +278,9 @@ void main() {
       await select('dependent');
       expect(_selectedIds(await list()), <String>{'dependent', 'dependency'});
       final File dependency = File(
-        p.join(instance, 'plugins', 'multiplexor-dependency.jar'),
+        p.join(instance, 'plugins', 'dependency.jar'),
       );
-      final File dependent = File(
-        p.join(instance, 'plugins', 'multiplexor-dependent.jar'),
-      );
+      final File dependent = File(p.join(instance, 'plugins', 'dependent.jar'));
       Directory(p.join(root.path, 'fixtures')).deleteSync(recursive: true);
 
       await select('dependent');
@@ -197,7 +298,7 @@ void main() {
       final String instance = await createInstance();
       await select('dependency');
       final File installedDependency = File(
-        p.join(instance, 'plugins', 'multiplexor-dependency.jar'),
+        p.join(instance, 'plugins', 'dependency.jar'),
       );
       expect(installedDependency.readAsBytesSync(), _jarBytes);
       final List<int> newDependencyBytes = <int>[..._jarBytes, 99];
@@ -207,9 +308,7 @@ void main() {
 
       expect(installedDependency.readAsBytesSync(), newDependencyBytes);
       expect(
-        File(
-          p.join(instance, 'plugins', 'multiplexor-dependent.jar'),
-        ).readAsBytesSync(),
+        File(p.join(instance, 'plugins', 'dependent.jar')).readAsBytesSync(),
         _jarBytes,
       );
       expect(_selectedIds(await list()), <String>{'dependent', 'dependency'});
@@ -250,9 +349,7 @@ void main() {
         await select('example-mod');
 
         expect(
-          File(
-            p.join(instance, 'mods', 'multiplexor-example-mod.jar'),
-          ).readAsBytesSync(),
+          File(p.join(instance, 'mods', 'example-mod.jar')).readAsBytesSync(),
           _jarBytes,
         );
         final Map<String, Object?> status = await list();
@@ -295,9 +392,7 @@ void main() {
 
         expect(result.exitCode, 0, reason: result.stderr);
         expect(
-          File(
-            p.join(instance, 'plugins', 'multiplexor-example.jar'),
-          ).existsSync(),
+          File(p.join(instance, 'plugins', 'example.jar')).existsSync(),
           isFalse,
         );
         expect(unmanaged.readAsBytesSync(), _jarBytes);
@@ -306,12 +401,11 @@ void main() {
       },
     );
 
-    test('refuses to replace an unmanaged target jar', () async {
+    test('replaces an unmanaged canonical target jar', () async {
       registry(<Map<String, Object?>>[definition('example')]);
       final String instance = await createInstance();
-      final File target = File(
-        p.join(instance, 'plugins', 'multiplexor-example.jar'),
-      )..writeAsStringSync('manually supplied jar');
+      final File target = File(p.join(instance, 'plugins', 'example.jar'))
+        ..writeAsStringSync('manually supplied jar');
 
       final CapturedResult result = await command(<String>[
         'addons',
@@ -321,23 +415,113 @@ void main() {
         'example',
       ]);
 
-      expect(result.exitCode, isNot(0));
-      expect(target.readAsStringSync(), 'manually supplied jar');
-      expect(_selectedIds(await list()), isEmpty);
+      expect(result.exitCode, 0, reason: result.stderr);
+      expect(target.readAsBytesSync(), _jarBytes);
+      expect(_selectedIds(await list()), <String>{'example'});
     });
 
     test(
-      'refuses to remove a managed jar modified outside Multiplexor',
+      'unchanged selection retains a manually replaced canonical jar',
+      () async {
+        registry(<Map<String, Object?>>[
+          definition('example', filePrefixes: <String>['example']),
+        ]);
+        final String instance = await createInstance();
+        await select('example');
+        final File target = File(p.join(instance, 'plugins', 'example.jar'))
+          ..writeAsStringSync('locally changed jar');
+        final File duplicate = File(
+          p.join(instance, 'plugins', 'Example-1.0.jar'),
+        )..writeAsBytesSync(_jarBytes);
+        final String manifest = File(
+          p.join(instance, '.multiplexor-addons.json'),
+        ).readAsStringSync();
+        Directory(p.join(root.path, 'fixtures')).deleteSync(recursive: true);
+
+        await select('example');
+
+        expect(target.readAsStringSync(), 'locally changed jar');
+        expect(duplicate.existsSync(), isFalse);
+        expect(
+          File(p.join(instance, '.multiplexor-addons.json')).readAsStringSync(),
+          manifest,
+        );
+        expect(_selectedIds(await list()), <String>{'example'});
+      },
+    );
+
+    test(
+      'unchanged selection removes a differently cased duplicate jar',
+      () async {
+        registry(<Map<String, Object?>>[
+          definition(
+            'example',
+            fileName: 'Example.jar',
+            filePrefixes: <String>['example'],
+          ),
+        ]);
+        final String instance = await createInstance();
+        await select('example');
+        final File canonical = File(p.join(instance, 'plugins', 'Example.jar'));
+        final File duplicate = File(p.join(instance, 'plugins', 'example.jar'));
+        if (duplicate.existsSync()) {
+          markTestSkipped('Requires a case-sensitive filesystem.');
+          return;
+        }
+        duplicate.writeAsBytesSync(<int>[..._jarBytes, 99]);
+        Directory(p.join(root.path, 'fixtures')).deleteSync(recursive: true);
+
+        await select('example');
+
+        expect(canonical.readAsBytesSync(), _jarBytes);
+        expect(duplicate.existsSync(), isFalse);
+        expect(_selectedIds(await list()), <String>{'example'});
+      },
+    );
+
+    test(
+      'explicit update refreshes a manually replaced canonical jar',
       () async {
         registry(<Map<String, Object?>>[definition('example')]);
         final String instance = await createInstance();
         await select('example');
-        final File target = File(
-          p.join(instance, 'plugins', 'multiplexor-example.jar'),
-        )..writeAsStringSync('locally changed jar');
-        final String manifest = File(
-          p.join(instance, '.multiplexor-addons.json'),
-        ).readAsStringSync();
+        final File target = File(p.join(instance, 'plugins', 'example.jar'))
+          ..writeAsStringSync('locally changed jar');
+        final List<int> updatedBytes = <int>[..._jarBytes, 99];
+        jar('example', bytes: updatedBytes);
+
+        final CapturedResult result = await command(<String>[
+          'addons',
+          'update',
+          'demo',
+        ]);
+
+        expect(result.exitCode, 0, reason: result.stderr);
+        expect(target.readAsBytesSync(), updatedBytes);
+        expect(_selectedIds(await list()), <String>{'example'});
+      },
+    );
+
+    test(
+      'unchecking removes a manually replaced canonical jar and its aliases',
+      () async {
+        registry(<Map<String, Object?>>[
+          definition(
+            'example',
+            fileName: 'Example.jar',
+            filePrefixes: <String>['example'],
+          ),
+        ]);
+        final String instance = await createInstance();
+        await select('example');
+        final File target = File(p.join(instance, 'plugins', 'Example.jar'))
+          ..writeAsStringSync('locally changed jar');
+        final File duplicate = File(
+          p.join(instance, 'plugins', 'Example-1.0.jar'),
+        )..writeAsBytesSync(_jarBytes);
+        final File distinct = File(
+          p.join(instance, 'plugins', 'ExampleExtras.jar'),
+        )..writeAsBytesSync(_jarBytes);
 
         final CapturedResult result = await command(<String>[
           'addons',
@@ -346,12 +530,80 @@ void main() {
           '--none',
         ]);
 
-        expect(result.exitCode, isNot(0));
-        expect(target.readAsStringSync(), 'locally changed jar');
+        expect(result.exitCode, 0, reason: result.stderr);
+        expect(target.existsSync(), isFalse);
+        expect(duplicate.existsSync(), isFalse);
+        expect(distinct.readAsBytesSync(), _jarBytes);
+        expect(_selectedIds(await list()), isEmpty);
+      },
+    );
+
+    test(
+      'replaces matching versioned jars only inside the selected instance',
+      () async {
+        registry(<Map<String, Object?>>[
+          definition(
+            'version-bridge',
+            fileName: 'ExampleVia.jar',
+            filePrefixes: <String>['examplevia'],
+          ),
+        ]);
+        final String instance = await createInstance();
+        final String otherInstance = await createInstance(name: 'other');
+        final Directory dropins = Directory(
+          p.join(
+            consumers.rootFor(ConsumerProfile.plugin),
+            'dropins',
+            'plugins',
+          ),
+        )..createSync(recursive: true);
+        final List<int> priorBytes = <int>[..._jarBytes, 1];
+        final List<File> replaced = <File>[
+          for (final String filename in <String>[
+            'ExampleVia.jar',
+            'ExampleVia-5.11.0.jar',
+            'examplevia_5.10.0.jar',
+          ])
+            File(p.join(instance, 'plugins', filename))
+              ..writeAsBytesSync(priorBytes),
+        ];
+        final List<File> preserved = <File>[
+          File(p.join(instance, 'plugins', 'ExampleViaExtras.jar')),
+          File(p.join(otherInstance, 'plugins', 'ExampleVia-5.11.0.jar')),
+          File(p.join(dropins.path, 'ExampleVia-5.11.0.jar')),
+          File(p.join(dropins.path, 'ExampleVia.jar')),
+        ];
+        for (final File file in preserved) {
+          file.writeAsBytesSync(priorBytes);
+        }
+        final File config =
+            File(p.join(instance, 'plugins', 'ExampleVia', 'config.yml'))
+              ..createSync(recursive: true)
+              ..writeAsStringSync('check-for-updates: false\n');
+
+        await select('version-bridge');
+
+        expect(replaced.first.readAsBytesSync(), _jarBytes);
+        for (final File alias in replaced.skip(1)) {
+          expect(alias.existsSync(), isFalse);
+        }
+        for (final File file in preserved) {
+          expect(file.readAsBytesSync(), priorBytes, reason: file.path);
+        }
         expect(
-          File(p.join(instance, '.multiplexor-addons.json')).readAsStringSync(),
-          manifest,
+          dropins.listSync().map(
+            (FileSystemEntity entry) => p.basename(entry.path),
+          ),
+          unorderedEquals(<String>['ExampleVia.jar', 'ExampleVia-5.11.0.jar']),
         );
+        expect(config.readAsStringSync(), 'check-for-updates: false\n');
+        expect(
+          File(
+            p.join(root.path, 'fixtures', 'version-bridge.jar'),
+          ).readAsBytesSync(),
+          _jarBytes,
+        );
+        expect(_selectedIds(await list()), <String>{'version-bridge'});
       },
     );
 
@@ -371,7 +623,11 @@ void main() {
         });
         registry(<Map<String, Object?>>[
           definition('installed'),
-          definition('replacement'),
+          definition(
+            'replacement',
+            fileName: 'ExampleVia.jar',
+            filePrefixes: <String>['examplevia'],
+          ),
           definition(
             'unavailable',
             source: <String, Object?>{
@@ -386,6 +642,23 @@ void main() {
           p.join(instance, '.multiplexor-addons.json'),
         );
         final String originalManifest = manifest.readAsStringSync();
+        final List<int> priorBytes = <int>[..._jarBytes, 42];
+        final List<File> originals = <File>[
+          File(p.join(instance, 'plugins', 'ExampleVia.jar')),
+          File(p.join(instance, 'plugins', 'ExampleVia-5.11.0.jar')),
+          File(p.join(instance, 'plugins', 'ExampleVia-5.10.0.jar')),
+          File(
+            p.join(
+              consumers.rootFor(ConsumerProfile.plugin),
+              'dropins',
+              'plugins',
+              'ExampleVia-5.11.0.jar',
+            ),
+          ),
+        ];
+        for (final File original in originals) {
+          original.writeAsBytesSync(priorBytes);
+        }
 
         final CapturedResult result = await command(<String>[
           'addons',
@@ -398,17 +671,12 @@ void main() {
         expect(result.exitCode, isNot(0));
         expect(requests, greaterThan(0));
         expect(
-          File(
-            p.join(instance, 'plugins', 'multiplexor-installed.jar'),
-          ).readAsBytesSync(),
+          File(p.join(instance, 'plugins', 'installed.jar')).readAsBytesSync(),
           _jarBytes,
         );
-        expect(
-          File(
-            p.join(instance, 'plugins', 'multiplexor-replacement.jar'),
-          ).existsSync(),
-          isFalse,
-        );
+        for (final File original in originals) {
+          expect(original.readAsBytesSync(), priorBytes, reason: original.path);
+        }
         expect(manifest.readAsStringSync(), originalManifest);
         expect(_selectedIds(await list()), <String>{'installed'});
       },
@@ -440,15 +708,11 @@ void main() {
 
         expect(result.exitCode, isNot(0));
         expect(
-          File(
-            p.join(instance, 'plugins', 'multiplexor-valid.jar'),
-          ).existsSync(),
+          File(p.join(instance, 'plugins', 'valid.jar')).existsSync(),
           isFalse,
         );
         expect(
-          File(
-            p.join(instance, 'plugins', 'multiplexor-invalid.jar'),
-          ).existsSync(),
+          File(p.join(instance, 'plugins', 'invalid.jar')).existsSync(),
           isFalse,
         );
         expect(_selectedIds(await list()), isEmpty);
@@ -456,14 +720,14 @@ void main() {
     );
 
     test(
-      'refuses a symlinked target jar without modifying its destination',
+      'replaces a symlinked target jar without modifying its destination',
       () async {
         registry(<Map<String, Object?>>[definition('example')]);
         final String instance = await createInstance();
-        final File outside = jar('outside');
-        final Link target = Link(
-          p.join(instance, 'plugins', 'multiplexor-example.jar'),
-        )..createSync(outside.path);
+        final List<int> outsideBytes = <int>[..._jarBytes, 99];
+        final File outside = jar('outside', bytes: outsideBytes);
+        final Link target = Link(p.join(instance, 'plugins', 'example.jar'))
+          ..createSync(outside.path);
 
         final CapturedResult result = await command(<String>[
           'addons',
@@ -473,9 +737,71 @@ void main() {
           'example',
         ]);
 
-        expect(result.exitCode, isNot(0));
-        expect(target.targetSync(), outside.path);
-        expect(outside.readAsBytesSync(), _jarBytes);
+        expect(result.exitCode, 0, reason: result.stderr);
+        expect(
+          FileSystemEntity.typeSync(target.path, followLinks: false),
+          FileSystemEntityType.file,
+        );
+        expect(File(target.path).readAsBytesSync(), _jarBytes);
+        expect(outside.readAsBytesSync(), outsideBytes);
+        expect(_selectedIds(await list()), <String>{'example'});
+      },
+      skip: Platform.isWindows
+          ? 'Requires symlink creation privileges.'
+          : false,
+    );
+
+    test(
+      'unchanged selection replaces managed symlinks without touching dropins',
+      () async {
+        registry(<Map<String, Object?>>[
+          definition(
+            'example',
+            fileName: 'Example.jar',
+            filePrefixes: <String>['example'],
+          ),
+        ]);
+        final String instance = await createInstance();
+        await select('example');
+        final File target = File(p.join(instance, 'plugins', 'Example.jar'))
+          ..deleteSync();
+        final List<int> dropinBytes = <int>[..._jarBytes, 77];
+        final File dropin = File(
+          p.join(
+            consumers.rootFor(ConsumerProfile.plugin),
+            'dropins',
+            'plugins',
+            'Example.jar',
+          ),
+        )..writeAsBytesSync(dropinBytes);
+        Link(target.path).createSync(dropin.path);
+        final Link duplicate = Link(
+          p.join(instance, 'plugins', 'Example-1.0.jar'),
+        )..createSync(dropin.path);
+
+        await select('example');
+
+        expect(
+          FileSystemEntity.typeSync(target.path, followLinks: false),
+          FileSystemEntityType.file,
+        );
+        expect(target.readAsBytesSync(), _jarBytes);
+        expect(duplicate.existsSync(), isFalse);
+        expect(dropin.readAsBytesSync(), dropinBytes);
+
+        target.deleteSync();
+        Link(target.path).createSync(dropin.path);
+        duplicate.createSync(dropin.path);
+        final CapturedResult result = await command(<String>[
+          'addons',
+          'set',
+          'demo',
+          '--none',
+        ]);
+        expect(result.exitCode, 0, reason: result.stderr);
+        expect(Link(target.path).existsSync(), isFalse);
+        expect(duplicate.existsSync(), isFalse);
+        expect(dropin.readAsBytesSync(), dropinBytes);
         expect(_selectedIds(await list()), isEmpty);
       },
       skip: Platform.isWindows
@@ -558,9 +884,7 @@ void main() {
 
       expect(result.exitCode, 0, reason: result.stderr);
       expect(
-        File(
-          p.join(instance, 'plugins', 'multiplexor-example.jar'),
-        ).existsSync(),
+        File(p.join(instance, 'plugins', 'example.jar')).existsSync(),
         isFalse,
       );
       expect(_selectedIds(await list()), isEmpty);
@@ -583,7 +907,7 @@ void main() {
           consumers.rootFor(ConsumerProfile.plugin),
           'dropins',
           'plugins',
-          'multiplexor-example.jar',
+          'example.jar',
         ),
       ).writeAsBytesSync(<int>[..._jarBytes, 99]);
       final File obsolete = File(p.join(instance, 'plugins', 'obsolete.jar'))
@@ -598,9 +922,7 @@ void main() {
 
       expect(result.exitCode, 0, reason: result.stderr);
       expect(
-        File(
-          p.join(instance, 'plugins', 'multiplexor-example.jar'),
-        ).readAsBytesSync(),
+        File(p.join(instance, 'plugins', 'example.jar')).readAsBytesSync(),
         _jarBytes,
       );
       expect(

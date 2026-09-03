@@ -19,15 +19,19 @@ Map<String, Object?> entry(
   'reason': reason,
 };
 
-WizardAddonChecklist checklist(List<Map<String, Object?>> entries) =>
-    WizardAddonChecklist.parse(
-      jsonEncode(<String, Object?>{
-        'instance': 'demo',
-        'type': 'paper',
-        'minecraft': '1.21.11',
-        'entries': entries,
-      }),
-    );
+WizardAddonChecklist checklist(
+  List<Map<String, Object?>> entries, {
+  String minecraft = '1.21.11',
+  bool versionRequired = false,
+}) => WizardAddonChecklist.parse(
+  jsonEncode(<String, Object?>{
+    'instance': 'demo',
+    'type': 'paper',
+    'minecraft': minecraft,
+    'versionRequired': versionRequired,
+    'entries': entries,
+  }),
+);
 
 void main() {
   group('Wizard addon checklist', () {
@@ -60,6 +64,8 @@ void main() {
         'demo',
         '--select',
         'viaversion',
+        '--mc',
+        '1.21.11',
       ]);
     });
 
@@ -101,6 +107,8 @@ void main() {
         'demo',
         '--select',
         'custom-addon,viabackwards',
+        '--mc',
+        '1.21.11',
       ]);
     });
 
@@ -108,6 +116,68 @@ void main() {
       final WizardAddonChecklist model = checklist(<Map<String, Object?>>[
         entry('viaversion', selected: true),
       ]);
+      expect(model.commandFor('demo', <int>{}), <String>[
+        'addons',
+        'set',
+        'demo',
+        '--none',
+        '--mc',
+        '1.21.11',
+      ]);
+    });
+
+    test(
+      'applies the resolved catalog version alongside changed selection',
+      () {
+        final WizardAddonChecklist model = checklist(<Map<String, Object?>>[
+          entry('viaversion'),
+        ], minecraft: ' 26.1.2 ');
+
+        expect(model.minecraft, '26.1.2');
+        expect(model.versionRequired, isFalse);
+        expect(model.commandFor('demo', <int>{0}), <String>[
+          'addons',
+          'set',
+          'demo',
+          '--select',
+          'viaversion',
+          '--mc',
+          '26.1.2',
+        ]);
+      },
+    );
+
+    test('requests version input when the engine marks it required', () {
+      final WizardAddonChecklist model = checklist(
+        <Map<String, Object?>>[
+          entry('fawe', available: false, reason: 'Minecraft version unknown.'),
+        ],
+        minecraft: '',
+        versionRequired: true,
+      );
+
+      expect(model.minecraft, isEmpty);
+      expect(model.versionRequired, isTrue);
+      expect(model.options, isEmpty);
+    });
+
+    test(
+      'unknown version alone does not require input on unsupported platforms',
+      () {
+        final WizardAddonChecklist model = checklist(<Map<String, Object?>>[
+          entry('fawe', available: false, reason: 'Requires Paper.'),
+        ], minecraft: '');
+
+        expect(model.versionRequired, isFalse);
+        expect(model.options, isEmpty);
+      },
+    );
+
+    test('omits an unresolved version when removing an unsupported addon', () {
+      final WizardAddonChecklist model = checklist(<Map<String, Object?>>[
+        entry('viaversion', selected: true, available: false),
+      ], minecraft: '');
+
       expect(model.commandFor('demo', <int>{}), <String>[
         'addons',
         'set',
@@ -132,7 +202,10 @@ void main() {
       () {
         for (final String source in <String>[
           '{}',
-          '{"entries":[{"id":"fawe"}]}',
+          '{"minecraft":"1.21.11","versionRequired":false,"entries":[{"id":"fawe"}]}',
+          '{"minecraft":12111,"versionRequired":false,"entries":[]}',
+          '{"minecraft":"","versionRequired":"true","entries":[]}',
+          '{"minecraft":"","entries":[]}',
           'not JSON',
         ]) {
           expect(

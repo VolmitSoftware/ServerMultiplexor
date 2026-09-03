@@ -3,11 +3,20 @@ part of 'interactive_wizard.dart';
 /// Presentation of the engine's addon catalog for a single instance.
 /// Compatibility, dependency resolution, and installation stay in the engine.
 class WizardAddonChecklist {
-  WizardAddonChecklist._(this.options, this.unavailableNotes);
+  WizardAddonChecklist._({
+    required this.minecraft,
+    required this.versionRequired,
+    required this.options,
+    required this.unavailableNotes,
+  });
 
   factory WizardAddonChecklist.parse(String source) {
     final Object? decoded = jsonDecode(source);
-    if (decoded case {'entries': final List<Object?> entries}) {
+    if (decoded case {
+      'minecraft': final String minecraft,
+      'versionRequired': final bool versionRequired,
+      'entries': final List<Object?> entries,
+    }) {
       final List<WizardAddonOption> options = <WizardAddonOption>[];
       final List<String> unavailableNotes = <String>[];
       for (final Object? entry in entries) {
@@ -40,13 +49,17 @@ class WizardAddonChecklist {
         }
       }
       return WizardAddonChecklist._(
-        List<WizardAddonOption>.unmodifiable(options),
-        List<String>.unmodifiable(unavailableNotes),
+        minecraft: minecraft.trim(),
+        versionRequired: versionRequired,
+        options: List<WizardAddonOption>.unmodifiable(options),
+        unavailableNotes: List<String>.unmodifiable(unavailableNotes),
       );
     }
     throw const FormatException('Invalid addon catalog response.');
   }
 
+  final String minecraft;
+  final bool versionRequired;
   final List<WizardAddonOption> options;
   final List<String> unavailableNotes;
 
@@ -82,6 +95,7 @@ class WizardAddonChecklist {
             if (selection.contains(index)) options[index].id,
         ].join(','),
       ],
+      if (minecraft.isNotEmpty) ...<String>['--mc', minecraft],
     ];
   }
 }
@@ -115,25 +129,45 @@ extension _AddonWizard on InteractiveWizard {
     String name, {
     bool duringSetup = false,
   }) async {
-    final CapturedResult result = await Ui.shielded(
-      () => passthrough.capture(<String>['addons', 'list', name, '--json']),
-    );
-    if (!result.success) {
-      Ui.error('Could not load addons for $name.');
-      if (result.stderr.trim().isNotEmpty) Ui.note(result.stderr.trim());
-      if (duringSetup) Ui.note('$name remains stopped.');
-      await Ui.pause();
-      return false;
-    }
+    String? requestedMinecraft;
+    late WizardAddonChecklist checklist;
+    while (true) {
+      final CapturedResult result = await Ui.shielded(
+        () => passthrough.capture(<String>[
+          'addons',
+          'list',
+          name,
+          '--json',
+          if (requestedMinecraft != null) ...<String>[
+            '--mc',
+            requestedMinecraft,
+          ],
+        ]),
+      );
+      if (!result.success) {
+        Ui.error('Could not load addons for $name.');
+        if (result.stderr.trim().isNotEmpty) Ui.note(result.stderr.trim());
+        if (duringSetup) Ui.note('$name remains stopped.');
+        await Ui.pause();
+        return false;
+      }
 
-    final WizardAddonChecklist checklist = WizardAddonChecklist.parse(
-      result.stdout,
-    );
+      checklist = WizardAddonChecklist.parse(result.stdout);
+      if (!checklist.versionRequired) break;
+      Ui.note(
+        'Enter this server\'s Minecraft version to choose compatible addons.',
+      );
+      requestedMinecraft = await Ui.input(
+        'Minecraft version for $name',
+        validator: _looksLikeMinecraftVersion,
+        validationMessage: 'Use a version like 1.21.11 or 26.1.2.',
+      );
+    }
     for (final String note in checklist.unavailableNotes) {
       Ui.note(note);
     }
     if (checklist.options.isEmpty) {
-      Ui.note('No addons are available for this server platform.');
+      Ui.note('No compatible addons are available for this server.');
       if (!duringSetup) await Ui.pause();
       return true;
     }

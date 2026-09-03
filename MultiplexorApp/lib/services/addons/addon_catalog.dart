@@ -11,6 +11,9 @@ final class AddonDefinition {
       name = addonString(json, 'name'),
       description = json['description'] as String? ?? '',
       kind = addonString(json, 'kind'),
+      fileName = json.containsKey('fileName')
+          ? addonString(json, 'fileName')
+          : '${addonString(json, 'id')}.jar',
       serverTypes = addonStrings(json, 'serverTypes'),
       dependencies = addonStrings(json, 'dependencies', optional: true),
       filePrefixes = addonStrings(json, 'filePrefixes', optional: true),
@@ -21,6 +24,7 @@ final class AddonDefinition {
           : <AddonSource>[AddonSource(addonObject(json['source']))] {
     if (!RegExp(r'^[a-z0-9][a-z0-9-]*$').hasMatch(id) ||
         !const <String>{'plugin', 'mod'}.contains(kind) ||
+        !isAddonJarFileName(fileName) ||
         serverTypes.isEmpty ||
         sources.isEmpty) {
       throw FormatException('Invalid addon definition: $id');
@@ -31,28 +35,57 @@ final class AddonDefinition {
   final String name;
   final String description;
   final String kind;
+  final String fileName;
   final List<String> serverTypes;
   final List<String> dependencies;
   final List<String> filePrefixes;
   final List<AddonSource> sources;
 
   String get directory => kind == 'plugin' ? 'plugins' : 'mods';
-  String get file => '$directory/multiplexor-$id.jar';
+  String get file => '$directory/$fileName';
+
+  String displayName(String serverType, String minecraft) {
+    final List<AddonSource> candidates = sources
+        .where((AddonSource source) => source.supports(serverType, minecraft))
+        .toList();
+    final int development = candidates.indexWhere(
+      (AddonSource source) => source.json['label'] == 'development',
+    );
+    return development < 0
+        ? name
+        : '$name (development${development == 0 ? '' : ' fallback'})';
+  }
+
+  bool requiresMinecraftVersion(String serverType) {
+    if (!serverTypes.contains(serverType)) return false;
+    final List<AddonSource> platformSources = sources
+        .where((AddonSource source) => source.supportsServer(serverType))
+        .toList();
+    return platformSources.isNotEmpty &&
+        platformSources.every(
+          (AddonSource source) =>
+              source.type == 'modrinth' ||
+              addonStrings(
+                source.json,
+                'minecraftVersions',
+                optional: true,
+              ).isNotEmpty,
+        );
+  }
 
   String? unavailableReason(String serverType, {String? minecraft}) {
     if (!serverTypes.contains(serverType)) {
       return 'Requires ${serverTypes.join(', ')}; this server uses $serverType.';
     }
     if (minecraft != null) {
+      if (minecraft.isEmpty && requiresMinecraftVersion(serverType)) {
+        return 'Minecraft version is unknown. Supply --mc <version>.';
+      }
       final List<AddonSource> candidates = sources
           .where((AddonSource source) => source.supports(serverType, minecraft))
           .toList();
       if (candidates.isEmpty) {
         return 'No verified source for $serverType Minecraft $minecraft.';
-      }
-      if (minecraft.isEmpty &&
-          candidates.every((AddonSource source) => source.type == 'modrinth')) {
-        return 'Minecraft version is unknown. Supply --mc <version>.';
       }
     }
     return null;
@@ -63,6 +96,7 @@ final class AddonDefinition {
     'name': name,
     'description': description,
     'kind': kind,
+    'fileName': fileName,
     'serverTypes': serverTypes,
     'dependencies': dependencies,
   };
@@ -80,6 +114,9 @@ final class AddonSource {
         addonString(json, 'asset');
       case 'url':
         addonString(json, 'url');
+      case 'jenkins':
+        addonString(json, 'url');
+        RegExp(addonString(json, 'artifactPattern'));
       case 'file':
         addonString(json, 'path');
       default:
@@ -92,27 +129,35 @@ final class AddonSource {
   final Map<String, Object?> json;
   final String type;
 
-  bool supports(String serverType, String minecraft) {
+  bool supportsServer(String serverType) {
     final List<String> types = addonStrings(
       json,
       'serverTypes',
       optional: true,
     );
+    return types.isEmpty || types.contains(serverType);
+  }
+
+  bool supports(String serverType, String minecraft) {
     final List<String> versions = addonStrings(
       json,
       'minecraftVersions',
       optional: true,
     );
-    return (types.isEmpty || types.contains(serverType)) &&
+    return supportsServer(serverType) &&
         (versions.isEmpty || versions.contains(minecraft));
   }
 }
 
 final class AddonCatalog {
   AddonCatalog(Iterable<AddonDefinition> definitions) {
+    final Set<String> files = <String>{};
     for (final AddonDefinition definition in definitions) {
       if (entries.containsKey(definition.id)) {
         throw FormatException('Duplicate addon ID: ${definition.id}');
+      }
+      if (!files.add(definition.file.toLowerCase())) {
+        throw FormatException('Duplicate addon filename: ${definition.file}');
       }
       entries[definition.id] = definition;
     }
@@ -166,6 +211,37 @@ final class AddonCatalog {
     }
     return result;
   }
+}
+
+bool isAddonJarFileName(String value) => RegExp(
+  r'^[a-z0-9][a-z0-9._ +()-]*\.jar$',
+  caseSensitive: false,
+).hasMatch(value);
+
+/// Match the declared jar or a version/platform variant, not another plugin
+/// whose name happens to begin with the same letters (e.g. WorldEditCUI).
+bool matchesAddonJar(String path, String file, List<String> prefixes) {
+  if (path.toLowerCase() == file.toLowerCase()) return true;
+  if (p.posix.dirname(path) != p.posix.dirname(file)) return false;
+  final String name = p.posix.basename(path).toLowerCase();
+  if (!name.endsWith('.jar')) return false;
+  final String stem = name.substring(0, name.length - 4);
+  for (final String value in prefixes) {
+    final String prefix = value.toLowerCase();
+    if (prefix.endsWith('.jar')) {
+      if (name == prefix) return true;
+      continue;
+    }
+    final String base = prefix.replaceFirst(RegExp(r'[-_. ]+$'), '');
+    if (base.isEmpty) continue;
+    if (stem == base ||
+        stem.startsWith(base) &&
+            stem.length > base.length &&
+            '-_. '.contains(stem[base.length])) {
+      return true;
+    }
+  }
+  return false;
 }
 
 Map<String, Object?> addonObject(Object? value) {

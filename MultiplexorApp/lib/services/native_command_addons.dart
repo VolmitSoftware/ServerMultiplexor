@@ -61,9 +61,18 @@ extension _NativeAddonCommands on NativeCommandService {
     }
     final Map<String, String> metadata = _serverSource(profile, name);
     final String serverType = metadata['type'] ?? 'custom';
-    final String minecraft =
-        parsed.option('mc')?.trim() ?? metadata['mc']?.trim() ?? '';
     final String instancePath = _instanceDir(profile, name);
+    final String minecraft =
+        inferServerMinecraftVersion(
+          serverType: serverType,
+          minecraft: parsed.option('mc') ?? metadata['mc'],
+          jarPaths: <String>[
+            if (metadata['jar'] case final String jar) jar,
+            if (metadata['installer'] case final String installer) installer,
+            p.join(instancePath, 'server.jar'),
+          ],
+        ) ??
+        '';
     final AddonInstaller installer = AddonInstaller(
       workspace: context.rootDir,
       instancePath: instancePath,

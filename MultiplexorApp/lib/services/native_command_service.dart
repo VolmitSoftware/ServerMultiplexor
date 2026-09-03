@@ -10,6 +10,7 @@ import 'package:yaml/yaml.dart';
 
 import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
+import '../models/server_minecraft_version.dart';
 import '../utils/async_work_pool.dart';
 import '../utils/delete_path.dart';
 import '../utils/duration_format.dart';
@@ -1384,6 +1385,7 @@ class NativeCommandService {
         name,
         type: type,
         jarPath: jar,
+        minecraft: options['mc'],
         importJar: true,
         isolated: isolated,
         io: io,
@@ -1435,6 +1437,7 @@ class NativeCommandService {
       name,
       type: type,
       jarPath: jarPath,
+      minecraft: requestedMc ?? (autoBuild ? mc : null),
       isolated: isolated,
       io: io,
     );
@@ -1533,7 +1536,8 @@ class NativeCommandService {
           mc: mc,
           allowLatestFallback: mcOverride == null,
         );
-        if (autoBuild || jarPath == null) {
+        final bool buildRequired = autoBuild || jarPath == null;
+        if (buildRequired) {
           io.write('[INFO] Refreshing $type for mc=$mc from upstream sources');
           jarPath = await _buildTarget(
             profile,
@@ -1547,6 +1551,7 @@ class NativeCommandService {
           name,
           type: type,
           jarPath: jarPath,
+          minecraft: mcOverride ?? (buildRequired ? mc : null),
           isolated: isolated,
           port: target.port,
           io: io,
@@ -6674,6 +6679,7 @@ class NativeCommandService {
     String name, {
     required String type,
     required String jarPath,
+    String? minecraft,
     bool importJar = false,
     bool isolated = false,
     int? port,
@@ -6694,6 +6700,11 @@ class NativeCommandService {
     final bool sourceLooksLikeInstaller = _looksLikeInstallerJar(
       resolvedJarPath,
     );
+    final String? resolvedMinecraft = inferServerMinecraftVersion(
+      serverType: type,
+      minecraft: minecraft,
+      jarPaths: <String>[resolvedJarPath],
+    );
     if (importJar) {
       resolvedJarPath = await _importManagedLaunchJar(profile, resolvedJarPath);
     }
@@ -6711,6 +6722,7 @@ class NativeCommandService {
         name,
         normalizedType,
         resolvedJarPath,
+        minecraft: resolvedMinecraft,
         isolated: isolated,
       );
       _instanceApplyStyledMotd(profile, name, force: true);
@@ -6725,6 +6737,7 @@ class NativeCommandService {
       instanceDir,
       fields: <String, String>{
         'type': normalizedType,
+        'mc': ?resolvedMinecraft,
         'launch': 'jar',
         'jar': resolvedJarPath,
         if (isolated) 'isolated': 'true',
@@ -6877,6 +6890,7 @@ class NativeCommandService {
     String instance,
     String type,
     String installerJarPath, {
+    String? minecraft,
     bool isolated = false,
   }) async {
     final instanceDir = _instanceDir(profile, instance);
@@ -6910,6 +6924,7 @@ class NativeCommandService {
       instanceDir,
       fields: <String, String>{
         'type': type,
+        'mc': ?minecraft,
         'launch': 'argsfile',
         'args_file_rel': argsRel,
         'installer': File(installerJarPath).absolute.path,

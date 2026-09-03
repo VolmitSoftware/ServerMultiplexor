@@ -43,12 +43,30 @@ final class AddonResolver {
     String serverType,
     String minecraft,
   ) async {
-    final AddonSource source = addon.sources.firstWhere(
-      (AddonSource source) => source.supports(serverType, minecraft),
-      orElse: () => throw StateError(
-        'No verified ${addon.name} source for $serverType Minecraft $minecraft.',
-      ),
+    final List<String> unavailable = <String>[];
+    for (final AddonSource source in addon.sources) {
+      if (!source.supports(serverType, minecraft)) continue;
+      try {
+        return await _resolveSource(addon, source, serverType, minecraft);
+      } on _NoCompatibleAddonRelease catch (error) {
+        // A published-version miss may use the next declared source. Network,
+        // malformed metadata and checksum failures must still fail the install.
+        unavailable.add(error.message);
+      }
+    }
+    throw StateError(
+      unavailable.isEmpty
+          ? 'No verified ${addon.name} source for $serverType Minecraft $minecraft.'
+          : unavailable.join(' '),
     );
+  }
+
+  Future<ResolvedAddon> _resolveSource(
+    AddonDefinition addon,
+    AddonSource source,
+    String serverType,
+    String minecraft,
+  ) async {
     final Map<String, Object?> json = source.json;
     switch (source.type) {
       case 'file':
@@ -64,6 +82,8 @@ final class AddonResolver {
           hash: json['sha256'] as String?,
           hashType: 'sha256',
         );
+      case 'jenkins':
+        return _jenkins(json);
       case 'github':
         final String repo = addonString(json, 'repo');
         final String tag = json['tag'] as String? ?? 'latest';
@@ -159,7 +179,9 @@ final class AddonResolver {
                 );
           for (final Map<String, Object?> version in versions) {
             final Object? files = version['files'];
-            if (files is! List<Object?>) continue;
+            if (files is! List<Object?>) {
+              throw const FormatException('Invalid Modrinth release files');
+            }
             final List<Map<String, Object?>> jars = files
                 .map(addonObject)
                 .where(
@@ -177,7 +199,11 @@ final class AddonResolver {
                 : jars.length == 1
                 ? jars.single
                 : null;
-            if (file == null) continue;
+            if (file == null) {
+              throw StateError(
+                'Expected exactly one primary JAR for ${addon.name}',
+              );
+            }
             final Map<String, Object?> hashes = addonObject(file['hashes']);
             final List<String> dependencies = <String>[];
             final Map<String, String> requiredVersions = <String, String>{};
@@ -224,12 +250,81 @@ final class AddonResolver {
             );
           }
         }
-        throw StateError(
+        throw _NoCompatibleAddonRelease(
           'No stable ${addon.name} release for $serverType Minecraft $minecraft.',
         );
       default:
         throw StateError('Unknown addon provider: ${source.type}');
     }
+  }
+
+  Future<ResolvedAddon> _jenkins(Map<String, Object?> source) async {
+    final Uri configured = Uri.parse(addonString(source, 'url'));
+    if (configured.hasQuery || configured.hasFragment) {
+      throw const FormatException(
+        'Jenkins job URL cannot have a query or fragment',
+      );
+    }
+    final Uri job = configured.replace(
+      path: configured.path.endsWith('/')
+          ? configured.path
+          : '${configured.path}/',
+    );
+    final Map<String, Object?> build = addonObject(
+      await _json(
+        job
+            .resolve('lastSuccessfulBuild/api/json')
+            .replace(
+              queryParameters: <String, String>{
+                'tree':
+                    'number,result,building,artifacts[fileName,relativePath]',
+              },
+            ),
+      ),
+    );
+    final Object? number = build['number'];
+    final Object? artifacts = build['artifacts'];
+    if (number is! int ||
+        number < 1 ||
+        build['result'] != 'SUCCESS' ||
+        build['building'] != false ||
+        artifacts is! List<Object?>) {
+      throw const FormatException('Invalid successful Jenkins build');
+    }
+    final RegExp pattern = RegExp(addonString(source, 'artifactPattern'));
+    final List<Map<String, Object?>> matches = artifacts.map(addonObject).where(
+      (Map<String, Object?> artifact) {
+        final String filename = addonString(artifact, 'fileName');
+        return filename.toLowerCase().endsWith('.jar') &&
+            pattern.hasMatch(filename);
+      },
+    ).toList();
+    if (matches.length != 1) {
+      throw StateError(
+        'Expected exactly one matching JAR in Jenkins build $number',
+      );
+    }
+    final Map<String, Object?> artifact = matches.single;
+    final String relativePath = addonString(artifact, 'relativePath');
+    final List<String> segments = relativePath.split('/');
+    if (relativePath.contains('\\') ||
+        segments.any(
+          (String part) => part.isEmpty || part == '.' || part == '..',
+        )) {
+      throw const FormatException('Invalid Jenkins artifact path');
+    }
+    final String label = source['label'] as String? ?? '';
+    final String filename = addonString(artifact, 'fileName');
+    return ResolvedAddon(
+      // Resolve against the immutable build number, never a moving latest URL.
+      location: job
+          .resolve('$number/')
+          .resolveUri(Uri(pathSegments: <String>['artifact', ...segments]))
+          .toString(),
+      version:
+          '${filename.substring(0, filename.length - 4)} #$number'
+          '${label.isEmpty ? '' : ' ($label)'}',
+    );
   }
 
   Future<void> download(ResolvedAddon resolved, File target) async {
@@ -320,4 +415,9 @@ final class AddonResolver {
     }
     return jsonDecode(utf8.decode(bytes));
   }
+}
+
+final class _NoCompatibleAddonRelease implements Exception {
+  const _NoCompatibleAddonRelease(this.message);
+  final String message;
 }

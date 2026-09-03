@@ -12,6 +12,7 @@ const List<Map<String, Object?>> builtinAddons = <Map<String, Object?>>[
   <String, Object?>{
     'id': 'essentialsx',
     'name': 'EssentialsX',
+    'fileName': 'EssentialsX.jar',
     'kind': 'plugin',
     'description': 'Core commands, homes, warps and economy.',
     'serverTypes': _bukkitServers,
@@ -20,11 +21,21 @@ const List<Map<String, Object?>> builtinAddons = <Map<String, Object?>>[
       'essentialsx.jar',
       'essentials.jar',
     ],
-    'source': <String, Object?>{'type': 'modrinth', 'project': 'hXiIvTyT'},
+    'sources': <Map<String, Object?>>[
+      <String, Object?>{'type': 'modrinth', 'project': 'hXiIvTyT'},
+      <String, Object?>{
+        'type': 'jenkins',
+        'url': 'https://ci.ender.zone/job/EssentialsX/',
+        'artifactPattern': r'^EssentialsX-[^/]+\.jar$',
+        'minecraftVersions': <String>['26.2'],
+        'label': 'development',
+      },
+    ],
   },
   <String, Object?>{
     'id': 'fawe',
     'name': 'FastAsyncWorldEdit (FAWE)',
+    'fileName': 'FastAsyncWorldEdit.jar',
     'kind': 'plugin',
     'description': 'Fast WorldEdit building and editing tools.',
     'serverTypes': _bukkitServers,
@@ -34,6 +45,7 @@ const List<Map<String, Object?>> builtinAddons = <Map<String, Object?>>[
   <String, Object?>{
     'id': 'viaversion',
     'name': 'ViaVersion',
+    'fileName': 'ViaVersion.jar',
     'kind': 'plugin',
     'description': 'Allow newer Minecraft clients to join.',
     'serverTypes': _viaServers,
@@ -47,6 +59,7 @@ const List<Map<String, Object?>> builtinAddons = <Map<String, Object?>>[
   <String, Object?>{
     'id': 'viabackwards',
     'name': 'ViaBackwards',
+    'fileName': 'ViaBackwards.jar',
     'kind': 'plugin',
     'description': 'Allow older clients to join; includes ViaVersion.',
     'serverTypes': _viaServers,
@@ -61,6 +74,7 @@ const List<Map<String, Object?>> builtinAddons = <Map<String, Object?>>[
   <String, Object?>{
     'id': 'protocollib',
     'name': 'ProtocolLib',
+    'fileName': 'ProtocolLib.jar',
     'kind': 'plugin',
     'description':
         'Packet API for plugins. Newer MC versions use the official development build.',

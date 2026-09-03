@@ -12,6 +12,94 @@ const List<int> _jar = <int>[0x50, 0x4b, 3, 4, 10, 20, 30, 40];
 const Duration _deadline = Duration(seconds: 3);
 
 void main() {
+  group('addon file identity', () {
+    test('uses a plain default filename and accepts explicit names', () {
+      expect(_definition('example').file, 'plugins/example.jar');
+      expect(
+        _definition('example', fileName: 'ExamplePlugin.jar').file,
+        'plugins/ExamplePlugin.jar',
+      );
+    });
+
+    for (final String filename in <String>[
+      '',
+      '../escape.jar',
+      'plugins/escape.jar',
+      r'plugins\escape.jar',
+      '/escape.jar',
+      'Example.txt',
+      'Example.jar\n',
+    ]) {
+      test('rejects unsafe addon filename ${jsonEncode(filename)}', () {
+        expect(
+          () => _definition('example', fileName: filename),
+          throwsFormatException,
+        );
+      });
+    }
+
+    test('rejects canonical filename collisions without case sensitivity', () {
+      expect(
+        () => AddonCatalog(<AddonDefinition>[
+          _definition('first', fileName: 'Example.jar'),
+          _definition('second', fileName: 'example.jar'),
+        ]),
+        throwsFormatException,
+      );
+    });
+
+    test('accepts canonical manifest names in either addon directory', () {
+      for (final String file in <String>[
+        'plugins/ViaVersion.jar',
+        'mods/Example-Mod_1.jar',
+      ]) {
+        expect(_installed('example', file).file, file);
+      }
+    });
+
+    for (final String path in <String>[
+      '../plugins/Example.jar',
+      'plugins/../Example.jar',
+      'plugins/nested/Example.jar',
+      '/plugins/Example.jar',
+      r'plugins\Example.jar',
+      'plugins/Example.txt',
+      'plugins/Example.jar\n',
+      'world/Example.jar',
+    ]) {
+      test('rejects unsafe installed path ${jsonEncode(path)}', () {
+        expect(() => _installed('example', path), throwsFormatException);
+      });
+    }
+
+    test('matches canonical and version aliases only at name boundaries', () {
+      final InstalledAddon via = _installed(
+        'viaversion',
+        'plugins/ViaVersion.jar',
+        filePrefixes: <String>['viaversion'],
+      );
+      for (final String name in <String>[
+        'ViaVersion.jar',
+        'ViaVersion-5.11.0.jar',
+        'viaversion_5.11.0.jar',
+        'ViaVersion 5.11.0.jar',
+        'ViaVersion.5.11.0.jar',
+      ]) {
+        expect(via.protects('plugins/$name'), isTrue, reason: name);
+      }
+      expect(via.protects('plugins/ViaVersionExtras.jar'), isFalse);
+      expect(via.protects('mods/ViaVersion.jar'), isFalse);
+      expect(via.protects('plugins/ViaVersion/config.yml'), isFalse);
+      final InstalledAddon fawe = _installed(
+        'fawe',
+        'plugins/FastAsyncWorldEdit.jar',
+        filePrefixes: <String>['fastasyncworldedit', 'worldedit'],
+      );
+      expect(fawe.protects('plugins/WorldEdit-7.3.0.jar'), isTrue);
+      expect(fawe.protects('plugins/WorldEditCUI.jar'), isFalse);
+    });
+  });
+
   group('parallel addon preparation', () {
     late Directory root;
     late Directory instance;
@@ -202,29 +290,184 @@ void main() {
     );
 
     test(
+      'builtins replace versioned jars without removing similarly named plugins',
+      () async {
+        final AddonCatalog catalog = AddonCatalog.load(root.path);
+        final Map<String, List<int>> originals = <String, List<int>>{
+          'ViaVersion.jar': <int>[..._jar, 1],
+          'ViaVersion-5.11.0.jar': <int>[..._jar, 2],
+          'ViaVersion_5.10.0.jar': <int>[..._jar, 3],
+          'FastAsyncWorldEdit-Paper-2.13.0.jar': <int>[..._jar, 4],
+          'WorldEdit-7.3.0.jar': <int>[..._jar, 5],
+          'ViaVersionExtras.jar': <int>[..._jar, 6],
+          'WorldEditCUI.jar': <int>[..._jar, 7],
+        };
+        for (final MapEntry<String, List<int>> original in originals.entries) {
+          File(p.join(instance.path, 'plugins', original.key))
+            ..createSync(recursive: true)
+            ..writeAsBytesSync(original.value);
+        }
+
+        await apply(catalog, <String>{'viaversion', 'fawe'});
+
+        for (final String canonical in <String>[
+          'ViaVersion.jar',
+          'FastAsyncWorldEdit.jar',
+        ]) {
+          expect(
+            File(p.join(instance.path, 'plugins', canonical)).readAsBytesSync(),
+            _jar,
+          );
+        }
+        for (final String alias in <String>[
+          'ViaVersion-5.11.0.jar',
+          'ViaVersion_5.10.0.jar',
+          'FastAsyncWorldEdit-Paper-2.13.0.jar',
+          'WorldEdit-7.3.0.jar',
+        ]) {
+          expect(
+            File(p.join(instance.path, 'plugins', alias)).existsSync(),
+            isFalse,
+          );
+        }
+        for (final String separate in <String>[
+          'ViaVersionExtras.jar',
+          'WorldEditCUI.jar',
+        ]) {
+          expect(
+            File(p.join(instance.path, 'plugins', separate)).readAsBytesSync(),
+            originals[separate],
+          );
+        }
+        expect(
+          AddonState.read(
+            instance.path,
+          ).entries.values.map((InstalledAddon addon) => addon.file),
+          <String>['plugins/ViaVersion.jar', 'plugins/FastAsyncWorldEdit.jar'],
+        );
+      },
+    );
+
+    test(
+      'a commit failure restores canonical jars and every duplicate alias',
+      () async {
+        final AddonCatalog catalog = AddonCatalog(<AddonDefinition>[
+          _definition(
+            'first',
+            fileName: 'First.jar',
+            filePrefixes: <String>['first'],
+          ),
+          _definition(
+            'second',
+            fileName: 'Second.jar',
+            filePrefixes: <String>['second'],
+          ),
+        ]);
+        final Map<String, List<int>> originals = <String, List<int>>{
+          'First.jar': <int>[..._jar, 1],
+          'First-1.0.jar': <int>[..._jar, 2],
+          'First_0.9.jar': <int>[..._jar, 3],
+          'Second.jar': <int>[..._jar, 4],
+          'Second-2.0.jar': <int>[..._jar, 5],
+          'kept.jar': <int>[..._jar, 6],
+        };
+        for (final MapEntry<String, List<int>> original in originals.entries) {
+          File(p.join(instance.path, 'plugins', original.key))
+            ..createSync(recursive: true)
+            ..writeAsBytesSync(original.value);
+        }
+        final File state = File(p.join(instance.path, AddonState.filename));
+        final String originalState = jsonEncode(
+          AddonState(<String, InstalledAddon>{
+            'first': _installed(
+              'first',
+              'plugins/First.jar',
+              filePrefixes: <String>['first'],
+            ),
+            'kept': _installed('kept', 'plugins/kept.jar'),
+          }).toJson(),
+        );
+        state.writeAsStringSync(originalState);
+        final File dropin =
+            File(
+                p.join(
+                  root.path,
+                  'consumers',
+                  'plugin-consumers',
+                  'dropins',
+                  'plugins',
+                  'First-1.0.jar',
+                ),
+              )
+              ..createSync(recursive: true)
+              ..writeAsBytesSync(<int>[..._jar, 77]);
+        bool commitEntered = false;
+
+        await expectLater(
+          apply(
+            catalog,
+            <String>{'first', 'second'},
+            onCommit: () {
+              commitEntered = true;
+              final FileSystemEntity stage = _stages(instance).single;
+              // The first jar and alias backups are committed before the
+              // missing second staged jar makes its rename fail.
+              File(p.join(stage.path, 'second.jar')).deleteSync();
+            },
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        expect(commitEntered, isTrue);
+        expect(
+          fixture.finishedDownloadIds,
+          unorderedEquals(<String>['first', 'second']),
+        );
+        for (final MapEntry<String, List<int>> original in originals.entries) {
+          expect(
+            File(
+              p.join(instance.path, 'plugins', original.key),
+            ).readAsBytesSync(),
+            original.value,
+            reason: original.key,
+          );
+        }
+        expect(state.readAsStringSync(), originalState);
+        expect(dropin.readAsBytesSync(), <int>[..._jar, 77]);
+        expect(_stages(instance), isEmpty);
+      },
+    );
+
+    test(
       'a failed download drains other workers before cleaning up staging',
       () async {
         final AddonCatalog catalog = AddonCatalog(<AddonDefinition>[
           _definition('broken'),
-          _definition('slow-one'),
+          _definition('slow-one', filePrefixes: <String>['slow-one']),
           _definition('slow-two'),
           _definition('slow-three'),
         ]);
-        final File original =
-            File(p.join(instance.path, 'plugins', 'multiplexor-kept.jar'))
-              ..createSync(recursive: true)
-              ..writeAsBytesSync(_jar);
+        final File original = File(p.join(instance.path, 'plugins', 'kept.jar'))
+          ..createSync(recursive: true)
+          ..writeAsBytesSync(_jar);
         final String originalState = jsonEncode(
           AddonState(<String, InstalledAddon>{
             'kept': InstalledAddon(<String, Object?>{
               'id': 'kept',
-              'file': 'plugins/multiplexor-kept.jar',
+              'file': 'plugins/kept.jar',
               'sha256': sha256.convert(_jar).toString(),
             }),
           }).toJson(),
         );
         final File state = File(p.join(instance.path, AddonState.filename))
           ..writeAsStringSync(originalState);
+        final List<File> duplicateOriginals = <File>[
+          File(p.join(instance.path, 'plugins', 'slow-one.jar')),
+          File(p.join(instance.path, 'plugins', 'slow-one-1.0.jar')),
+        ];
+        for (final File duplicate in duplicateOriginals) {
+          duplicate.writeAsBytesSync(<int>[..._jar, 99]);
+        }
         final Completer<void> fourDownloads = Completer<void>();
         final Completer<void> failureSent = Completer<void>();
         final Completer<void> finishSlow = Completer<void>();
@@ -266,6 +509,9 @@ void main() {
           expect(fixture.activeDownloads, 0);
           expect(committed, isFalse);
           expect(original.readAsBytesSync(), _jar);
+          for (final File duplicate in duplicateOriginals) {
+            expect(duplicate.readAsBytesSync(), <int>[..._jar, 99]);
+          }
           expect(state.readAsStringSync(), originalState);
           expect(_stages(instance), isEmpty);
         } finally {
@@ -289,13 +535,28 @@ List<FileSystemEntity> _stages(Directory instance) => instance
 AddonDefinition _definition(
   String id, {
   List<String> dependencies = const <String>[],
+  String? fileName,
+  List<String> filePrefixes = const <String>[],
 }) => AddonDefinition(<String, Object?>{
   'id': id,
   'name': id,
   'kind': 'plugin',
   'serverTypes': <String>['paper'],
   'dependencies': dependencies,
+  'fileName': ?fileName,
+  'filePrefixes': filePrefixes,
   'source': <String, Object?>{'type': 'modrinth', 'project': id},
+});
+
+InstalledAddon _installed(
+  String id,
+  String file, {
+  List<String> filePrefixes = const <String>[],
+}) => InstalledAddon(<String, Object?>{
+  'id': id,
+  'file': file,
+  'sha256': sha256.convert(_jar).toString(),
+  'filePrefixes': filePrefixes,
 });
 
 final class _AddonApi {

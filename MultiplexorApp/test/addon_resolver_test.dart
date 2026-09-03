@@ -45,6 +45,177 @@ void main() {
       fixture.json('api.modrinth.com/v2/project/example/version', entries);
     }
 
+    const String jenkinsApi =
+        'ci.ender.zone/job/EssentialsX/lastSuccessfulBuild/api/json';
+    const String essentialsJar = 'EssentialsX-2.22.1-dev+23-test.jar';
+    const String essentialsPath =
+        'ci.ender.zone/job/EssentialsX/1827/artifact/jars/$essentialsJar';
+
+    void essentialsBuild({List<Map<String, Object?>>? artifacts}) {
+      fixture.json(jenkinsApi, <String, Object?>{
+        'number': 1827,
+        'result': 'SUCCESS',
+        'building': false,
+        'artifacts':
+            artifacts ??
+            <Map<String, Object?>>[
+              <String, Object?>{
+                'fileName': essentialsJar,
+                'relativePath': 'jars/$essentialsJar',
+              },
+              <String, Object?>{
+                'fileName': 'EssentialsXChat-2.22.1-dev.jar',
+                'relativePath': 'jars/EssentialsXChat-2.22.1-dev.jar',
+              },
+            ],
+      });
+    }
+
+    test(
+      'EssentialsX falls back to an immutable official CI artifact on 26.2',
+      () async {
+        fixture.json(
+          'api.modrinth.com/v2/project/hXiIvTyT/version',
+          <Object?>[],
+        );
+        essentialsBuild();
+        fixture.bytes(essentialsPath, _jar);
+
+        await resolveWith((AddonResolver resolver) async {
+          final ResolvedAddon result = await resolver.resolve(
+            AddonCatalog.load(root.path).entries['essentialsx']!,
+            'leaf',
+            '26.2',
+          );
+          expect(
+            Uri.parse(result.location).path,
+            '/job/EssentialsX/1827/artifact/jars/$essentialsJar',
+          );
+          expect(result.version, contains('#1827 (development)'));
+          final File target = File(p.join(root.path, 'essentials.jar'));
+          await resolver.download(result, target);
+          expect(target.readAsBytesSync(), _jar);
+        });
+      },
+    );
+
+    test('EssentialsX prefers a compatible stable release over CI', () async {
+      fixture.json(
+        'api.modrinth.com/v2/project/hXiIvTyT/version',
+        <Map<String, Object?>>[
+          _version('stable-essentials', minecraft: <String>['26.2']),
+        ],
+      );
+      await resolveWith((AddonResolver resolver) async {
+        final ResolvedAddon result = await resolver.resolve(
+          AddonCatalog.load(root.path).entries['essentialsx']!,
+          'leaf',
+          '26.2',
+        );
+        expect(result.version, 'stable-essentials');
+      });
+      expect(
+        fixture.requests.every((Uri uri) => uri.host != 'ci.ender.zone'),
+        isTrue,
+      );
+    });
+
+    test(
+      'EssentialsX does not use CI for an unverified game version',
+      () async {
+        fixture.json(
+          'api.modrinth.com/v2/project/hXiIvTyT/version',
+          <Object?>[],
+        );
+        await resolveWith((AddonResolver resolver) async {
+          await expectLater(
+            resolver.resolve(
+              AddonCatalog.load(root.path).entries['essentialsx']!,
+              'leaf',
+              '99.0',
+            ),
+            throwsStateError,
+          );
+        });
+        expect(
+          fixture.requests.every((Uri uri) => uri.host != 'ci.ender.zone'),
+          isTrue,
+        );
+      },
+    );
+
+    test('provider HTTP failures do not silently switch to CI', () async {
+      essentialsBuild();
+      await resolveWith((AddonResolver resolver) async {
+        await expectLater(
+          resolver.resolve(
+            AddonCatalog.load(root.path).entries['essentialsx']!,
+            'leaf',
+            '26.2',
+          ),
+          throwsA(isA<HttpException>()),
+        );
+      });
+      expect(
+        fixture.requests.every((Uri uri) => uri.host != 'ci.ender.zone'),
+        isTrue,
+      );
+    });
+
+    test(
+      'malformed compatible release metadata does not fall back to CI',
+      () async {
+        fixture.json(
+          'api.modrinth.com/v2/project/hXiIvTyT/version',
+          <Map<String, Object?>>[
+            _version('broken-release', minecraft: <String>['26.2'])
+              ..['files'] = null,
+          ],
+        );
+        essentialsBuild();
+        await resolveWith((AddonResolver resolver) async {
+          await expectLater(
+            resolver.resolve(
+              AddonCatalog.load(root.path).entries['essentialsx']!,
+              'leaf',
+              '26.2',
+            ),
+            throwsFormatException,
+          );
+        });
+        expect(
+          fixture.requests.every((Uri uri) => uri.host != 'ci.ender.zone'),
+          isTrue,
+        );
+      },
+    );
+
+    test('Jenkins rejects ambiguous core artifacts', () async {
+      fixture.json('api.modrinth.com/v2/project/hXiIvTyT/version', <Object?>[]);
+      essentialsBuild(
+        artifacts: <Map<String, Object?>>[
+          <String, Object?>{
+            'fileName': essentialsJar,
+            'relativePath': 'jars/$essentialsJar',
+          },
+          <String, Object?>{
+            'fileName': 'EssentialsX-2.22.1.jar',
+            'relativePath': 'jars/EssentialsX-2.22.1.jar',
+          },
+        ],
+      );
+      await resolveWith((AddonResolver resolver) async {
+        await expectLater(
+          resolver.resolve(
+            AddonCatalog.load(root.path).entries['essentialsx']!,
+            'leaf',
+            '26.2',
+          ),
+          throwsStateError,
+        );
+      });
+    });
+
     test(
       'selects the newest stable exact Minecraft and loader match',
       () async {

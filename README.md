@@ -94,7 +94,7 @@ Version refresh is automatic — the wizard never asks "refresh from upstream?".
 
 Pull latest builds refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line.
 
-Local server setup includes an **Addons** checklist before the first launch. To change an existing server, stop it and open its card → **Addons**. Use Space, Enter, or a click to toggle entries, then Done to apply. The checked selection is saved per instance. ViaBackwards includes ViaVersion automatically. Cancelling or a failed install leaves the new server stopped.
+Local server setup includes an **Addons** checklist before the first launch. To change an existing server, stop it and open its card → **Addons**. Use Space, Enter, or a click to toggle entries, then Done to download and apply. The checked selection is saved per instance. Minecraft versions are detected from server metadata or recognized jar filenames, including existing Leaf instances. If a custom jar has no discoverable version, the wizard asks for it inline before showing the checklist. ViaBackwards includes ViaVersion automatically. Cancelling or a failed install leaves the new server stopped.
 
 For batches, use the main dashboard's left-hand checkboxes and selected action bar. Batch starts stay headless, so they do not attach a console for each server. Local operations use the same `instance bulk` command available to scripts; Remote operations reuse the fleet engine with only the checked IDs. Both run up to four servers concurrently by default; headless bulk commands accept `--concurrency 1-8`. Restart still stops each server before starting that server again. Workspace Start all and Stop all use the same parallel engines, with consoles opened after the start batch finishes.
 
@@ -312,6 +312,8 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 The bundled catalog offers EssentialsX (core), FastAsyncWorldEdit (FAWE), ViaVersion, ViaBackwards, and ProtocolLib. These are server plugins. EssentialsX and FAWE are offered for Paper, Purpur, Leaf, and Spigot; ViaVersion, ViaBackwards, and ProtocolLib also support Folia/Canvas. Forge, Fabric, NeoForge, and Mohist can use explicitly compatible custom entries. Platform restrictions are applied before selection; Modrinth installs require an exact published Minecraft-version match and a stable release, preferring the Paper FAWE artifact for Paper derivatives.
 
+New server creation records Minecraft versions before imported jars are renamed into the cache. Existing instances can also resolve the version from their current jar's canonical filename or symlink target. `--mc` overrides detection; `addons list --json` reports the resolved `minecraft` and whether `versionRequired` is still true. A missing version is separate from platform compatibility.
+
 | Command | What it does |
 |---------|--------------|
 | `addons catalog [--json]` | List the bundled and workspace-local catalog; print the custom registry path in text mode. |
@@ -319,9 +321,13 @@ The bundled catalog offers EssentialsX (core), FastAsyncWorldEdit (FAWE), ViaVer
 | `addons set [instance] (--select <id,id,...>\|--none) [--mc <version>]` | Apply the complete checked selection, automatically including declared dependencies. Requires a stopped server. |
 | `addons update [instance] [--mc <version>]` | Refresh the selected addons from their configured sources. Requires a stopped server. |
 
-Addon metadata resolution and jar download/hash preparation run up to four at a time. Downloads are staged and validated before the selection is committed; dependency checks and the final installation remain ordered. Modrinth hashes and available GitHub asset hashes are verified. Jars are installed directly as `plugins/multiplexor-<id>.jar` or `mods/multiplexor-<id>.jar`, with ownership and checksums in `.multiplexor-addons.json`. An unchanged selection reuses its installed jars. Unchecking removes managed jars, retaining plugin configuration folders. Existing unmanaged conflicts and locally modified managed jars require moving the conflicting file aside first. Normal drop-in sync, including `--clean`, preserves selected addons and skips conflicting source filenames. Addons work on isolated instances too. Factory reset clears both their jars and selection; clone and backup preserve them.
+Addon metadata resolution and jar download/hash preparation run up to four at a time. Downloads are staged and validated before the selection is committed; dependency checks and the final installation remain ordered. Modrinth hashes and available GitHub asset hashes are verified. Addons install directly into the selected instance's `plugins/` or `mods/` directory; they never write to shared drop-ins. Bundled filenames are `EssentialsX.jar`, `FastAsyncWorldEdit.jar`, `ViaVersion.jar`, `ViaBackwards.jar`, and `ProtocolLib.jar`.
+
+Installation replaces an existing matching jar and removes matching version/platform variants, such as `ViaVersion-5.11.0.jar`, so each addon has one plain filename. Replacements are backed up until the whole selection commits and restored if installation fails. Replacing a jar symlink replaces the link itself and leaves its source untouched. Plugin configuration folders and unrelated jars stay in place. Selection and downloaded checksums are recorded in `.multiplexor-addons.json`. You can overwrite a plain jar manually: an unchanged selection keeps that copy, `addons update` replaces it from the configured source, and unchecking removes it. Normal drop-in sync, including `--clean`, preserves selected addons and skips their matching source filenames. Addons work on isolated instances too. Factory reset clears both their jars and selection; clone and backup preserve them.
 
 ProtocolLib uses the official stable `5.4.0` release through Minecraft 1.21.8. For 1.21.9–1.21.11 and 26.1–26.1.2 it uses the official `dev-build` Spigot-compatible artifact, including on Paper. For 26.2 it uses the Paper artifact on Paper derivatives and the Spigot artifact on Spigot. The checklist labels these **ProtocolLib (development)**. The modern Paper artifact requires Paper API 26.2 and cannot be substituted on older servers. These rules are based on [ProtocolLib's artifacts and support declarations](https://github.com/dmulloy2/ProtocolLib). Unknown newer versions need a catalog update before ProtocolLib is offered.
+
+EssentialsX prefers a compatible stable Modrinth release. On Minecraft 26.2, if none exists, it downloads the core jar from the [official EssentialsX CI](https://ci.ender.zone/job/EssentialsX/), which includes [26.2 support](https://github.com/EssentialsX/Essentials/pull/6561). The checklist labels this **EssentialsX (development fallback)**. CI downloads pin the successful build number before downloading, so a newer build cannot change the selected artifact mid-install. All five bundled addons have downloadable builds for Leaf 26.2; no local source build is required.
 
 #### Adding entries to the checklist
 
@@ -333,6 +339,7 @@ Create `.multiplexor/addons.json` in the workspace. Entries are added alongside 
     {
       "id": "my-plugin",
       "name": "My Plugin",
+      "fileName": "MyPlugin.jar",
       "description": "My local development plugin",
       "kind": "plugin",
       "serverTypes": ["paper", "purpur"],
@@ -349,16 +356,17 @@ Create `.multiplexor/addons.json` in the workspace. Entries are added alongside 
 }
 ```
 
-The required entry fields are `id`, `name`, `kind` (`plugin` or `mod`), `serverTypes`, and `source`. Optional `dependencies` lists other catalog IDs and installs them first; unknown or cyclic dependencies are rejected. Modrinth-required dependencies must have catalog entries and be declared in this list. Optional `filePrefixes` lists existing jar-name prefixes to detect duplicate installations and skip conflicting shared drop-ins, for example `["MyPlugin-"]`.
+The required entry fields are `id`, `name`, `kind` (`plugin` or `mod`), `serverTypes`, and `source`. Optional `fileName` sets the installed basename and defaults to `<id>.jar`; it must be a plain jar filename, and two entries cannot target the same file. Optional `dependencies` lists other catalog IDs and installs them first; unknown or cyclic dependencies are rejected. Modrinth-required dependencies must have catalog entries and be declared in this list. Optional `filePrefixes` identifies equivalent jar names to replace inside the instance and skip during shared drop-in sync, for example `["MyPlugin-"]`. Matching requires a name boundary before a version/platform suffix, so `WorldEdit` does not match `WorldEditCUI`.
 
 | Source type | Fields |
 |-------------|--------|
 | `modrinth` | `project`: project ID or slug; optional `versionId` pins an exact stable version and `loaders` overrides the ordered loader preferences for a verified universal jar. Chooses stable versions for the instance's Minecraft version. |
 | `github` | `repo`: `owner/repo`; `asset`: exact jar filename; optional `tag` (defaults to `latest`) and `label` such as `development`. |
+| `jenkins` | `url`: job URL; `artifactPattern`: regular expression matching exactly one published jar filename; optional `label`. Downloads from a numbered successful build. |
 | `url` | `url`: direct HTTP(S) jar URL; optional `sha256` and `version`. |
 | `file` | `path`: local jar, absolute or relative to the workspace. `addons update` recopies it. |
 
-Each source can restrict `serverTypes` and `minecraftVersions` to exact lists. Use these for direct URLs, local jars, and GitHub releases whose compatibility is known; those providers do not publish standardized Minecraft compatibility metadata. An entry can use `sources: [...]` instead of `source`, with the first matching source winning. Bundled definitions live in `MultiplexorApp/lib/services/addons/builtin_addons.dart`; catalog validation, provider resolution, and installation are separate modules reused by the CLI and wizard.
+Each source can restrict `serverTypes` and `minecraftVersions` to exact lists. Use these for direct URLs, local jars, GitHub releases, and Jenkins builds whose compatibility is known; those providers do not publish standardized Minecraft compatibility metadata. An entry can use `sources: [...]` instead of `source`, tried in order. If Modrinth has no compatible stable release, resolution proceeds to the next matching source. Network errors, malformed metadata, and checksum failures stop installation. Bundled definitions live in `MultiplexorApp/lib/services/addons/builtin_addons.dart`; catalog validation, provider resolution, and installation are separate modules reused by the CLI and wizard.
 
 ### content — Modrinth/URL plugin and mod manager
 
