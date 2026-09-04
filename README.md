@@ -269,7 +269,7 @@ Every gameplay run starts a first-person Prismarine web feed on a free loopback 
 
 The built-in `connect` scenario validates login, spawn, position, health, and connection stability. `command` requires `--command` plus an `--expect` regular expression. `effect` optionally runs `--command` and requires the named `--effect`. Custom modules default-export `{ name, description, async run(context) }`; the context supplies `bot`, `step`, `expect`, `command`, `waitForEvent`, `waitForMessage`, `sleep`, server metadata, and a safe-by-default pathfinder configuration.
 
-The harness pins [Mineflayer commit `aa8fdfaf`](https://github.com/PrismarineJS/mineflayer/commit/aa8fdfaf42d48f0be9d8fbde45eafd40fde4d134), which identifies itself as version 4.37.1 and requires Node 22+. It supports vanilla Java protocols through 26.1. Minecraft 26.2 is outside its tested protocol range. Gameplay results prove protocol-visible behavior, not client rendering, resource packs, sound, camera behavior, client mods, or human feel.
+The harness pins bleeding-edge [Mineflayer commit `f603758e`](https://github.com/PrismarineJS/mineflayer/commit/f603758e4228a7e61d1337526e6066e79308b976), which identifies itself as version 4.38.0 and requires Node 22+. It supports vanilla Java protocols through 26.1. Minecraft 26.2 is outside its tested protocol range. Gameplay results prove protocol-visible behavior, not client rendering, resource packs, sound, camera behavior, client mods, or human feel.
 
 ### plugins / mods — dropin sources & sync
 
