@@ -43,6 +43,16 @@ const List<Map<String, Object?>> builtinAddons = <Map<String, Object?>>[
     'source': <String, Object?>{'type': 'modrinth', 'project': 'z4HZZnLr'},
   },
   <String, Object?>{
+    'id': 'bluemap',
+    'name': 'BlueMap',
+    'fileName': 'BlueMap.jar',
+    'kind': 'plugin',
+    'description': 'Render worlds as an interactive 3D web map.',
+    'serverTypes': _viaServers,
+    'filePrefixes': <String>['bluemap'],
+    'source': <String, Object?>{'type': 'modrinth', 'project': 'swbUV1cr'},
+  },
+  <String, Object?>{
     'id': 'viaversion',
     'name': 'ViaVersion',
     'fileName': 'ViaVersion.jar',

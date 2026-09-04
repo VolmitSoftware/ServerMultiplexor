@@ -133,6 +133,7 @@ void main() {
         containsAll(<String>[
           'essentialsx',
           'fawe',
+          'bluemap',
           'viaversion',
           'viabackwards',
           'protocollib',
@@ -150,6 +151,7 @@ void main() {
         <String, String>{
           'essentialsx': 'plugins/EssentialsX.jar',
           'fawe': 'plugins/FastAsyncWorldEdit.jar',
+          'bluemap': 'plugins/BlueMap.jar',
           'viaversion': 'plugins/ViaVersion.jar',
           'viabackwards': 'plugins/ViaBackwards.jar',
           'protocollib': 'plugins/ProtocolLib.jar',
@@ -168,7 +170,7 @@ void main() {
 
       expect(status['minecraft'], '26.2');
       expect(status['versionRequired'], isFalse);
-      expect(_entries(status), hasLength(5));
+      expect(_entries(status), hasLength(6));
       expect(
         _entries(
           status,

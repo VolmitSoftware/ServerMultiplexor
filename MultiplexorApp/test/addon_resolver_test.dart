@@ -99,6 +99,49 @@ void main() {
       },
     );
 
+    test('selects the BlueMap Paper artifact for Leaf 26.2', () async {
+      const String blueMapUrl =
+          'https://cdn.modrinth.com/data/swbUV1cr/versions/fixture/bluemap-paper.jar';
+      fixture.json(
+        'api.modrinth.com/v2/project/swbUV1cr/version',
+        <Map<String, Object?>>[
+          _version(
+              'bluemap-paper',
+              minecraft: <String>['26.1.1', '26.1.2', '26.2'],
+              loaders: <String>['folia', 'paper', 'purpur'],
+            )
+            ..['project_id'] = 'swbUV1cr'
+            ..['files'] = <Map<String, Object?>>[_file(blueMapUrl)],
+        ],
+      );
+      fixture.bytes(
+        'cdn.modrinth.com/data/swbUV1cr/versions/fixture/bluemap-paper.jar',
+        _jar,
+      );
+
+      await resolveWith((AddonResolver resolver) async {
+        final ResolvedAddon result = await resolver.resolve(
+          AddonCatalog.load(root.path).entries['bluemap']!,
+          'leaf',
+          '26.2',
+        );
+        expect(result.location, blueMapUrl);
+        expect(result.version, 'bluemap-paper');
+        expect(result.projectId, 'swbUV1cr');
+        final File target = File(p.join(root.path, 'BlueMap.jar'));
+        await resolver.download(result, target);
+        expect(target.readAsBytesSync(), _jar);
+      });
+
+      final Uri request = fixture.requests.first;
+      expect(jsonDecode(request.queryParameters['loaders']!), <String>[
+        'paper',
+      ]);
+      expect(jsonDecode(request.queryParameters['game_versions']!), <String>[
+        '26.2',
+      ]);
+    });
+
     test('EssentialsX prefers a compatible stable release over CI', () async {
       fixture.json(
         'api.modrinth.com/v2/project/hXiIvTyT/version',

@@ -310,7 +310,7 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 ### addons — per-instance plugin and mod checklists
 
-The bundled catalog offers EssentialsX (core), FastAsyncWorldEdit (FAWE), ViaVersion, ViaBackwards, and ProtocolLib. These are server plugins. EssentialsX and FAWE are offered for Paper, Purpur, Leaf, and Spigot; ViaVersion, ViaBackwards, and ProtocolLib also support Folia/Canvas. Forge, Fabric, NeoForge, and Mohist can use explicitly compatible custom entries. Platform restrictions are applied before selection; Modrinth installs require an exact published Minecraft-version match and a stable release, preferring the Paper FAWE artifact for Paper derivatives.
+The bundled catalog offers EssentialsX (core), FastAsyncWorldEdit (FAWE), BlueMap, ViaVersion, ViaBackwards, and ProtocolLib. These are server plugins. EssentialsX and FAWE are offered for Paper, Purpur, Leaf, and Spigot; BlueMap, ViaVersion, ViaBackwards, and ProtocolLib also support Folia/Canvas. Forge, Fabric, NeoForge, and Mohist can use explicitly compatible custom entries. Platform restrictions are applied before selection; Modrinth installs require an exact published Minecraft-version match and a stable release, preferring Paper artifacts for Paper derivatives.
 
 New server creation records Minecraft versions before imported jars are renamed into the cache. Existing instances can also resolve the version from their current jar's canonical filename or symlink target. `--mc` overrides detection; `addons list --json` reports the resolved `minecraft` and whether `versionRequired` is still true. A missing version is separate from platform compatibility.
 
@@ -321,13 +321,15 @@ New server creation records Minecraft versions before imported jars are renamed 
 | `addons set [instance] (--select <id,id,...>\|--none) [--mc <version>]` | Apply the complete checked selection, automatically including declared dependencies. Requires a stopped server. |
 | `addons update [instance] [--mc <version>]` | Refresh the selected addons from their configured sources. Requires a stopped server. |
 
-Addon metadata resolution and jar download/hash preparation run up to four at a time. Downloads are staged and validated before the selection is committed; dependency checks and the final installation remain ordered. Modrinth hashes and available GitHub asset hashes are verified. Addons install directly into the selected instance's `plugins/` or `mods/` directory; they never write to shared drop-ins. Bundled filenames are `EssentialsX.jar`, `FastAsyncWorldEdit.jar`, `ViaVersion.jar`, `ViaBackwards.jar`, and `ProtocolLib.jar`.
+Addon metadata resolution and jar download/hash preparation run up to four at a time. Downloads are staged and validated before the selection is committed; dependency checks and the final installation remain ordered. Modrinth hashes and available GitHub asset hashes are verified. Addons install directly into the selected instance's `plugins/` or `mods/` directory; they never write to shared drop-ins. Bundled filenames are `EssentialsX.jar`, `FastAsyncWorldEdit.jar`, `BlueMap.jar`, `ViaVersion.jar`, `ViaBackwards.jar`, and `ProtocolLib.jar`.
 
 Installation replaces an existing matching jar and removes matching version/platform variants, such as `ViaVersion-5.11.0.jar`, so each addon has one plain filename. Replacements are backed up until the whole selection commits and restored if installation fails. Replacing a jar symlink replaces the link itself and leaves its source untouched. Plugin configuration folders and unrelated jars stay in place. Selection and downloaded checksums are recorded in `.multiplexor-addons.json`. You can overwrite a plain jar manually: an unchanged selection keeps that copy, `addons update` replaces it from the configured source, and unchecking removes it. Normal drop-in sync, including `--clean`, preserves selected addons and skips their matching source filenames. Addons work on isolated instances too. Factory reset clears both their jars and selection; clone and backup preserve them.
 
 ProtocolLib uses the official stable `5.4.0` release through Minecraft 1.21.8. For 1.21.9–1.21.11 and 26.1–26.1.2 it uses the official `dev-build` Spigot-compatible artifact, including on Paper. For 26.2 it uses the Paper artifact on Paper derivatives and the Spigot artifact on Spigot. The checklist labels these **ProtocolLib (development)**. The modern Paper artifact requires Paper API 26.2 and cannot be substituted on older servers. These rules are based on [ProtocolLib's artifacts and support declarations](https://github.com/dmulloy2/ProtocolLib). Unknown newer versions need a catalog update before ProtocolLib is offered.
 
-EssentialsX prefers a compatible stable Modrinth release. On Minecraft 26.2, if none exists, it downloads the core jar from the [official EssentialsX CI](https://ci.ender.zone/job/EssentialsX/), which includes [26.2 support](https://github.com/EssentialsX/Essentials/pull/6561). The checklist labels this **EssentialsX (development fallback)**. CI downloads pin the successful build number before downloading, so a newer build cannot change the selected artifact mid-install. All five bundled addons have downloadable builds for Leaf 26.2; no local source build is required.
+EssentialsX prefers a compatible stable Modrinth release. On Minecraft 26.2, if none exists, it downloads the core jar from the [official EssentialsX CI](https://ci.ender.zone/job/EssentialsX/), which includes [26.2 support](https://github.com/EssentialsX/Essentials/pull/6561). The checklist labels this **EssentialsX (development fallback)**. CI downloads pin the successful build number before downloading, so a newer build cannot change the selected artifact mid-install. All six bundled addons have downloadable builds for Leaf 26.2; no local source build is required.
+
+BlueMap installs the latest stable, exact-version platform artifact from its [official Modrinth project](https://modrinth.com/plugin/bluemap). On first start it creates `plugins/BlueMap/`; before rendering, set `accept-download: true` in `core.conf` only after accepting the stated Mojang download terms. Its integrated web server defaults to port `8100`, so assign a unique port in `webserver.conf` for every concurrently running BlueMap instance.
 
 #### Adding entries to the checklist
 
@@ -484,7 +486,7 @@ The Local dashboard's `g` or `G` opens the same grid. Use `Shift+R` to repaint t
 
 # Choose addons for this server; ViaBackwards also installs ViaVersion
 ./start.sh runtime stop lobby
-./start.sh addons set lobby --select essentialsx,fawe,viabackwards,protocollib
+./start.sh addons set lobby --select essentialsx,fawe,bluemap,viabackwards,protocollib
 ./start.sh addons list lobby
 ./start.sh runtime start lobby
 
