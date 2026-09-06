@@ -59,10 +59,15 @@ class MonitorSnapshot {
     this.advertisedEndpoints = const <String, String>{},
     this.bindEndpoints = const <String, String>{},
     this.operationBlockReasons = const <String, String>{},
+    this.captureError,
+    this.lastSuccessfulCapture,
   });
 
   /// Instance names in display order.
   final List<String> instances;
+
+  final String? captureError;
+  final DateTime? lastSuccessfulCapture;
 
   /// Metric history per instance, oldest sample first. An instance with no
   /// entry (or an empty list) has no readings yet and renders as such —

@@ -75,14 +75,14 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'activate <name>',
     'path [name]',
     'open [name]',
-    'update <name> [--mc <version>] [--jar <path>] [--type <type>] [--auto-build]',
-    'safe-update <name> [--mc <version>] [--jar <path>] [--type <type>] [--auto-build] [--promote] [--cleanup] [--timeout <seconds>]',
+    'update <name> [--mc <version>] [--jar <path>] [--type <type>] [--loader <version>] [--installer <version>] [--auto-build]',
+    'safe-update <name> [--mc <version>] [--jar <path>] [--type <type>] [--loader <version>] [--installer <version>] [--auto-build] [--promote] [--cleanup] [--keep-staging] [--label <label>] [--timeout <seconds>]',
     'isolated [name] [true|false]',
     'lock <name> [--pin <digits>]',
     'unlock <name> [--pin <digits>]',
     'locked [name]',
     'port [instance] [port]',
-    'motd-style [name]',
+    'motd-style [name|--all]',
     'reset <name>',
     'delete <name>',
     'delete-all [--everywhere] [--force]',
@@ -105,7 +105,15 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'states',
     'metrics',
     'list',
-    'settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
+    'settings show [--instance <name>]',
+    'settings presets',
+    'settings check [--instance <name>]',
+    'settings set-java <executable> [--instance <name>]',
+    'settings set-heap <size> [--instance <name>]',
+    'settings set-preset <aikar|vanilla|conservative> [--instance <name>]',
+    'settings set-wrap <on|off> [--instance <name>]',
+    'settings set-log-format <default|minimal> [--instance <name>]',
+    'settings reset [--instance <name>]',
   ]),
   CommandHelpGroup('build', <String>[
     '<paper|purpur|folia|canvas|leaf|spigot|forge|mohist|fabric|neoforge> [--mc <version>] [--loader <version>] [--installer <version>] [--force]',
@@ -145,16 +153,16 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
   CommandHelpGroup('backup', <String>[
     'create [instance] [--label <label>] [--include-logs]',
     'list [instance|--all]',
-    'restore [instance] <backup-id>',
-    'verify [instance] <backup-id>',
-    'delete [instance] <backup-id>',
+    'restore [instance] <backup-id> [--instance <name>]',
+    'verify [instance] <backup-id> [--instance <name>]',
+    'delete [instance] <backup-id> [--instance <name>]',
     'prune [instance] [--keep <n>]',
   ]),
   CommandHelpGroup('template', <String>[
     'list',
-    'init <name> [--type <type>] [--mc <version>] [--heap <size>] [--preset <name>]',
+    'init <name> [--type <type>] [--mc <version>] [--heap <size>] [--preset <name>] [--isolated]',
     'show <name>',
-    'apply <template> <instance> [--auto-build] [--sync]',
+    'apply <template> <instance> [--auto-build] [--sync] [--isolated]',
     'export <instance> <template>',
     'delete <name>',
   ]),
@@ -166,7 +174,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
   ]),
   CommandHelpGroup('content', <String>[
     'search <query>',
-    'install <modrinth-slug|url> [--mc <version>] [--loader <loader>] [--name <alias>] [--sync]',
+    'install <modrinth-slug|url> [--mc <version>] [--loader <loader>] [--name <alias>] [--file <filename.jar>] [--sync]',
     'list',
     'update [name|--all] [--sync]',
     'remove <name>',
@@ -176,8 +184,8 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'setup',
     'doctor [--json]',
     'list [--json]',
-    'prepare [instance]',
-    'run <scenario> [instance] [--start] [--stop-after] [--prepare] [--username <name>] [--auth <offline|microsoft>] [--timeout <seconds>] [--startup-timeout <seconds>] [--connect-timeout <seconds>] [--assertion-timeout <seconds>] [--command <text>] [--expect <regex>] [--effect <name>] [--viewer-port <port>] [--no-viewer] [--no-op] [--json]',
+    'prepare [instance] [--instance <name>]',
+    'run <scenario> [instance] [--scenario <path>] [--instance <name>] [--profiles-folder <path>] [--version <version>] [--start] [--stop-after] [--prepare] [--username <name>] [--auth <offline|microsoft>] [--timeout <seconds>] [--startup-timeout <seconds>] [--connect-timeout <seconds>] [--assertion-timeout <seconds>] [--command <text>] [--expect <regex>] [--effect <name>] [--viewer-port <port>] [--no-viewer] [--no-op] [--json]',
   ]),
   CommandHelpGroup('doctor', <String>['[--fix] [--json]']),
 ];
@@ -196,7 +204,7 @@ bool isCliHelpRequest(List<String> args) {
   if (_isHelpToken(args.first)) {
     return true;
   }
-  return args.skip(1).any(_isHelpToken);
+  return args.skip(1).any(_isHelpFlag);
 }
 
 int printCliHelpForArgs(
@@ -326,8 +334,10 @@ void writeAvailableHelpTopics(void Function(String line) write) {
 }
 
 bool _isHelpToken(String token) {
-  return token == 'help' || token == '--help' || token == '-h';
+  return token == 'help' || _isHelpFlag(token);
 }
+
+bool _isHelpFlag(String token) => token == '--help' || token == '-h';
 
 String? _helpTopicFromArgs(List<String> args) {
   if (args.isEmpty) {
@@ -342,7 +352,7 @@ String? _helpTopicFromArgs(List<String> args) {
     }
     return args[1].trim().toLowerCase();
   }
-  if (args.skip(1).any(_isHelpToken)) {
+  if (args.skip(1).any(_isHelpFlag)) {
     return args.first.trim().toLowerCase();
   }
   return null;

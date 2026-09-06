@@ -71,6 +71,10 @@ Future<int> _printSnapshot() async {
 
   final MetricsSampler sampler = MetricsSampler(captureMetrics: captureMetrics);
   await sampler.sweep();
+  if (sampler.lastError case final String error) {
+    stderr.writeln('[ERROR] $error');
+    return 1;
+  }
 
   final List<String> instances = sampler.instances;
   final MonitorSnapshot snapshot = MonitorSnapshot(
@@ -136,14 +140,19 @@ MonitorTheme _snapshotTheme() {
   return glyphs.isAscii ? MonitorTheme.plainAscii() : MonitorTheme.plain();
 }
 
-/// One `runtime metrics` capture. A failed capture reads as no rows rather
-/// than an error: an empty frame is a truthful snapshot of nothing running.
 Future<String> _captureMetrics() async {
   final CapturedResult result = await passthroughService.capture(<String>[
     'runtime',
     'metrics',
   ]);
-  return result.success ? result.stdout : '';
+  if (!result.success) {
+    throw StateError(
+      result.stderr.trim().isEmpty
+          ? 'Local metrics capture failed (exit ${result.exitCode})'
+          : result.stderr.trim(),
+    );
+  }
+  return result.stdout;
 }
 
 Future<String?> _activeInstance() async {

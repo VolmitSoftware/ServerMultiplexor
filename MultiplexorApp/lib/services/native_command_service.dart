@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:multiplexor/cli/command_help.dart';
+import 'package:multiplexor/cli/local_command.dart';
 import 'package:path/path.dart' as p;
 import 'package:yaml/yaml.dart';
 
@@ -19,16 +20,23 @@ import '../utils/table.dart';
 import '../utils/terminal/ansi.dart';
 import 'addons/addon_catalog.dart';
 import 'addons/addon_installer.dart';
+import 'addons/addon_resolver.dart';
+import 'content/content_store.dart';
 import '../utils/terminal/term_io.dart';
 import 'consumer_service.dart';
 import 'dropin_sync_policy.dart';
 import 'gameplay_test_service.dart';
 import 'instance_bulk.dart';
+import 'java_runtime.dart';
 import 'manager_context.dart';
 import 'minimal_log4j_config.dart';
 import 'monitor/metric_sample.dart';
 import 'native_console_terminal.dart';
 import 'rcon_client.dart';
+import 'recovery_snapshot.dart';
+import 'recovery_runtime.dart';
+import '../models/backup_summary.dart';
+import '../models/template_summary.dart';
 import 'runtime_state.dart';
 import 'runtime_stop.dart';
 import 'server_ping.dart';
@@ -37,19 +45,28 @@ part 'native_command_help.dart';
 part 'native_cli_output.dart';
 part 'native_command_addons.dart';
 part 'native_command_bulk.dart';
+part 'native_command_recovery.dart';
 
 class NativeCommandService {
   NativeCommandService({
     required this.context,
     required this.consumerService,
     ProcessRunner processRunner = const ProcessRunner(),
+    RecoveryRuntime? recoveryRuntime,
     Future<ProcessResult> Function(String, List<String>)? processExecutor,
-  }) : _processRunner = processRunner,
-       _processExecutor = processExecutor;
+    Future<int> Function(String)? javaInspector,
+    this.contentResolverFactory,
+  }) : _recoveryRuntimeOverride = recoveryRuntime,
+       _processRunner = processRunner,
+       _processExecutor = processExecutor,
+       _javaInspector = javaInspector ?? inspectJavaRuntime;
 
+  final RecoveryRuntime? _recoveryRuntimeOverride;
+  final AddonResolver Function(String)? contentResolverFactory;
   final ManagerContext context;
   final ConsumerService consumerService;
   final ProcessRunner _processRunner;
+  final Future<int> Function(String) _javaInspector;
   final Future<ProcessResult> Function(String, List<String>)? _processExecutor;
   static final AsyncGate _runtimePortGate = AsyncGate();
   static final Set<int> _reservedRuntimePorts = <int>{};
@@ -64,9 +81,65 @@ class NativeCommandService {
   /// Closes every pooled RCON connection. Call on shutdown.
   void disposeRcon() => _rconPool.disposeAll();
 
+  List<BackupSummary> listBackups(String instance) =>
+      _backupEntries(
+            _activeConsumer,
+            instance: _validateSimpleName(instance, label: 'instance'),
+          )
+          .map((_BackupEntry entry) {
+            final Map<String, dynamic> manifest = entry.manifest;
+            return BackupSummary(
+              id: entry.id,
+              label: manifest['label']?.toString() ?? '',
+              createdAt: DateTime.parse(manifest['created_at'] as String),
+            );
+          })
+          .toList(growable: false);
+
   void setConsumerOverride(ConsumerProfile? profile) {
     _consumerOverride = profile;
   }
+
+  List<TemplateSummary> listTemplates() {
+    final Directory directory = Directory(_templatesDir());
+    if (!directory.existsSync()) return const <TemplateSummary>[];
+    final List<TemplateSummary> templates = <TemplateSummary>[];
+    for (final File file
+        in directory.listSync(followLinks: false).whereType<File>()) {
+      if (!file.path.endsWith('.yaml')) continue;
+      final String name = p.basenameWithoutExtension(file.path);
+      final Map<String, dynamic> template = _loadTemplate(name);
+      templates.add(
+        TemplateSummary(
+          name: name,
+          type: template['type']?.toString() ?? 'purpur',
+          minecraft: template['mc']?.toString(),
+        ),
+      );
+    }
+    templates.sort(
+      (TemplateSummary a, TemplateSummary b) => a.name.compareTo(b.name),
+    );
+    return templates;
+  }
+
+  Map<int, List<String>> configuredInstancePorts() {
+    final Map<int, List<String>> ports = <int, List<String>>{};
+    for (final ConsumerProfile profile in ConsumerProfile.values) {
+      for (final String instance in _instanceNames(profile)) {
+        ports
+            .putIfAbsent(
+              _instanceGetServerPort(profile, instance),
+              () => <String>[],
+            )
+            .add('${profile.shortName}/$instance');
+      }
+    }
+    return ports;
+  }
+
+  Future<int> availableInstancePort(String instance) =>
+      _findAvailableServerPort(_activeConsumer, instance);
 
   Future<CapturedResult> execute(
     List<String> args, {
@@ -80,8 +153,12 @@ class NativeCommandService {
         return io.result(0);
       }
 
-      final exitCode = await _dispatch(args, io);
+      final LocalCommand command = LocalCommand.parse(args);
+      final exitCode = await _dispatch(command.arguments, io);
       return io.result(exitCode);
+    } on FormatException catch (e) {
+      io.error('[ERROR] ${e.message}');
+      return io.result(2);
     } on _NativeCommandException catch (e) {
       io.error('[ERROR] ${e.message}');
       return io.result(e.exitCode);
@@ -972,287 +1049,6 @@ class NativeCommandService {
     return 0;
   }
 
-  Future<int> _dispatchInstanceUpdate(
-    ConsumerProfile profile,
-    List<String> args,
-    _NativeIoBuffer io,
-  ) async {
-    if (args.isEmpty) {
-      throw _NativeCommandException(
-        'Usage: instance update <name> [--mc <version>] [--jar <path>] [--auto-build]',
-        2,
-      );
-    }
-    final name = args.first;
-    if (!_instanceExists(profile, name)) {
-      throw _NativeCommandException('Instance not found: $name', 2);
-    }
-
-    final options = _parseOptions(args.sublist(1));
-    final source = _serverSource(profile, name);
-    final launch = source['launch'] ?? 'jar';
-    if (launch != 'jar') {
-      throw _NativeCommandException(
-        'instance update only supports jar-launch servers; $name uses launch=$launch. Clone + delete is the safer path.',
-        2,
-      );
-    }
-    final type = (options['type'] ?? source['type'] ?? 'purpur').toLowerCase();
-    final jarOverride = options['jar'];
-
-    final bool windowsHostRunning =
-        Platform.isWindows && await _runtimeWindowsHostOwned(profile, name);
-    if (windowsHostRunning || await _runtimeRunning(profile, name)) {
-      io.write('[INFO] Stopping $name before update');
-      await _runtimeStop(profile, name, io);
-    }
-
-    String resolvedJarPath;
-    String? mcLabel;
-    bool explicitInstaller = false;
-    if (jarOverride != null && jarOverride.isNotEmpty) {
-      final file = File(jarOverride);
-      if (!file.existsSync()) {
-        throw _NativeCommandException('Jar not found: $jarOverride', 2);
-      }
-      resolvedJarPath = file.absolute.path;
-      try {
-        resolvedJarPath = file.resolveSymbolicLinksSync();
-      } catch (_) {}
-      explicitInstaller = _looksLikeInstallerJar(resolvedJarPath);
-      resolvedJarPath = await _importManagedLaunchJar(profile, resolvedJarPath);
-    } else {
-      final requestedMc = options['mc'];
-      final mc = requestedMc?.trim().isNotEmpty == true
-          ? requestedMc!
-          : await _resolveLatestMcVersion(type);
-      mcLabel = mc;
-      final autoBuild = options['auto-build'] == 'true';
-      String? jarPath = _findCachedJar(
-        profile,
-        type: type,
-        mc: mc,
-        allowLatestFallback: requestedMc == null,
-      );
-      if (autoBuild || jarPath == null) {
-        io.write('[INFO] Refreshing $type for mc=$mc from upstream sources');
-        jarPath = await _buildTarget(
-          profile,
-          type,
-          _serverCreateBuildOptions(options, mc),
-          io,
-        );
-      }
-      resolvedJarPath = jarPath;
-    }
-
-    final installerBased =
-        (type == 'forge' || type == 'neoforge') &&
-        (explicitInstaller || _looksLikeInstallerJar(resolvedJarPath));
-    if (installerBased) {
-      throw _NativeCommandException(
-        'instance update only supports jar-launch updates; $resolvedJarPath looks like an installer. Recreate the instance from the installer instead.',
-        2,
-      );
-    }
-
-    final instanceDir = _instanceDir(profile, name);
-    final serverJar = p.join(instanceDir, 'server.jar');
-    _replaceWithSymlink(serverJar, resolvedJarPath);
-
-    final nextSource = Map<String, String>.from(source);
-    nextSource
-      ..['type'] = type
-      ..['launch'] = 'jar'
-      ..['jar'] = resolvedJarPath
-      ..remove('args_file_rel')
-      ..remove('installer')
-      ..remove('jar_rel');
-    if (mcLabel != null) {
-      nextSource['mc'] = mcLabel;
-    }
-    final preservedIsolated = source['isolated']?.toLowerCase() == 'true';
-    if (preservedIsolated) {
-      nextSource['isolated'] = 'true';
-    } else {
-      nextSource.remove('isolated');
-    }
-    _writeServerSource(instanceDir, fields: nextSource);
-    io.write(
-      '[OK] $name updated to $type${mcLabel != null ? ' mc=$mcLabel' : ''}',
-    );
-    io.write('[INFO] server.jar -> $resolvedJarPath');
-    return 0;
-  }
-
-  Future<int> _dispatchInstanceSafeUpdate(
-    ConsumerProfile profile,
-    List<String> args,
-    _NativeIoBuffer io,
-  ) async {
-    final parsed = _parseFlexibleArgs(
-      args,
-      booleanFlags: const <String>{
-        'auto-build',
-        'promote',
-        'cleanup',
-        'keep-staging',
-      },
-    );
-    if (parsed.positionals.length != 1) {
-      throw _NativeCommandException(
-        'Usage: instance safe-update <name> [--mc <version>] [--type <type>] [--jar <path>] [--auto-build] [--promote] [--cleanup] [--timeout <seconds>]',
-        2,
-      );
-    }
-
-    final name = parsed.positionals.first;
-    if (!_instanceExists(profile, name)) {
-      throw _NativeCommandException('Instance not found: $name', 2);
-    }
-    _ensureUnlocked(profile, name, action: 'safe-updated');
-
-    final timeoutSeconds = int.tryParse(parsed.option('timeout') ?? '90');
-    if (timeoutSeconds == null || timeoutSeconds < 5) {
-      throw _NativeCommandException('--timeout must be at least 5 seconds', 2);
-    }
-
-    final promote = parsed.flag('promote');
-    final cleanup =
-        parsed.flag('cleanup') || (promote && !parsed.flag('keep-staging'));
-    List<String> updateArgsFor(String target) {
-      final out = <String>[target];
-      for (final key in const <String>[
-        'type',
-        'mc',
-        'jar',
-        'loader',
-        'installer',
-      ]) {
-        final value = parsed.option(key);
-        if (value != null && value.trim().isNotEmpty) {
-          out.addAll(<String>['--$key', value.trim()]);
-        }
-      }
-      if (parsed.flag('auto-build')) {
-        out.add('--auto-build');
-      }
-      return out;
-    }
-
-    final originalPort = _instanceGetServerPort(profile, name);
-    final wasRunning = await _runtimeRunning(profile, name);
-    if (wasRunning) {
-      io.write(
-        '[INFO] Stopping $name for a consistent backup and staging clone',
-      );
-      await _runtimeStop(profile, name, io);
-    }
-
-    final backupId = await _backupCreate(
-      profile,
-      name,
-      io,
-      label: parsed.option('label') ?? 'safe-update',
-      includeLogs: false,
-      reason: 'safe-update',
-    );
-
-    final stagingBase = _sanitizeSimpleName(
-      '$name-safe-update-${_timestampId()}',
-    );
-    final staging = _uniqueInstanceName(profile, stagingBase);
-    _instanceClone(profile, name, staging, io: io);
-    final stagingPort = await _findAvailableServerPort(
-      profile,
-      staging,
-      avoidPorts: <int>{originalPort},
-    );
-    _instanceSetServerPort(profile, staging, stagingPort);
-    io.write('[INFO] Staging clone: $staging (port $stagingPort)');
-    io.write('[INFO] Safety backup: $backupId');
-
-    if (wasRunning) {
-      try {
-        await _runtimeStart(profile, name, io);
-      } catch (e) {
-        io.error(
-          '[WARN] Original instance was stopped for cloning but could not be restarted: $e',
-        );
-      }
-    }
-
-    var originalTouched = false;
-    try {
-      await _dispatchInstanceUpdate(profile, updateArgsFor(staging), io);
-      await _runtimeStart(profile, staging, io);
-      final ping = await _awaitMinecraftPing(
-        profile,
-        staging,
-        timeout: Duration(seconds: timeoutSeconds),
-      );
-      if (ping == null) {
-        io.error(
-          '[WARN] Staging server did not answer Minecraft ping within ${timeoutSeconds}s',
-        );
-        io.write('[INFO] Staging instance kept for inspection: $staging');
-        io.write('[INFO] Restore point: backup restore $name $backupId');
-        return 1;
-      }
-
-      io.write(
-        '[OK] Staging smoke test passed: ${ping.versionName} '
-        '(${ping.online}/${ping.max} players)',
-      );
-
-      if (promote) {
-        io.write('[INFO] Promoting update to $name');
-        if (await _runtimeRunning(profile, name)) {
-          await _runtimeStop(profile, name, io);
-        }
-        originalTouched = true;
-        await _dispatchInstanceUpdate(profile, updateArgsFor(name), io);
-        if (wasRunning) {
-          await _runtimeStart(profile, name, io);
-        }
-        io.write('[OK] Promoted safe update to $name');
-      } else {
-        io.write(
-          '[INFO] Original instance was not changed. Promote manually with:',
-        );
-        io.write(
-          '       ./start.sh instance safe-update $name --promote${_safeUpdateOptionSummary(parsed)}',
-        );
-      }
-
-      if (cleanup) {
-        if (await _runtimeRunning(profile, staging)) {
-          await _runtimeStop(profile, staging, io);
-        }
-        await _instanceDelete(profile, staging, io: io);
-        io.write('[OK] Removed staging instance: $staging');
-      } else {
-        io.write('[INFO] Staging instance kept: $staging');
-      }
-      io.write('[INFO] Restore point: backup restore $name $backupId');
-      return 0;
-    } catch (e) {
-      if (originalTouched) {
-        io.error(
-          '[WARN] Promotion failed; restoring $name from backup $backupId',
-        );
-        await _backupRestore(profile, name, backupId, io);
-        if (wasRunning) {
-          await _runtimeStart(profile, name, io);
-        }
-      }
-      if (e is _NativeCommandException) {
-        rethrow;
-      }
-      throw _NativeCommandException('Safe update failed: $e', 1);
-    }
-  }
-
   _FolderOpener? _folderOpenerCommand() {
     if (Platform.isMacOS) {
       return const _FolderOpener('open');
@@ -1698,11 +1494,52 @@ class NativeCommandService {
     _NativeIoBuffer io,
   ) async {
     final action = args.isEmpty ? 'show' : args.first;
-    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
-    var settings = _runtimeSettingsLoad(profile);
+    final List<String> rest = args.isEmpty ? <String>[] : args.sublist(1);
+    String? instance;
+    for (int index = 0; index < rest.length; index++) {
+      if (rest[index] != '--instance') continue;
+      if (instance != null || index + 1 >= rest.length) {
+        throw _NativeCommandException('Use --instance <name> once', 2);
+      }
+      instance = rest[index + 1];
+      rest.removeRange(index, index + 2);
+      index--;
+    }
+    if (instance != null && !_instanceExists(profile, instance)) {
+      throw _NativeCommandException('Instance not found: $instance', 2);
+    }
+    final bool takesValue = action.startsWith('set-');
+    if (rest.length != (takesValue ? 1 : 0)) {
+      throw _NativeCommandException(
+        'Usage: runtime settings $action${takesValue ? ' <value>' : ''} [--instance <name>]',
+        2,
+      );
+    }
+    var settings = _runtimeSettingsLoad(
+      profile,
+      instance: instance,
+      includeEnvironment: action == 'show' || action == 'check',
+    );
+    final Map<String, Set<String>> changedKeys = <String, Set<String>>{
+      'set-heap': <String>{'HEAP_SIZE'},
+      'set-preset': <String>{'JVM_PROFILE', 'JVM_ARGS'},
+      'set-java': <String>{'JAVA_EXECUTABLE'},
+      'set-wrap': <String>{'NO_LINE_WRAP'},
+      'set-log-format': <String>{'CONSOLE_LOG_FORMAT'},
+    };
+    void save() => _runtimeSettingsSave(
+      profile,
+      settings,
+      instance: instance,
+      keys: changedKeys[action],
+    );
 
     switch (action) {
       case 'show':
+        io.write(
+          'scope:          ${instance ?? '${profile.shortName} defaults'}',
+        );
+        io.write('java executable: ${settings.javaExecutable}');
         io.write('heap size:      ${settings.heap}');
         io.write('flags profile:  ${settings.profile}');
         io.write('jvm args:       ${settings.jvmArgs}');
@@ -1710,7 +1547,42 @@ class NativeCommandService {
           'console wrap:   ${settings.noLineWrap ? 'off (long lines clip)' : 'on (default terminal wrap)'}',
         );
         io.write('console log:    ${settings.consoleLogFormat}');
-        io.write('settings file:  ${_runtimeSettingsFile(profile)}');
+        io.write(
+          'settings file:  ${_runtimeSettingsFile(profile, instance: instance)}',
+        );
+        return 0;
+      case 'check':
+        final String executable = await _runtimeJavaPreflight(
+          profile,
+          instance,
+        );
+        io.write('[OK] Java executable: $executable');
+        if (instance != null &&
+            minimumMinecraftJava(_serverSource(profile, instance)['mc']) ==
+                null) {
+          io.write(
+            '[INFO] Minecraft version is unknown; only the Java executable was checked',
+          );
+        }
+        return 0;
+      case 'set-java':
+        final String executable = rest.single.trim();
+        if (executable.isEmpty ||
+            executable.contains('\n') ||
+            executable.contains('\r')) {
+          throw _NativeCommandException(
+            'Java executable must be a command name or path',
+            2,
+          );
+        }
+        final String resolved =
+            executable.contains('/') || executable.contains('\\')
+            ? File(executable).absolute.path
+            : executable;
+        await _javaInspector(resolved);
+        settings = settings.copyWith(javaExecutable: resolved);
+        save();
+        io.write('[OK] Java executable set to: $resolved');
         return 0;
       case 'presets':
         for (final preset in _runtimeSettingsPresets.keys) {
@@ -1725,7 +1597,7 @@ class NativeCommandService {
           );
         }
         settings = settings.copyWith(heap: rest.first.toUpperCase());
-        _runtimeSettingsSave(profile, settings);
+        save();
         io.write('[OK] Heap size set to: ${settings.heap}');
         return 0;
       case 'set-preset':
@@ -1744,7 +1616,7 @@ class NativeCommandService {
           );
         }
         settings = settings.copyWith(profile: preset, jvmArgs: argsValue);
-        _runtimeSettingsSave(profile, settings);
+        save();
         io.write('[OK] JVM flag preset set to: ${settings.profile}');
         return 0;
       case 'set-wrap':
@@ -1764,7 +1636,7 @@ class NativeCommandService {
           );
         }
         settings = settings.copyWith(noLineWrap: !wrapOn);
-        _runtimeSettingsSave(profile, settings);
+        save();
         io.write(
           '[OK] Console line wrap ${wrapOn ? 'on' : 'off'} '
           '(takes effect on next runtime start)',
@@ -1785,20 +1657,26 @@ class NativeCommandService {
           );
         }
         settings = settings.copyWith(consoleLogFormat: fmt);
-        _runtimeSettingsSave(profile, settings);
+        save();
         io.write(
           '[OK] Console log format set to: $fmt '
           '(log file always keeps full format; takes effect on next runtime start)',
         );
         return 0;
       case 'reset':
-        settings = const _RuntimeSettingsData();
-        _runtimeSettingsSave(profile, settings);
+        if (instance != null) {
+          File(
+            _runtimeSettingsFile(profile, instance: instance),
+          ).deleteSyncSafe();
+        } else {
+          settings = const _RuntimeSettingsData();
+          save();
+        }
         io.write('[OK] Runtime settings reset to defaults');
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: runtime settings <show|presets|set-heap|set-preset|set-wrap|set-log-format|reset>',
+          'Usage: runtime settings <show|check|presets|set-java|set-heap|set-preset|set-wrap|set-log-format|reset> [--instance <name>]',
           2,
         );
     }
@@ -2350,113 +2228,6 @@ class NativeCommandService {
     return checks.any((check) => check.level == 'FAIL') ? 1 : 0;
   }
 
-  Future<int> _dispatchBackup(List<String> args, _NativeIoBuffer io) async {
-    final sub = args.isEmpty ? 'list' : args.first;
-    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
-    final profile = _activeConsumer;
-
-    switch (sub) {
-      case 'create':
-        final parsed = _parseFlexibleArgs(
-          rest,
-          booleanFlags: const <String>{'include-logs'},
-        );
-        if (parsed.positionals.length > 1) {
-          throw _NativeCommandException(
-            'Usage: backup create [instance] [--label <label>] [--include-logs]',
-            2,
-          );
-        }
-        final instance = parsed.positionals.isNotEmpty
-            ? parsed.positionals.first
-            : _currentInstance(profile);
-        if (instance == null || instance.isEmpty) {
-          throw _NativeCommandException('No active instance set', 2);
-        }
-        final id = await _backupCreate(
-          profile,
-          instance,
-          io,
-          label: parsed.option('label'),
-          includeLogs: parsed.flag('include-logs'),
-          reason: 'manual',
-        );
-        io.write('[OK] Backup created: $id');
-        return 0;
-      case 'list':
-        final parsed = _parseFlexibleArgs(
-          rest,
-          booleanFlags: const <String>{'all'},
-        );
-        if (parsed.positionals.length > 1) {
-          throw _NativeCommandException(
-            'Usage: backup list [instance|--all]',
-            2,
-          );
-        }
-        final target = parsed.flag('all')
-            ? null
-            : (parsed.positionals.isNotEmpty ? parsed.positionals.first : null);
-        _backupList(profile, target, io);
-        return 0;
-      case 'restore':
-        final parsed = _parseFlexibleArgs(rest);
-        String? instance;
-        String? id;
-        if (parsed.positionals.length == 1) {
-          id = parsed.positionals[0];
-          instance = parsed.option('instance') ?? _currentInstance(profile);
-        } else if (parsed.positionals.length == 2) {
-          instance = parsed.positionals[0];
-          id = parsed.positionals[1];
-        }
-        if (instance == null || id == null) {
-          throw _NativeCommandException(
-            'Usage: backup restore [instance] <backup-id>',
-            2,
-          );
-        }
-        await _backupRestore(profile, instance, id, io);
-        io.write('[OK] Restored $instance from backup $id');
-        return 0;
-      case 'delete':
-        final parsed = _parseFlexibleArgs(rest);
-        final (instance, id) = _backupResolveInstanceAndId(parsed);
-        final backup = _findBackup(profile, id, instance: instance);
-        _deletePathEntity(backup.path, recursive: true);
-        io.write('[OK] Deleted backup: ${backup.instance}/${backup.id}');
-        return 0;
-      case 'verify':
-        final parsed = _parseFlexibleArgs(rest);
-        final (instance, id) = _backupResolveInstanceAndId(parsed);
-        final backup = _findBackup(profile, id, instance: instance);
-        _backupVerify(backup);
-        io.write('[OK] Backup verified: ${backup.instance}/${backup.id}');
-        return 0;
-      case 'prune':
-        final parsed = _parseFlexibleArgs(rest);
-        final keepRaw = parsed.option('keep') ?? '10';
-        final keep = int.tryParse(keepRaw);
-        if (keep == null || keep < 0) {
-          throw _NativeCommandException(
-            '--keep must be a non-negative integer',
-            2,
-          );
-        }
-        final instance = parsed.positionals.isEmpty
-            ? null
-            : parsed.positionals.first;
-        final deleted = _backupPrune(profile, keep: keep, instance: instance);
-        io.write('[OK] Pruned $deleted backup(s)');
-        return 0;
-      default:
-        throw _NativeCommandException(
-          'Usage: backup <create|list|restore|delete|prune|verify> ...',
-          2,
-        );
-    }
-  }
-
   Future<int> _dispatchTemplate(List<String> args, _NativeIoBuffer io) async {
     final sub = args.isEmpty ? 'list' : args.first;
     final rest = args.isEmpty ? const <String>[] : args.sublist(1);
@@ -2628,7 +2399,7 @@ class NativeCommandService {
         if (parsed.positionals.length != 1) {
           throw _NativeCommandException('Usage: content remove <name>', 2);
         }
-        _contentRemove(profile, parsed.positionals.first, io);
+        await _contentRemove(profile, parsed.positionals.first, io);
         return 0;
       case 'update':
         final parsed = _parseFlexibleArgs(
@@ -2794,27 +2565,6 @@ class NativeCommandService {
     throw _NativeCommandException('Could not find a free instance name', 1);
   }
 
-  String _safeUpdateOptionSummary(_FlexibleArgs parsed) {
-    final out = <String>[];
-    for (final key in const <String>[
-      'type',
-      'mc',
-      'jar',
-      'loader',
-      'installer',
-      'timeout',
-    ]) {
-      final value = parsed.option(key);
-      if (value != null && value.trim().isNotEmpty) {
-        out.add('--$key ${_shellQuote(value.trim())}');
-      }
-    }
-    if (parsed.flag('auto-build')) {
-      out.add('--auto-build');
-    }
-    return out.isEmpty ? '' : ' ${out.join(' ')}';
-  }
-
   Future<int> _findAvailableServerPort(
     ConsumerProfile profile,
     String instance, {
@@ -2861,336 +2611,6 @@ class NativeCommandService {
       await Future<void>.delayed(const Duration(seconds: 1));
     }
     return null;
-  }
-
-  String _backupsDir(ConsumerProfile profile) {
-    return p.join(_consumerRoot(profile), 'backups');
-  }
-
-  Future<String> _backupCreate(
-    ConsumerProfile profile,
-    String instance,
-    _NativeIoBuffer io, {
-    String? label,
-    required bool includeLogs,
-    required String reason,
-  }) {
-    if (!_instanceExists(profile, instance)) {
-      throw _NativeCommandException('Instance not found: $instance', 2);
-    }
-
-    final safeLabel = label == null || label.trim().isEmpty
-        ? ''
-        : '-${_sanitizeSimpleName(label, fallback: 'backup')}';
-    final id = '${_timestampId()}$safeLabel';
-    final backupDir = p.join(_backupsDir(profile), instance, id);
-    final snapshotDir = p.join(backupDir, 'snapshot');
-    Directory(snapshotDir).createSync(recursive: true);
-
-    _copyDirectoryFilteredForBackup(
-      Directory(_instanceDir(profile, instance)),
-      Directory(snapshotDir),
-      includeLogs: includeLogs,
-    );
-
-    final manifest = <String, dynamic>{
-      'version': 1,
-      'id': id,
-      'consumer': profile.shortName,
-      'instance': instance,
-      'created_at': DateTime.now().toUtc().toIso8601String(),
-      'label': label?.trim() ?? '',
-      'reason': reason,
-      'include_logs': includeLogs,
-      'snapshot': 'snapshot',
-      'entries': _backupManifestEntries(snapshotDir),
-    };
-    File(p.join(backupDir, 'manifest.json')).writeAsStringSync(
-      '${const JsonEncoder.withIndent('  ').convert(manifest)}\n',
-    );
-    io.write('[INFO] Backup path: $backupDir');
-    return Future<String>.value(id);
-  }
-
-  void _copyDirectoryFilteredForBackup(
-    Directory src,
-    Directory dst, {
-    required bool includeLogs,
-  }) {
-    if (!src.existsSync()) {
-      return;
-    }
-    dst.createSync(recursive: true);
-    for (final entity in src.listSync(recursive: false, followLinks: false)) {
-      final base = p.basename(entity.path);
-      if (!includeLogs && base == 'logs') {
-        continue;
-      }
-      final target = p.join(dst.path, base);
-      final type = FileSystemEntity.typeSync(entity.path, followLinks: false);
-      switch (type) {
-        case FileSystemEntityType.directory:
-          _copyDirectoryFilteredForBackup(
-            Directory(entity.path),
-            Directory(target),
-            includeLogs: includeLogs,
-          );
-          break;
-        case FileSystemEntityType.file:
-          File(target).createSync(recursive: true);
-          File(entity.path).copySync(target);
-          break;
-        case FileSystemEntityType.link:
-          _replaceWithSymlink(target, Link(entity.path).targetSync());
-          break;
-        case FileSystemEntityType.pipe:
-        case FileSystemEntityType.unixDomainSock:
-        case FileSystemEntityType.notFound:
-          break;
-      }
-    }
-  }
-
-  List<Map<String, dynamic>> _backupManifestEntries(String snapshotDir) {
-    final entries = <Map<String, dynamic>>[];
-    void walk(String dirPath) {
-      for (final entity in Directory(dirPath).listSync(followLinks: false)) {
-        final rel = p.relative(entity.path, from: snapshotDir);
-        final type = FileSystemEntity.typeSync(entity.path, followLinks: false);
-        switch (type) {
-          case FileSystemEntityType.file:
-            final file = File(entity.path);
-            final stat = file.statSync();
-            entries.add(<String, dynamic>{
-              'path': rel,
-              'type': 'file',
-              'size': stat.size,
-              'sha256': _sha256File(file),
-            });
-            break;
-          case FileSystemEntityType.link:
-            entries.add(<String, dynamic>{
-              'path': rel,
-              'type': 'link',
-              'target': Link(entity.path).targetSync(),
-            });
-            break;
-          case FileSystemEntityType.directory:
-            walk(entity.path);
-            break;
-          case FileSystemEntityType.pipe:
-          case FileSystemEntityType.unixDomainSock:
-          case FileSystemEntityType.notFound:
-            break;
-        }
-      }
-    }
-
-    walk(snapshotDir);
-    entries.sort(
-      (a, b) => a['path'].toString().compareTo(b['path'].toString()),
-    );
-    return entries;
-  }
-
-  String _sha256File(File file) {
-    return sha256.convert(file.readAsBytesSync()).toString();
-  }
-
-  List<_BackupEntry> _backupEntries(
-    ConsumerProfile profile, {
-    String? instance,
-  }) {
-    final root = Directory(_backupsDir(profile));
-    if (!root.existsSync()) {
-      return const <_BackupEntry>[];
-    }
-    final entries = <_BackupEntry>[];
-    final instanceDirs = instance != null
-        ? <Directory>[Directory(p.join(root.path, instance))]
-        : root.listSync(followLinks: false).whereType<Directory>().toList();
-    for (final instanceDir in instanceDirs) {
-      if (!instanceDir.existsSync()) {
-        continue;
-      }
-      final instanceName = p.basename(instanceDir.path);
-      for (final backupDir
-          in instanceDir.listSync(followLinks: false).whereType<Directory>()) {
-        entries.add(
-          _BackupEntry(
-            profile: profile,
-            instance: instanceName,
-            id: p.basename(backupDir.path),
-            path: backupDir.path,
-          ),
-        );
-      }
-    }
-    entries.sort((a, b) {
-      final byInstance = a.instance.compareTo(b.instance);
-      return byInstance != 0 ? byInstance : b.id.compareTo(a.id);
-    });
-    return entries;
-  }
-
-  void _backupList(
-    ConsumerProfile profile,
-    String? instance,
-    _NativeIoBuffer io,
-  ) {
-    final entries = _backupEntries(profile, instance: instance);
-    if (entries.isEmpty) {
-      io.write('(none)');
-      return;
-    }
-    for (final entry in entries) {
-      final manifest = entry.manifest;
-      final label = manifest['label']?.toString().trim() ?? '';
-      final created = manifest['created_at']?.toString().trim() ?? entry.id;
-      final suffix = label.isEmpty ? '' : ' label=$label';
-      io.write('${entry.instance}/${entry.id}  $created$suffix');
-    }
-  }
-
-  (String?, String) _backupResolveInstanceAndId(_FlexibleArgs parsed) {
-    if (parsed.positionals.length == 1) {
-      return (parsed.option('instance'), parsed.positionals.first);
-    }
-    if (parsed.positionals.length == 2) {
-      return (parsed.positionals.first, parsed.positionals[1]);
-    }
-    throw _NativeCommandException(
-      'Usage: backup <delete|verify> [instance] <backup-id>',
-      2,
-    );
-  }
-
-  _BackupEntry _findBackup(
-    ConsumerProfile profile,
-    String id, {
-    String? instance,
-  }) {
-    if (id.contains('/') || id.contains('\\') || id.contains('..')) {
-      throw _NativeCommandException('Invalid backup id: $id', 2);
-    }
-    final matches = _backupEntries(
-      profile,
-      instance: instance,
-    ).where((entry) => entry.id == id).toList(growable: false);
-    if (matches.isEmpty) {
-      throw _NativeCommandException('Backup not found: $id', 2);
-    }
-    if (matches.length > 1) {
-      throw _NativeCommandException(
-        'Backup id $id exists for multiple instances. Use: backup <command> <instance> $id',
-        2,
-      );
-    }
-    return matches.single;
-  }
-
-  Future<void> _backupRestore(
-    ConsumerProfile profile,
-    String instance,
-    String id,
-    _NativeIoBuffer io,
-  ) async {
-    final backup = _findBackup(profile, id, instance: instance);
-    final snapshot = Directory(p.join(backup.path, 'snapshot'));
-    if (!snapshot.existsSync()) {
-      throw _NativeCommandException(
-        'Backup snapshot is missing: ${backup.path}',
-        1,
-      );
-    }
-
-    if (_instanceExists(profile, instance)) {
-      _ensureUnlocked(profile, instance, action: 'restored');
-      if (await _runtimeRunning(profile, instance)) {
-        await _runtimeStop(profile, instance, io);
-      }
-    }
-
-    _backupVerify(backup);
-
-    final target = _instanceDir(profile, instance);
-    final tmp = '$target.restore-${DateTime.now().millisecondsSinceEpoch}';
-    _deletePathEntity(tmp, recursive: true);
-    _copyDirectory(snapshot, Directory(tmp));
-    _deletePathEntity(target, recursive: true);
-    try {
-      Directory(tmp).renameSync(target);
-    } catch (_) {
-      _copyDirectory(Directory(tmp), Directory(target));
-      _deletePathEntity(tmp, recursive: true);
-    }
-    _instanceEnsureRestartScript(profile, instance);
-    if (!_instanceIsolated(profile, instance)) {
-      _instanceEnsureSharedPluginOps(profile, instance, io: io);
-    }
-    if (_currentInstance(profile) == instance) {
-      _instanceActivate(profile, instance);
-    }
-  }
-
-  void _backupVerify(_BackupEntry backup) {
-    final manifest = backup.manifest;
-    final snapshotDir = p.join(
-      backup.path,
-      manifest['snapshot']?.toString() ?? 'snapshot',
-    );
-    final entries = manifest['entries'];
-    if (entries is! List) {
-      throw _NativeCommandException(
-        'Invalid backup manifest: ${backup.path}',
-        1,
-      );
-    }
-    for (final raw in entries) {
-      if (raw is! Map) {
-        continue;
-      }
-      final rel = raw['path']?.toString() ?? '';
-      final type = raw['type']?.toString() ?? '';
-      if (rel.isEmpty) {
-        continue;
-      }
-      final path = p.join(snapshotDir, rel);
-      if (type == 'file') {
-        final file = File(path);
-        if (!file.existsSync()) {
-          throw _NativeCommandException('Backup file missing: $rel', 1);
-        }
-        final expected = raw['sha256']?.toString() ?? '';
-        if (expected.isNotEmpty && _sha256File(file) != expected) {
-          throw _NativeCommandException('Backup checksum mismatch: $rel', 1);
-        }
-      } else if (type == 'link') {
-        if (!_isLink(path)) {
-          throw _NativeCommandException('Backup link missing: $rel', 1);
-        }
-      }
-    }
-  }
-
-  int _backupPrune(
-    ConsumerProfile profile, {
-    required int keep,
-    String? instance,
-  }) {
-    final byInstance = <String, List<_BackupEntry>>{};
-    for (final entry in _backupEntries(profile, instance: instance)) {
-      byInstance.putIfAbsent(entry.instance, () => <_BackupEntry>[]).add(entry);
-    }
-    var deleted = 0;
-    for (final entries in byInstance.values) {
-      entries.sort((a, b) => b.id.compareTo(a.id));
-      for (final entry in entries.skip(keep)) {
-        _deletePathEntity(entry.path, recursive: true);
-        deleted++;
-      }
-    }
-    return deleted;
   }
 
   String _templatesDir() {
@@ -3311,7 +2731,7 @@ class NativeCommandService {
     String name,
   ) {
     final source = _serverSource(profile, instance);
-    final settings = _runtimeSettingsLoad(profile);
+    final settings = _runtimeSettingsLoad(profile, instance: instance);
     final jar = source['jar'] ?? source['installer'];
     return <String, dynamic>{
       'name': name,
@@ -3366,6 +2786,30 @@ class NativeCommandService {
       }
     }
 
+    final settings = _runtimeSettingsLoad(profile, includeEnvironment: false);
+    var nextSettings = settings;
+    final Set<String> runtimeKeys = <String>{};
+    final heap = template['heap']?.toString().trim();
+    if (heap != null && heap.isNotEmpty) {
+      if (!_runtimeHeapLooksValid(heap)) {
+        throw _NativeCommandException('Invalid template heap value: $heap', 2);
+      }
+      nextSettings = nextSettings.copyWith(heap: heap.toUpperCase());
+      runtimeKeys.add('HEAP_SIZE');
+    }
+    final preset = template['jvm_preset']?.toString().trim().toLowerCase();
+    if (preset != null && preset.isNotEmpty) {
+      final args = _runtimeSettingsPresets[preset];
+      if (args == null) {
+        throw _NativeCommandException(
+          'Unknown template JVM preset: $preset',
+          2,
+        );
+      }
+      nextSettings = nextSettings.copyWith(profile: preset, jvmArgs: args);
+      runtimeKeys.addAll(<String>{'JVM_PROFILE', 'JVM_ARGS'});
+    }
+
     final createArgs = <String>['create', instance, '--type', type];
     void addOption(String key, String cliName) {
       final value = template[key]?.toString().trim();
@@ -3386,37 +2830,19 @@ class NativeCommandService {
     }
 
     await _dispatchServer(createArgs, io);
+    if (runtimeKeys.isNotEmpty) {
+      _runtimeSettingsSave(
+        profile,
+        nextSettings,
+        instance: instance,
+        keys: runtimeKeys,
+      );
+      io.write('[INFO] Runtime settings updated for $instance');
+    }
 
     final properties = _stringMap(template['server_properties']);
     if (properties.isNotEmpty) {
       _applyServerProperties(profile, instance, properties);
-    }
-
-    final settings = _runtimeSettingsLoad(profile);
-    var nextSettings = settings;
-    final heap = template['heap']?.toString().trim();
-    if (heap != null && heap.isNotEmpty) {
-      if (!_runtimeHeapLooksValid(heap)) {
-        throw _NativeCommandException('Invalid template heap value: $heap', 2);
-      }
-      nextSettings = nextSettings.copyWith(heap: heap.toUpperCase());
-    }
-    final preset = template['jvm_preset']?.toString().trim().toLowerCase();
-    if (preset != null && preset.isNotEmpty) {
-      final args = _runtimeSettingsPresets[preset];
-      if (args == null) {
-        throw _NativeCommandException(
-          'Unknown template JVM preset: $preset',
-          2,
-        );
-      }
-      nextSettings = nextSettings.copyWith(profile: preset, jvmArgs: args);
-    }
-    if (nextSettings.heap != settings.heap ||
-        nextSettings.profile != settings.profile ||
-        nextSettings.jvmArgs != settings.jvmArgs) {
-      _runtimeSettingsSave(profile, nextSettings);
-      io.write('[INFO] Runtime settings updated for ${profile.shortName}');
     }
 
     final dropins = _mapValue(template['dropins']);
@@ -3496,53 +2922,26 @@ class NativeCommandService {
     return p.join(_stateDir(profile), 'content-lock.yaml');
   }
 
-  Map<String, dynamic> _contentManifestLoad(ConsumerProfile profile) {
-    final file = File(_contentManifestFile(profile));
-    if (!file.existsSync()) {
-      return <String, dynamic>{
-        'version': 1,
-        'consumer': profile.shortName,
-        'entries': <Map<String, dynamic>>[],
-      };
-    }
-    final parsed = _yamlToDart(loadYaml(file.readAsStringSync()));
-    if (parsed is! Map) {
-      throw _NativeCommandException(
-        'Invalid content lockfile: ${file.path}',
-        1,
+  ContentStore _contentStore(ConsumerProfile profile, AddonResolver resolver) =>
+      ContentStore(
+        dropinsPath: _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
+        manifestPath: _contentManifestFile(profile),
+        consumer: profile.shortName,
+        resolver: resolver,
       );
-    }
-    final manifest = Map<String, dynamic>.from(parsed);
-    manifest['entries'] = _contentEntriesFromManifest(manifest);
-    return manifest;
-  }
 
-  List<Map<String, dynamic>> _contentEntriesFromManifest(
-    Map<String, dynamic> manifest,
-  ) {
-    final raw = manifest['entries'];
-    if (raw is! List) {
-      return <Map<String, dynamic>>[];
-    }
-    return raw
-        .whereType<Map>()
-        .map((entry) => Map<String, dynamic>.from(entry))
-        .toList(growable: true);
-  }
-
-  void _contentManifestSave(
+  Future<T> _withContentStore<T>(
     ConsumerProfile profile,
-    List<Map<String, dynamic>> entries,
-  ) {
-    entries.sort(
-      (a, b) => a['name'].toString().compareTo(b['name'].toString()),
-    );
-    _writeYamlMap(File(_contentManifestFile(profile)), <String, dynamic>{
-      'version': 1,
-      'consumer': profile.shortName,
-      'updated_at': DateTime.now().toUtc().toIso8601String(),
-      'entries': entries,
-    });
+    Future<T> Function(ContentStore) operation,
+  ) async {
+    final AddonResolver resolver =
+        contentResolverFactory?.call(context.rootDir) ??
+        AddonResolver(context.rootDir);
+    try {
+      return await operation(_contentStore(profile, resolver));
+    } finally {
+      resolver.close();
+    }
   }
 
   Future<void> _contentSearch(
@@ -3596,31 +2995,20 @@ class NativeCommandService {
     _FlexibleArgs parsed,
     _NativeIoBuffer io,
   ) async {
-    if (!_looksLikeUrl(url)) {
-      throw _NativeCommandException('Invalid URL: $url', 2);
-    }
-    final uri = Uri.parse(url);
-    final rawName =
-        parsed.option('name') ?? p.basenameWithoutExtension(uri.path);
-    final name = _sanitizeSimpleName(rawName, fallback: 'content');
-    final fileName = _sanitizeJarFileName(
+    final Uri uri = Uri.parse(url);
+    final String name = _sanitizeSimpleName(
+      parsed.option('name') ?? p.basenameWithoutExtension(uri.path),
+      fallback: 'content',
+    );
+    final String fileName = _sanitizeJarFileName(
       parsed.option('file') ?? p.basename(uri.path),
       fallback: '$name.jar',
     );
-    final output = p.join(
-      _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
-      fileName,
+    await _withContentStore(
+      profile,
+      (ContentStore store) =>
+          store.installUrl(url: url, name: name, fileName: fileName),
     );
-    await _downloadToFile(url, output, io: io);
-    final entry = <String, dynamic>{
-      'name': name,
-      'source': 'url',
-      'url': url,
-      'file': fileName,
-      'sha256': _sha256File(File(output)),
-      'installed_at': DateTime.now().toUtc().toIso8601String(),
-    };
-    _contentSaveOrReplace(profile, entry, io);
     io.write('[OK] Installed content: $name -> $fileName');
   }
 
@@ -3630,141 +3018,22 @@ class NativeCommandService {
     _FlexibleArgs parsed,
     _NativeIoBuffer io,
   ) async {
-    final entry = await _contentResolveAndDownloadModrinth(
+    final String name = _sanitizeSimpleName(
+      parsed.option('name') ?? slug,
+      fallback: slug,
+    );
+    final String minecraft = await _contentMinecraftVersion(profile, parsed);
+    final String loader = _contentLoader(profile, parsed);
+    await _withContentStore(
       profile,
-      slug: slug,
-      name: parsed.option('name'),
-      mc: await _contentMinecraftVersion(profile, parsed),
-      loader: _contentLoader(profile, parsed),
-      io: io,
+      (ContentStore store) => store.installModrinth(
+        slug: slug,
+        name: name,
+        minecraft: minecraft,
+        loader: loader,
+      ),
     );
-    _contentSaveOrReplace(profile, entry, io);
-    io.write(
-      '[OK] Installed ${entry['name']} ${entry['version_number']} -> ${entry['file']}',
-    );
-  }
-
-  Future<Map<String, dynamic>> _contentResolveAndDownloadModrinth(
-    ConsumerProfile profile, {
-    required String slug,
-    required String? name,
-    required String mc,
-    required String loader,
-    required _NativeIoBuffer io,
-  }) async {
-    final project = await _httpGetJsonObject(
-      Uri.https('api.modrinth.com', '/v2/project/$slug').toString(),
-    );
-    final projectType = project['project_type']?.toString() ?? '';
-    final expectedType = _contentProjectType(profile);
-    if (projectType.isNotEmpty && projectType != expectedType) {
-      throw _NativeCommandException(
-        '$slug is a Modrinth $projectType, but ${profile.shortName} expects $expectedType content',
-        2,
-      );
-    }
-    final projectId = project['id']?.toString() ?? slug;
-    final title = project['title']?.toString() ?? slug;
-    final version = await _contentResolveModrinthVersion(projectId, mc, loader);
-    final files = version['files'];
-    if (files is! List || files.isEmpty) {
-      throw _NativeCommandException('No downloadable files for $slug', 1);
-    }
-    Map<String, dynamic>? selectedFile;
-    for (final raw in files.whereType<Map>()) {
-      final file = Map<String, dynamic>.from(raw);
-      final filename = file['filename']?.toString().toLowerCase() ?? '';
-      if (filename.endsWith('.jar') && file['primary'] == true) {
-        selectedFile = file;
-        break;
-      }
-      if (filename.endsWith('.jar')) {
-        selectedFile ??= file;
-      }
-    }
-    if (selectedFile == null) {
-      throw _NativeCommandException('No jar file found for $slug', 1);
-    }
-    final url = selectedFile['url']?.toString() ?? '';
-    if (url.isEmpty) {
-      throw _NativeCommandException('No download URL found for $slug', 1);
-    }
-    final fileName = _sanitizeJarFileName(
-      selectedFile['filename']?.toString() ?? '$slug.jar',
-      fallback: '$slug.jar',
-    );
-    final output = p.join(
-      _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
-      fileName,
-    );
-    await _downloadToFile(url, output, io: io);
-    final hashes = _mapValue(selectedFile['hashes']);
-    return <String, dynamic>{
-      'name': _sanitizeSimpleName(name ?? slug, fallback: slug),
-      'source': 'modrinth',
-      'slug': slug,
-      'project_id': projectId,
-      'title': title,
-      'mc': mc,
-      'loader': loader,
-      'version_id': version['id']?.toString() ?? '',
-      'version_number': version['version_number']?.toString() ?? '',
-      'file': fileName,
-      'url': url,
-      if (hashes['sha512'] != null)
-        'upstream_sha512': hashes['sha512'].toString(),
-      if (hashes['sha1'] != null) 'upstream_sha1': hashes['sha1'].toString(),
-      'sha256': _sha256File(File(output)),
-      'installed_at': DateTime.now().toUtc().toIso8601String(),
-    };
-  }
-
-  Future<Map<String, dynamic>> _contentResolveModrinthVersion(
-    String projectId,
-    String mc,
-    String loader,
-  ) async {
-    Future<List<dynamic>> fetch({required String? loaderFilter}) {
-      final query = <String, String>{
-        'game_versions': jsonEncode(<String>[mc]),
-        if (loaderFilter != null && loaderFilter.isNotEmpty)
-          'loaders': jsonEncode(<String>[loaderFilter]),
-      };
-      final uri = Uri.https(
-        'api.modrinth.com',
-        '/v2/project/$projectId/version',
-        query,
-      );
-      return _httpGetJsonList(uri.toString());
-    }
-
-    var versions = await fetch(loaderFilter: loader);
-    if (versions.isEmpty &&
-        _isPluginConsumer(_activeConsumer) &&
-        loader != 'paper') {
-      versions = await fetch(loaderFilter: 'paper');
-    }
-    if (versions.isEmpty) {
-      versions = await fetch(loaderFilter: null);
-    }
-    for (final raw in versions) {
-      if (raw is! Map) {
-        continue;
-      }
-      final version = Map<String, dynamic>.from(raw);
-      final files = version['files'];
-      if (files is List &&
-          files.whereType<Map>().any(
-            (file) => (file['filename']?.toString().toLowerCase() ?? '')
-                .endsWith('.jar'),
-          )) {
-        return version;
-      }
-    }
-    throw _NativeCommandException(
-      'No compatible Modrinth version found for project=$projectId mc=$mc loader=$loader',
-      1,
-    );
+    io.write('[OK] Installed $name for $loader Minecraft $minecraft');
   }
 
   Future<String> _contentMinecraftVersion(
@@ -3782,10 +3051,6 @@ class NativeCommandService {
       if (mc != null && mc.isNotEmpty) {
         return mc;
       }
-    }
-    final latest = await _latestMinecraftRelease();
-    if (latest.isNotEmpty) {
-      return latest;
     }
     throw _NativeCommandException(
       'Use --mc <version> to select content compatibility',
@@ -3807,6 +3072,8 @@ class NativeCommandService {
       if (type == 'paper' ||
           type == 'purpur' ||
           type == 'folia' ||
+          type == 'canvas' ||
+          type == 'leaf' ||
           type == 'spigot') {
         return type;
       }
@@ -3826,83 +3093,36 @@ class NativeCommandService {
     return name;
   }
 
-  void _contentSaveOrReplace(
-    ConsumerProfile profile,
-    Map<String, dynamic> entry,
-    _NativeIoBuffer io,
-  ) {
-    final manifest = _contentManifestLoad(profile);
-    final entries = _contentEntriesFromManifest(manifest);
-    final name = entry['name']?.toString() ?? '';
-    final source = entry['source']?.toString() ?? '';
-    final identity =
-        entry[source == 'modrinth' ? 'slug' : 'url']?.toString() ?? '';
-    final dropins = _dropinsSource(profile, mods: !_isPluginConsumer(profile));
-    entries.removeWhere((existing) {
-      final sameName = existing['name']?.toString() == name;
-      final sameIdentity =
-          existing['source']?.toString() == source &&
-          (existing[source == 'modrinth' ? 'slug' : 'url']?.toString() ?? '') ==
-              identity;
-      if (sameName || sameIdentity) {
-        final oldFile = existing['file']?.toString() ?? '';
-        final nextFile = entry['file']?.toString() ?? '';
-        if (oldFile.isNotEmpty && oldFile != nextFile) {
-          File(p.join(dropins, oldFile)).deleteSyncSafe();
-          io.write('[INFO] Removed old content file: $oldFile');
-        }
-        return true;
-      }
-      return false;
-    });
-    entries.add(entry);
-    _contentManifestSave(profile, entries);
-  }
-
   void _contentList(ConsumerProfile profile, _NativeIoBuffer io) {
-    final entries = _contentEntriesFromManifest(_contentManifestLoad(profile));
-    if (entries.isEmpty) {
-      io.write('(none)');
-      return;
-    }
-    for (final entry in entries) {
-      final name = entry['name']?.toString() ?? '-';
-      final source = entry['source']?.toString() ?? '-';
-      final version =
-          entry['version_number']?.toString() ??
-          entry['url']?.toString() ??
-          '-';
-      final file = entry['file']?.toString() ?? '-';
-      io.write('$name  $source  $version  $file');
+    final AddonResolver resolver = AddonResolver(context.rootDir);
+    try {
+      final List<Map<String, Object?>> entries = _contentStore(
+        profile,
+        resolver,
+      ).read();
+      if (entries.isEmpty) {
+        io.write('(none)');
+        return;
+      }
+      for (final Map<String, Object?> entry in entries) {
+        io.write(
+          '${entry['name']}  ${entry['source']}  ${entry['version_number'] ?? entry['url']}  ${entry['file']}',
+        );
+      }
+    } finally {
+      resolver.close();
     }
   }
 
-  void _contentRemove(
+  Future<void> _contentRemove(
     ConsumerProfile profile,
     String name,
     _NativeIoBuffer io,
-  ) {
-    final manifest = _contentManifestLoad(profile);
-    final entries = _contentEntriesFromManifest(manifest);
-    final dropins = _dropinsSource(profile, mods: !_isPluginConsumer(profile));
-    Map<String, dynamic>? removed;
-    entries.removeWhere((entry) {
-      final matches =
-          entry['name']?.toString() == name ||
-          entry['slug']?.toString() == name;
-      if (matches) {
-        removed = entry;
-      }
-      return matches;
-    });
-    if (removed == null) {
-      throw _NativeCommandException('Content entry not found: $name', 2);
-    }
-    final file = removed!['file']?.toString() ?? '';
-    if (file.isNotEmpty) {
-      File(p.join(dropins, file)).deleteSyncSafe();
-    }
-    _contentManifestSave(profile, entries);
+  ) async {
+    await _withContentStore(
+      profile,
+      (ContentStore store) => store.remove(name),
+    );
     io.write('[OK] Removed content: $name');
   }
 
@@ -3911,84 +3131,11 @@ class NativeCommandService {
     String? target,
     _NativeIoBuffer io,
   ) async {
-    final manifest = _contentManifestLoad(profile);
-    final entries = _contentEntriesFromManifest(manifest);
-    if (entries.isEmpty) {
-      io.write('(none)');
-      return;
-    }
-    var matched = 0;
-    final nextEntries = <Map<String, dynamic>>[];
-    for (final entry in entries) {
-      final name = entry['name']?.toString() ?? '';
-      final slug = entry['slug']?.toString() ?? '';
-      final shouldUpdate = target == null || target == name || target == slug;
-      if (!shouldUpdate) {
-        nextEntries.add(entry);
-        continue;
-      }
-      matched++;
-      final source = entry['source']?.toString() ?? '';
-      if (source == 'modrinth') {
-        final updated = await _contentResolveAndDownloadModrinth(
-          profile,
-          slug: slug,
-          name: name,
-          mc: entry['mc']?.toString() ?? await _latestMinecraftRelease(),
-          loader:
-              entry['loader']?.toString() ??
-              _contentLoader(profile, _FlexibleArgs.empty),
-          io: io,
-        );
-        _contentDeleteOldFileIfChanged(profile, entry, updated);
-        nextEntries.add(updated);
-        io.write('[OK] Updated $name -> ${updated['version_number']}');
-      } else if (source == 'url') {
-        final url = entry['url']?.toString() ?? '';
-        if (url.isEmpty) {
-          throw _NativeCommandException(
-            'URL content entry missing url: $name',
-            1,
-          );
-        }
-        final file = entry['file']?.toString() ?? '$name.jar';
-        final output = p.join(
-          _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
-          file,
-        );
-        await _downloadToFile(url, output, io: io);
-        final updated = Map<String, dynamic>.from(entry)
-          ..['sha256'] = _sha256File(File(output))
-          ..['installed_at'] = DateTime.now().toUtc().toIso8601String();
-        nextEntries.add(updated);
-        io.write('[OK] Updated $name');
-      } else {
-        nextEntries.add(entry);
-        io.write('[WARN] Unknown content source for $name; skipped');
-      }
-    }
-    if (matched == 0) {
-      throw _NativeCommandException('Content entry not found: $target', 2);
-    }
-    _contentManifestSave(profile, nextEntries);
-  }
-
-  void _contentDeleteOldFileIfChanged(
-    ConsumerProfile profile,
-    Map<String, dynamic> oldEntry,
-    Map<String, dynamic> newEntry,
-  ) {
-    final oldFile = oldEntry['file']?.toString() ?? '';
-    final newFile = newEntry['file']?.toString() ?? '';
-    if (oldFile.isEmpty || oldFile == newFile) {
-      return;
-    }
-    File(
-      p.join(
-        _dropinsSource(profile, mods: !_isPluginConsumer(profile)),
-        oldFile,
-      ),
-    ).deleteSyncSafe();
+    await _withContentStore(
+      profile,
+      (ContentStore store) => store.update(target),
+    );
+    io.write('[OK] Updated content: ${target ?? 'all'}');
   }
 
   Future<void> _contentSync(
@@ -6893,12 +6040,17 @@ class NativeCommandService {
     String? minecraft,
     bool isolated = false,
   }) async {
+    final String javaExecutable = await _runtimeJavaPreflight(
+      profile,
+      instance,
+      minecraft: minecraft,
+    );
     final instanceDir = _instanceDir(profile, instance);
     final localInstaller = p.join(instanceDir, 'installer.jar');
     _replaceWithSymlink(localInstaller, File(installerJarPath).absolute.path);
 
     final CapturedResult result = await _processRunner.runCaptured(
-      'java',
+      javaExecutable,
       <String>['-jar', localInstaller, '--installServer', '.'],
       workingDirectory: instanceDir,
     );
@@ -6996,6 +6148,11 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
+    final String javaExecutable = await _runtimeJavaPreflight(
+      profile,
+      instance,
+    );
+
     final bool isolatedInstance = _instanceIsolated(profile, instance);
     if (!isolatedInstance) {
       _instanceEnsureSharedPluginOps(profile, instance, io: io);
@@ -7048,7 +6205,11 @@ class NativeCommandService {
     final Set<int> reserved = await _runtimePortGate.run(() async {
       await _runtimePrepareInstancePort(profile, instance, io);
       _ensureRconConfigured(profile, instance);
-      final int? rconPort = await _runtimePrepareRconPort(profile, instance, io);
+      final int? rconPort = await _runtimePrepareRconPort(
+        profile,
+        instance,
+        io,
+      );
       final Set<int> ports = <int>{
         _instanceGetServerPort(profile, instance),
         ?rconPort,
@@ -7072,14 +6233,14 @@ class NativeCommandService {
       logFile
         ..createSync(recursive: true)
         ..writeAsStringSync('');
-      final settings = _runtimeSettingsLoad(profile);
+      final settings = _runtimeSettingsLoad(profile, instance: instance);
       final launchWorkingDir = _runtimeLaunchWorkingDir(profile, instance);
       String? log4jPath;
       if (settings.consoleLogFormat == 'minimal') {
         log4jPath = _ensureMinimalLog4jConfig(profile, instance);
       }
       final javaCommandParts = <String>[
-        'java',
+        javaExecutable,
         ..._javaArgsForLaunch(
           launch,
           settings,
@@ -7271,7 +6432,10 @@ class NativeCommandService {
         (_) => _writeWindowsOwnerHeartbeat(ownerFile, ownerToken),
       );
       final _LaunchTarget launch = _runtimeLaunchTarget(profile, instance);
-      final _RuntimeSettingsData settings = _runtimeSettingsLoad(profile);
+      final _RuntimeSettingsData settings = _runtimeSettingsLoad(
+        profile,
+        instance: instance,
+      );
       final String workingDirectory = _runtimeLaunchWorkingDir(
         profile,
         instance,
@@ -7281,7 +6445,7 @@ class NativeCommandService {
         log4jPath = _ensureMinimalLog4jConfig(profile, instance);
       }
       server = await Process.start(
-        'java',
+        await _runtimeJavaPreflight(profile, instance),
         _javaArgsForLaunch(
           launch,
           settings,
@@ -8090,8 +7254,9 @@ class NativeCommandService {
   Future<void> _runtimeStop(
     ConsumerProfile profile,
     String? inputInstance,
-    _NativeIoBuffer io,
-  ) async {
+    _NativeIoBuffer io, {
+    bool requireGraceful = false,
+  }) async {
     final String? instance = inputInstance?.trim().isNotEmpty == true
         ? inputInstance!.trim()
         : _currentInstance(profile);
@@ -8107,6 +7272,10 @@ class NativeCommandService {
       if (Platform.isWindows) ?_readPid(_runtimeHostPidFile(profile, instance)),
     };
     final bool exited = await stopRuntime(
+      timeout: requireGraceful
+          ? const Duration(seconds: 60)
+          : runtimeStopTimeout,
+      allowForce: !requireGraceful,
       requestStop: () async {
         if (Platform.isWindows) {
           if (pids.isEmpty) return;
@@ -8797,112 +7966,158 @@ class NativeCommandService {
     return !await _pidRunning(pid);
   }
 
-  String _runtimeSettingsFile(ConsumerProfile profile) {
-    return p.join(_stateDir(profile), 'runtime-settings.env');
+  String _runtimeSettingsFile(ConsumerProfile profile, {String? instance}) {
+    return instance == null
+        ? p.join(_stateDir(profile), 'runtime-settings.env')
+        : p.join(_instanceDir(profile, instance), '.multiplexor-runtime.env');
   }
 
-  _RuntimeSettingsData _runtimeSettingsLoad(ConsumerProfile profile) {
-    var heap = _RuntimeSettingsData.defaults.heap;
-    var jvmArgs = _RuntimeSettingsData.defaults.jvmArgs;
-    var runtimeProfile = _RuntimeSettingsData.defaults.profile;
-    var noLineWrap = _RuntimeSettingsData.defaults.noLineWrap;
-    var consoleLogFormat = _RuntimeSettingsData.defaults.consoleLogFormat;
-    final file = File(_runtimeSettingsFile(profile));
-    var loadedFromFile = false;
+  Map<String, String> _runtimeSettingsValues(File file) {
+    final Map<String, String> values = <String, String>{};
+    if (!file.existsSync()) return values;
+    for (final String raw in file.readAsLinesSync()) {
+      final String line = raw.trim();
+      if (line.isEmpty || line.startsWith('#')) continue;
+      final int separator = line.indexOf('=');
+      if (separator <= 0) {
+        throw _NativeCommandException(
+          'Invalid runtime setting in ${file.path}: $line',
+          2,
+        );
+      }
+      values[line.substring(0, separator).trim()] = line
+          .substring(separator + 1)
+          .trim();
+    }
+    return values;
+  }
 
-    if (file.existsSync()) {
-      loadedFromFile = true;
-      for (final raw in file.readAsLinesSync()) {
-        final line = raw.trim();
-        if (line.isEmpty || line.startsWith('#') || !line.contains('=')) {
-          continue;
+  _RuntimeSettingsData _runtimeSettingsLoad(
+    ConsumerProfile profile, {
+    String? instance,
+    bool includeEnvironment = true,
+  }) {
+    final Map<String, String> values = <String, String>{};
+    void overlay(Map<String, String> layer) {
+      values.addAll(layer);
+      final String? preset = layer['JVM_PROFILE']?.toLowerCase();
+      if (preset != null && !layer.containsKey('JVM_ARGS')) {
+        final String? presetArgs = _runtimeSettingsPresets[preset];
+        if (presetArgs == null) {
+          throw _NativeCommandException('Unknown JVM preset: $preset', 2);
         }
-        final idx = line.indexOf('=');
-        final key = line.substring(0, idx).trim();
-        final value = line.substring(idx + 1).trim();
-        switch (key) {
-          case 'HEAP_SIZE':
-            if (_runtimeHeapLooksValid(value)) {
-              heap = value.toUpperCase();
-            }
-            break;
-          case 'JVM_ARGS':
-            if (value.isNotEmpty) {
-              jvmArgs = value;
-            }
-            break;
-          case 'JVM_PROFILE':
-            if (value.isNotEmpty) {
-              runtimeProfile = value.toLowerCase();
-            }
-            break;
-          case 'NO_LINE_WRAP':
-            noLineWrap = _parseBoolSetting(value, defaultValue: noLineWrap);
-            break;
-          case 'CONSOLE_LOG_FORMAT':
-            final lower = value.toLowerCase();
-            if (lower == 'minimal' || lower == 'default') {
-              consoleLogFormat = lower;
-            }
-            break;
-          default:
-            break;
-        }
+        values['JVM_ARGS'] = presetArgs;
       }
     }
 
-    final envHeap = Platform.environment['HEAP_SIZE'];
-    if (envHeap != null && envHeap.trim().isNotEmpty) {
-      final normalizedHeap = envHeap.trim().toUpperCase();
-      if (_runtimeHeapLooksValid(normalizedHeap)) {
-        heap = normalizedHeap;
+    overlay(_runtimeSettingsValues(File(_runtimeSettingsFile(profile))));
+    if (instance != null) {
+      overlay(
+        _runtimeSettingsValues(
+          File(_runtimeSettingsFile(profile, instance: instance)),
+        ),
+      );
+    }
+    if (includeEnvironment) {
+      final Map<String, String> environment = <String, String>{};
+      for (final String key in const <String>[
+        'HEAP_SIZE',
+        'JVM_PROFILE',
+        'JVM_ARGS',
+        'JAVA_EXECUTABLE',
+      ]) {
+        final String? value = Platform.environment[key]?.trim();
+        if (value != null && value.isNotEmpty) environment[key] = value;
       }
+      overlay(environment);
     }
-    final envJvmArgs = Platform.environment['JVM_ARGS'];
-    if (envJvmArgs != null && envJvmArgs.trim().isNotEmpty) {
-      jvmArgs = envJvmArgs.trim();
+    const _RuntimeSettingsData defaults = _RuntimeSettingsData.defaults;
+    final String heap = (values['HEAP_SIZE'] ?? defaults.heap).toUpperCase();
+    if (!_runtimeHeapLooksValid(heap)) {
+      throw _NativeCommandException('Invalid runtime heap: $heap', 2);
     }
-    final envProfile = Platform.environment['JVM_PROFILE'];
-    if (envProfile != null && envProfile.trim().isNotEmpty) {
-      runtimeProfile = envProfile.trim().toLowerCase();
+    final String javaExecutable =
+        values['JAVA_EXECUTABLE'] ?? defaults.javaExecutable;
+    if (javaExecutable.isEmpty) {
+      throw _NativeCommandException('Java executable cannot be empty', 2);
     }
-
-    final normalizedJvmArgs = _runtimeSettingsNormalizeJvmArgs(jvmArgs);
-    final shouldRewriteNormalizedSettings =
-        loadedFromFile &&
-        envHeap == null &&
-        envJvmArgs == null &&
-        envProfile == null &&
-        normalizedJvmArgs != jvmArgs;
-    jvmArgs = normalizedJvmArgs;
-
-    if (!_runtimeSettingsPresets.containsKey(runtimeProfile)) {
-      runtimeProfile = _runtimeSettingsGuessProfileForArgs(jvmArgs);
+    final String runtimeProfile = (values['JVM_PROFILE'] ?? defaults.profile)
+        .toLowerCase();
+    final String jvmArgs =
+        values['JVM_ARGS'] ??
+        _runtimeSettingsPresets[runtimeProfile] ??
+        defaults.jvmArgs;
+    final String logFormat =
+        values['CONSOLE_LOG_FORMAT'] ?? defaults.consoleLogFormat;
+    if (logFormat != 'minimal' && logFormat != 'default') {
+      throw _NativeCommandException(
+        'Invalid console log format: $logFormat',
+        2,
+      );
     }
-
-    final settings = _RuntimeSettingsData(
+    return _RuntimeSettingsData(
       heap: heap,
+      javaExecutable: javaExecutable,
       jvmArgs: jvmArgs,
-      profile: runtimeProfile,
-      noLineWrap: noLineWrap,
-      consoleLogFormat: consoleLogFormat,
+      profile: _runtimeSettingsGuessProfileForArgs(jvmArgs),
+      noLineWrap: _parseBoolSetting(
+        values['NO_LINE_WRAP'] ?? '',
+        defaultValue: defaults.noLineWrap,
+      ),
+      consoleLogFormat: logFormat,
     );
-    if (shouldRewriteNormalizedSettings) {
-      _runtimeSettingsSave(profile, settings);
-    }
-    return settings;
   }
 
   void _runtimeSettingsSave(
     ConsumerProfile profile,
-    _RuntimeSettingsData settings,
-  ) {
-    final file = File(_runtimeSettingsFile(profile));
+    _RuntimeSettingsData settings, {
+    String? instance,
+    Set<String>? keys,
+  }) {
+    final File file = File(_runtimeSettingsFile(profile, instance: instance));
+    final Map<String, String> updated = <String, String>{
+      'HEAP_SIZE': settings.heap,
+      'JAVA_EXECUTABLE': settings.javaExecutable,
+      'JVM_PROFILE': settings.profile,
+      'JVM_ARGS': settings.jvmArgs,
+      'NO_LINE_WRAP': '${settings.noLineWrap}',
+      'CONSOLE_LOG_FORMAT': settings.consoleLogFormat,
+    };
+    final Map<String, String> values = _runtimeSettingsValues(file);
+    for (final MapEntry<String, String> entry in updated.entries) {
+      if (keys == null || keys.contains(entry.key)) {
+        values[entry.key] = entry.value;
+      }
+    }
     file.createSync(recursive: true);
-    final normalizedArgs = _runtimeSettingsNormalizeJvmArgs(settings.jvmArgs);
     file.writeAsStringSync(
-      '${['# Multiplexor runtime settings (${profile.shortName})', 'HEAP_SIZE=${settings.heap}', 'JVM_PROFILE=${settings.profile}', 'JVM_ARGS=$normalizedArgs', 'NO_LINE_WRAP=${settings.noLineWrap ? 'true' : 'false'}', 'CONSOLE_LOG_FORMAT=${settings.consoleLogFormat}'].join('\n')}\n',
+      '${values.entries.map((MapEntry<String, String> entry) => '${entry.key}=${entry.value}').join('\n')}\n',
     );
+  }
+
+  Future<String> _runtimeJavaPreflight(
+    ConsumerProfile profile,
+    String? instance, {
+    String? minecraft,
+  }) async {
+    final _RuntimeSettingsData settings = _runtimeSettingsLoad(
+      profile,
+      instance: instance,
+    );
+    final String executable = settings.javaExecutable;
+    final int major = await _javaInspector(executable);
+    final String? version =
+        minecraft ??
+        (instance == null ? null : _serverSource(profile, instance)['mc']);
+    final int? required = minimumMinecraftJava(version);
+    if (required != null && major < required) {
+      throw _NativeCommandException(
+        'Minecraft $version requires Java $required or newer; "$executable" is Java $major. '
+        'Use runtime settings set-java <executable>${instance == null ? '' : ' --instance $instance'}.',
+        2,
+      );
+    }
+    return executable;
   }
 
   bool _parseBoolSetting(String value, {required bool defaultValue}) {
@@ -8923,7 +8138,7 @@ class NativeCommandService {
   }
 
   bool _runtimeHeapLooksValid(String heap) {
-    return RegExp(r'^[0-9]{1,2}[GgMm]$').hasMatch(heap.trim());
+    return RegExp(r'^[1-9][0-9]*[GgMm]$').hasMatch(heap.trim());
   }
 
   String _runtimeSettingsGuessProfileForArgs(String args) {
@@ -8963,16 +8178,6 @@ class NativeCommandService {
         ..writeAsStringSync(body);
     }
     return path;
-  }
-
-  String _runtimeSettingsNormalizeJvmArgs(String args) {
-    final tokens = args
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((token) => token.isNotEmpty)
-        .where((token) => token != '-XX:+PerfDisableSharedMem')
-        .toList(growable: false);
-    return tokens.join(' ');
   }
 
   List<String> _javaArgsForLaunch(
@@ -12092,12 +11297,6 @@ class _FlexibleArgs {
     required this.positionals,
   });
 
-  static const empty = _FlexibleArgs(
-    options: <String, String>{},
-    flags: <String, bool>{},
-    positionals: <String>[],
-  );
-
   final Map<String, String> options;
   final Map<String, bool> flags;
   final List<String> positionals;
@@ -12123,15 +11322,10 @@ class _BackupEntry {
   Map<String, dynamic> get manifest {
     final file = File(p.join(path, 'manifest.json'));
     if (!file.existsSync()) {
-      return <String, dynamic>{
-        'id': id,
-        'consumer': profile.shortName,
-        'instance': instance,
-        'created_at': id,
-        'label': '',
-        'snapshot': 'snapshot',
-        'entries': <Map<String, dynamic>>[],
-      };
+      throw _NativeCommandException(
+        'Backup manifest is missing: ${file.path}',
+        1,
+      );
     }
     final decoded = jsonDecode(file.readAsStringSync());
     if (decoded is Map<String, dynamic>) {
@@ -12173,6 +11367,7 @@ class _LaunchTarget {
 class _RuntimeSettingsData {
   const _RuntimeSettingsData({
     this.heap = '4G',
+    this.javaExecutable = 'java',
     this.jvmArgs =
         '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 '
         '-XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapRegionSize=8M '
@@ -12186,6 +11381,7 @@ class _RuntimeSettingsData {
   static const _RuntimeSettingsData defaults = _RuntimeSettingsData();
 
   final String heap;
+  final String javaExecutable;
   final String jvmArgs;
   final String profile;
 
@@ -12199,6 +11395,7 @@ class _RuntimeSettingsData {
 
   _RuntimeSettingsData copyWith({
     String? heap,
+    String? javaExecutable,
     String? jvmArgs,
     String? profile,
     bool? noLineWrap,
@@ -12206,6 +11403,7 @@ class _RuntimeSettingsData {
   }) {
     return _RuntimeSettingsData(
       heap: heap ?? this.heap,
+      javaExecutable: javaExecutable ?? this.javaExecutable,
       jvmArgs: jvmArgs ?? this.jvmArgs,
       profile: profile ?? this.profile,
       noLineWrap: noLineWrap ?? this.noLineWrap,

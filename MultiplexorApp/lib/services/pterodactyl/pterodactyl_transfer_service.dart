@@ -9,6 +9,7 @@ import 'pterodactyl_models.dart';
 import 'pterodactyl_service.dart';
 import 'pterodactyl_smb_service.dart';
 import 'pterodactyl_transfer_files.dart';
+import 'pterodactyl_transfer_baseline_store.dart';
 import 'pterodactyl_transfer_link_store.dart';
 import 'pterodactyl_transfer_models.dart';
 import 'pterodactyl_transfer_path_policy.dart';
@@ -44,25 +45,33 @@ final class PterodactylTransferService {
     DateTime Function()? clock,
     Duration remoteReadyTimeout = const Duration(minutes: 5),
     Future<void> Function(Duration duration)? delay,
+    Future<void> Function(Directory directory)? temporaryDirectoryDeleter,
     PterodactylTransferFileEngine fileEngine =
         const PterodactylTransferFileEngine(),
     PterodactylTransferLinkStore linkStore =
         const PterodactylTransferLinkStore(),
   }) : _metadataDirectoryPath = metadataDirectoryPath,
+       _baselineStore = PterodactylTransferBaselineStore(
+         metadataDirectoryPath: metadataDirectoryPath,
+       ),
        _remoteGateway = remoteGateway,
        _localInstances = localInstances,
        _clock = clock ?? DateTime.now,
        _remoteReadyTimeout = remoteReadyTimeout,
        _delay = delay ?? Future<void>.delayed,
+       _temporaryDirectoryDeleter =
+           temporaryDirectoryDeleter ?? _deleteTemporaryDirectory,
        _fileEngine = fileEngine,
        _linkStore = linkStore;
 
   final String _metadataDirectoryPath;
+  final PterodactylTransferBaselineStore _baselineStore;
   final PterodactylTransferRemoteGateway _remoteGateway;
   final PterodactylLocalInstanceGateway _localInstances;
   final DateTime Function() _clock;
   final Duration _remoteReadyTimeout;
   final Future<void> Function(Duration duration) _delay;
+  final Future<void> Function(Directory directory) _temporaryDirectoryDeleter;
   final PterodactylTransferFileEngine _fileEngine;
   final PterodactylTransferLinkStore _linkStore;
 
@@ -88,9 +97,10 @@ final class PterodactylTransferService {
       operation: 'Pull',
     );
     await _requireRemoteOffline(target, operation: 'Pull');
+    final List<String> warnings = <String>[_driveRaceWarning];
     _BackendSnapshot? snapshot;
     try {
-      snapshot = await _captureBackend(target);
+      snapshot = await _captureBackend(target, cleanupWarnings: warnings);
       await _recheckStableTarget(target, operation: 'Pull');
       await _requireRemoteOffline(target, operation: 'Pull');
       final List<PterodactylTransferChange> changes = _allAdds(
@@ -108,9 +118,10 @@ final class PterodactylTransferService {
         sourceFingerprint: snapshot.transferable.fingerprint,
         changes: changes,
         destination: null,
+        warnings: warnings,
       );
     } finally {
-      _deleteSnapshot(snapshot);
+      await _cleanupSnapshot(snapshot, warnings);
     }
   }
 
@@ -140,6 +151,8 @@ final class PterodactylTransferService {
     PterodactylLocalInstance? local;
     PterodactylTransferBackendSession? backend;
     _BackendSnapshot? snapshot;
+    final List<Directory> failedSnapshots = <Directory>[];
+    final List<String> warnings = <String>[];
     try {
       final PterodactylTransferRemoteTarget target = await _recheckStableTarget(
         approved,
@@ -147,7 +160,12 @@ final class PterodactylTransferService {
       );
       await _requireRemoteOffline(target, operation: 'Pull');
       backend = await _remoteGateway.openBackend(target);
-      snapshot = await _captureBackend(target, session: backend);
+      snapshot = await _captureBackend(
+        target,
+        session: backend,
+        pendingCleanup: failedSnapshots,
+        cleanupWarnings: warnings,
+      );
       await _recheckStableTarget(target, operation: 'Pull');
       await _requireRemoteOffline(target, operation: 'Pull');
       if (snapshot.transferable.fingerprint != plan.sourceFingerprint) {
@@ -155,7 +173,7 @@ final class PterodactylTransferService {
           'Remote files changed after Pull preview. Review a new preview.',
         );
       }
-      await backend.close();
+      await _closeBackend(backend, warnings);
       backend = null;
       local = await _localInstances.createStopped(
         plan.localInstanceName,
@@ -184,7 +202,6 @@ final class PterodactylTransferService {
         operationId: _operationId(target),
         replaceDestinationLinks: true,
       );
-      final List<String> warnings = <String>[];
       if (!_writeLaunchMetadata(local, target)) {
         final String argsFileName = Platform.isWindows
             ? 'win_args.txt'
@@ -196,6 +213,16 @@ final class PterodactylTransferService {
       }
       final PterodactylRemoteLink link = _newLink(local: local, target: target);
       _linkStore.save(local.path, link);
+      _saveCommonBaseline(
+        local: local,
+        target: target,
+        source: snapshot.transferable,
+        remote: snapshot.transferable,
+        baseline: null,
+        changes: actualChanges,
+        mode: PterodactylTransferMode.mirror,
+        warnings: warnings,
+      );
       return PterodactylTransferResult(
         plan: plan,
         localInstance: local,
@@ -217,9 +244,19 @@ final class PterodactylTransferService {
       }
       Error.throwWithStackTrace(error, stackTrace);
     } finally {
-      _deleteSnapshot(snapshot);
-      if (backend != null) await backend.close();
-      locks.release();
+      try {
+        if (backend != null) await _closeBackend(backend, warnings);
+        await _cleanupSnapshot(snapshot, warnings);
+        for (final Directory directory in failedSnapshots) {
+          await _cleanupPrivateDirectory(
+            directory,
+            warnings,
+            noun: 'Remote snapshot',
+          );
+        }
+      } finally {
+        locks.release();
+      }
     }
   }
 
@@ -277,9 +314,17 @@ final class PterodactylTransferService {
     final PterodactylTransferFileManifest source = await _scanLocalTransfer(
       local,
     );
+    final PterodactylTransferFileManifest? baseline =
+        mode == PterodactylTransferMode.update
+        ? _readCommonBaseline(local, target)
+        : null;
+    final List<String> warnings = <String>[
+      _driveRaceWarning,
+      if (mode == PterodactylTransferMode.update) _baselineWarning(baseline),
+    ];
     _BackendSnapshot? snapshot;
     try {
-      snapshot = await _captureBackend(target);
+      snapshot = await _captureBackend(target, cleanupWarnings: warnings);
       await _recheckStableTarget(target, operation: 'Push');
       final PterodactylTransferRemoteState afterState = await _remoteGateway
           .state(target);
@@ -292,6 +337,7 @@ final class PterodactylTransferService {
         source: source,
         target: snapshot.transferable,
         mode: mode,
+        baseline: baseline,
       );
       return _plan(
         direction: PterodactylTransferDirection.push,
@@ -305,9 +351,10 @@ final class PterodactylTransferService {
         sourceFingerprint: source.fingerprint,
         changes: changes,
         destination: snapshot.transferable,
+        warnings: warnings,
       );
     } finally {
-      _deleteSnapshot(snapshot);
+      await _cleanupSnapshot(snapshot, warnings);
     }
   }
 
@@ -693,6 +740,7 @@ final class PterodactylTransferService {
     _BackendSnapshot? preApplySnapshot;
     _BackendSnapshot? verificationSnapshot;
     Directory? stage;
+    final List<Directory> failedSnapshots = <Directory>[];
     _TransferBackup? backup;
     bool remoteMutationStarted = false;
     bool committed = false;
@@ -700,6 +748,7 @@ final class PterodactylTransferService {
     final List<String> cleanupWarnings = <String>[];
     late PterodactylTransferRemoteTarget target;
     late PterodactylTransferPlan authoritativePlan;
+    PterodactylTransferFileManifest? baseline;
     try {
       final PterodactylLocalInstance lockedLocal = await _localInstances
           .resolve(local.name, consumer: initialPlan.localConsumer);
@@ -728,6 +777,9 @@ final class PterodactylTransferService {
         );
       }
       target = await _recheckStableTarget(approved, operation: 'Push');
+      baseline = initialPlan.mode == PterodactylTransferMode.update
+          ? _readCommonBaseline(local, target)
+          : null;
       final PterodactylTransferRemoteState beforeState = await _remoteGateway
           .state(target);
       wasRunning = beforeState == PterodactylTransferRemoteState.running;
@@ -752,7 +804,12 @@ final class PterodactylTransferService {
 
       if (initialPlan.isNoop) {
         backend = await _remoteGateway.openBackend(target);
-        authoritativeSnapshot = await _captureBackend(target, session: backend);
+        authoritativeSnapshot = await _captureBackend(
+          target,
+          session: backend,
+          pendingCleanup: failedSnapshots,
+          cleanupWarnings: cleanupWarnings,
+        );
         await _recheckStableTarget(target, operation: 'Push');
         if (await _remoteGateway.state(target) != beforeState) {
           throw StateError('Remote state changed during Push verification.');
@@ -764,12 +821,13 @@ final class PterodactylTransferService {
           source: source,
           destination: authoritativeSnapshot.transferable,
           targetWasRunning: wasRunning,
+          baseline: baseline,
         );
         _requireAuthoritativePlan(initialPlan, authoritativePlan);
         if (authoritativePlan.isNoop) {
-          await backend.close();
+          await _closeBackend(backend, cleanupWarnings);
           backend = null;
-          final List<String> warnings = <String>[];
+          final List<String> warnings = cleanupWarnings;
           final bool started = await _finishRuntimeState(
             target,
             shouldStart: startIfStopped && !wasRunning,
@@ -784,6 +842,16 @@ final class PterodactylTransferService {
             target: target,
             link: link,
             relink: relink,
+          );
+          _saveCommonBaseline(
+            local: local,
+            target: target,
+            source: source,
+            remote: authoritativeSnapshot.transferable,
+            baseline: baseline,
+            changes: authoritativePlan.changes,
+            mode: authoritativePlan.mode,
+            warnings: warnings,
           );
           return PterodactylTransferResult(
             plan: authoritativePlan,
@@ -803,8 +871,13 @@ final class PterodactylTransferService {
       target = await _recheckStableTarget(target, operation: 'Push');
       await _requireRemoteOffline(target, operation: 'Push');
       backend ??= await _remoteGateway.openBackend(target);
-      _deleteSnapshot(authoritativeSnapshot);
-      authoritativeSnapshot = await _captureBackend(target, session: backend);
+      await _cleanupSnapshot(authoritativeSnapshot, cleanupWarnings);
+      authoritativeSnapshot = await _captureBackend(
+        target,
+        session: backend,
+        pendingCleanup: failedSnapshots,
+        cleanupWarnings: cleanupWarnings,
+      );
       target = await _recheckStableTarget(target, operation: 'Push');
       await _requireRemoteOffline(target, operation: 'Push');
       authoritativePlan = _planFromManifests(
@@ -814,12 +887,13 @@ final class PterodactylTransferService {
         source: source,
         destination: authoritativeSnapshot.transferable,
         targetWasRunning: wasRunning,
+        baseline: baseline,
       );
       _requireAuthoritativePlan(initialPlan, authoritativePlan);
       if (authoritativePlan.isNoop) {
-        await backend.close();
+        await _closeBackend(backend, cleanupWarnings);
         backend = null;
-        final List<String> warnings = <String>[];
+        final List<String> warnings = cleanupWarnings;
         final bool started = await _finishRuntimeState(
           target,
           shouldStart:
@@ -835,6 +909,16 @@ final class PterodactylTransferService {
           target: target,
           link: link,
           relink: relink,
+        );
+        _saveCommonBaseline(
+          local: local,
+          target: target,
+          source: source,
+          remote: authoritativeSnapshot.transferable,
+          baseline: baseline,
+          changes: authoritativePlan.changes,
+          mode: authoritativePlan.mode,
+          warnings: warnings,
         );
         return PterodactylTransferResult(
           plan: authoritativePlan,
@@ -852,12 +936,27 @@ final class PterodactylTransferService {
         snapshot: authoritativeSnapshot,
         operationId: operationId,
       );
-      stage = await _stageTransferSource(source, operationId: operationId);
+      final PterodactylTransferFileManifest transferSource =
+          authoritativePlan.mode == PterodactylTransferMode.mirror
+          ? source
+          : _fileEngine.selectSource(
+              source: source,
+              changes: authoritativePlan.changes,
+            );
+      stage = await _stageTransferSource(
+        transferSource,
+        operationId: operationId,
+      );
 
       await _recheckLocalBeforeApply(local, initialPlan, source.fingerprint);
       target = await _recheckStableTarget(target, operation: 'Push');
       await _requireRemoteOffline(target, operation: 'Push');
-      preApplySnapshot = await _captureBackend(target, session: backend);
+      preApplySnapshot = await _captureBackend(
+        target,
+        session: backend,
+        pendingCleanup: failedSnapshots,
+        cleanupWarnings: cleanupWarnings,
+      );
       if (preApplySnapshot.full.fingerprint !=
           authoritativeSnapshot.full.fingerprint) {
         throw StateError(
@@ -876,11 +975,21 @@ final class PterodactylTransferService {
       );
       target = await _recheckStableTarget(target, operation: 'Push');
       await _requireRemoteOffline(target, operation: 'Push');
-      verificationSnapshot = await _captureBackend(target, session: backend);
+      verificationSnapshot = await _captureBackend(
+        target,
+        session: backend,
+        pendingCleanup: failedSnapshots,
+        cleanupWarnings: cleanupWarnings,
+      );
       _verifyAppliedTransfer(
-        source: source,
+        source: transferSource,
         remote: verificationSnapshot.transferable,
         mode: authoritativePlan.mode,
+      );
+      _verifyUntouchedRemote(
+        before: preApplySnapshot.full,
+        after: verificationSnapshot.full,
+        changes: authoritativePlan.changes,
       );
       target = await _recheckStableTarget(target, operation: 'Push commit');
       await _requireRemoteOffline(target, operation: 'Push commit');
@@ -898,19 +1007,21 @@ final class PterodactylTransferService {
           target = await _prepareRemoteForRollback(target);
           await backend.restoreFrom(backup.backupPath);
           target = await _prepareRemoteForRollback(target);
-          _deleteSnapshot(verificationSnapshot);
+          await _cleanupSnapshot(verificationSnapshot, cleanupWarnings);
           verificationSnapshot = await _captureBackend(
             target,
             session: backend,
+            pendingCleanup: failedSnapshots,
           );
           final PterodactylTransferRemoteState verificationState =
               await _remoteGateway.state(target);
           if (verificationState != PterodactylTransferRemoteState.offline) {
             target = await _prepareRemoteForRollback(target);
-            _deleteSnapshot(verificationSnapshot);
+            await _cleanupSnapshot(verificationSnapshot, cleanupWarnings);
             verificationSnapshot = await _captureBackend(
               target,
               session: backend,
+              pendingCleanup: failedSnapshots,
             );
           }
           target = await _recheckStableTarget(
@@ -1015,21 +1126,27 @@ final class PterodactylTransferService {
       }
       Error.throwWithStackTrace(error, stackTrace);
     } finally {
-      _cleanupSnapshot(authoritativeSnapshot, cleanupWarnings);
-      _cleanupSnapshot(preApplySnapshot, cleanupWarnings);
-      _cleanupSnapshot(verificationSnapshot, cleanupWarnings);
-      if (stage != null) {
-        _cleanupPrivateDirectory(stage, cleanupWarnings, noun: 'staging');
-      }
-      if (backend != null) {
-        try {
-          await backend.close();
-        } catch (error) {
-          cleanupWarnings.add('Direct backend cleanup failed: $error');
+      try {
+        if (backend != null) await _closeBackend(backend, cleanupWarnings);
+        await _cleanupSnapshot(authoritativeSnapshot, cleanupWarnings);
+        await _cleanupSnapshot(preApplySnapshot, cleanupWarnings);
+        await _cleanupSnapshot(verificationSnapshot, cleanupWarnings);
+        for (final Directory directory in failedSnapshots) {
+          await _cleanupPrivateDirectory(
+            directory,
+            cleanupWarnings,
+            noun: 'Remote snapshot',
+          );
         }
-      }
-      if (!committed) {
-        locks.release();
+        if (stage != null) {
+          await _cleanupPrivateDirectory(
+            stage,
+            cleanupWarnings,
+            noun: 'staging',
+          );
+        }
+      } finally {
+        if (!committed) locks.release();
       }
     }
 
@@ -1051,6 +1168,16 @@ final class PterodactylTransferService {
           'saved: $error',
         );
       }
+      _saveCommonBaseline(
+        local: local,
+        target: target,
+        source: source,
+        remote: verificationSnapshot.transferable,
+        baseline: baseline,
+        changes: authoritativePlan.changes,
+        mode: authoritativePlan.mode,
+        warnings: warnings,
+      );
       final bool restarted = await _finishRuntimeState(
         target,
         shouldStart:
@@ -1401,6 +1528,7 @@ final class PterodactylTransferService {
     required PterodactylTransferFileManifest source,
     required PterodactylTransferFileManifest destination,
     required bool targetWasRunning,
+    PterodactylTransferFileManifest? baseline,
   }) => _plan(
     direction: PterodactylTransferDirection.push,
     mode: initialPlan.mode,
@@ -1415,8 +1543,14 @@ final class PterodactylTransferService {
       source: source,
       target: destination,
       mode: initialPlan.mode,
+      baseline: baseline,
     ),
     destination: destination,
+    warnings: <String>[
+      _driveRaceWarning,
+      if (initialPlan.mode == PterodactylTransferMode.update)
+        _baselineWarning(baseline),
+    ],
   );
 
   void _requireAuthoritativePlan(
@@ -1426,7 +1560,7 @@ final class PterodactylTransferService {
     if (approved.sourceFingerprint != authoritative.sourceFingerprint ||
         approved.confirmationToken != authoritative.confirmationToken) {
       throw StateError(
-        'The overwrite/delete scope covered by the Push preview changed. '
+        'The file operations covered by the Push preview changed. '
         'No Remote files were uploaded; review a new preview.',
       );
     }
@@ -1460,7 +1594,7 @@ final class PterodactylTransferService {
       }
       return stage;
     } catch (_) {
-      if (stage.existsSync()) stage.deleteSync(recursive: true);
+      await _cleanupPrivateDirectory(stage, <String>[], noun: 'staging');
       rethrow;
     }
   }
@@ -1508,6 +1642,109 @@ final class PterodactylTransferService {
     }
   }
 
+  void _verifyUntouchedRemote({
+    required PterodactylTransferFileManifest before,
+    required PterodactylTransferFileManifest after,
+    required List<PterodactylTransferChange> changes,
+  }) {
+    final Set<String> changedFiles = <String>{};
+    final Set<String> changedDirectories = <String>{};
+    for (final PterodactylTransferChange change in changes) {
+      if (change.entryKind == PterodactylTransferEntryKind.file) {
+        changedFiles.add(change.path);
+      } else {
+        changedDirectories.add(change.path);
+      }
+      String parent = p.posix.dirname(change.path);
+      while (parent != '.') {
+        changedDirectories.add(parent);
+        parent = p.posix.dirname(parent);
+      }
+    }
+    for (final String path in <String>{
+      ...before.files.keys,
+      ...after.files.keys,
+    }) {
+      if (!changedFiles.contains(path) &&
+          before.files[path]?.sha256 != after.files[path]?.sha256) {
+        throw StateError(
+          'Remote verification found an unplanned file change: $path.',
+        );
+      }
+    }
+    for (final String path in <String>{
+      ...before.directories,
+      ...after.directories,
+    }) {
+      if (!changedDirectories.contains(path) &&
+          before.directories.contains(path) !=
+              after.directories.contains(path)) {
+        throw StateError(
+          'Remote verification found an unplanned directory change: $path.',
+        );
+      }
+    }
+  }
+
+  PterodactylTransferFileManifest? _readCommonBaseline(
+    PterodactylLocalInstance local,
+    PterodactylTransferRemoteTarget target,
+  ) {
+    final PterodactylRemoteLink? link = _linkStore.load(local.path);
+    if (link == null ||
+        link.profileId != target.profileId ||
+        link.serverUuid != target.uuid ||
+        link.localConsumer != local.consumer ||
+        link.localInstanceName != local.name) {
+      return null;
+    }
+    return _baselineStore.read(
+      localConsumer: local.consumer,
+      localInstancePath: local.path,
+      profileId: target.profileId,
+      serverUuid: target.uuid,
+    );
+  }
+
+  String _baselineWarning(PterodactylTransferFileManifest? baseline) =>
+      baseline == null
+      ? 'No common transfer baseline: Update compares current Local and Remote files; differing Local files replace Remote files.'
+      : 'Common transfer baseline available: Update sends Local edits, preserves Remote-only changes, and stops on conflicting edits.';
+
+  void _saveCommonBaseline({
+    required PterodactylLocalInstance local,
+    required PterodactylTransferRemoteTarget target,
+    required PterodactylTransferFileManifest source,
+    required PterodactylTransferFileManifest remote,
+    required PterodactylTransferFileManifest? baseline,
+    required List<PterodactylTransferChange> changes,
+    required PterodactylTransferMode mode,
+    required List<String> warnings,
+  }) {
+    try {
+      final PterodactylTransferFileManifest next =
+          baseline == null || mode == PterodactylTransferMode.mirror
+          ? source
+          : _fileEngine.advanceBaseline(
+              baseline: baseline,
+              source: source,
+              changes: changes,
+              target: remote,
+            );
+      _baselineStore.write(
+        localConsumer: local.consumer,
+        localInstancePath: local.path,
+        profileId: target.profileId,
+        serverUuid: target.uuid,
+        manifest: next,
+      );
+    } catch (error) {
+      warnings.add(
+        'Files were transferred, but their common baseline could not be saved: $error. Review the next Push preview carefully.',
+      );
+    }
+  }
+
   Future<PterodactylTransferFileManifest> _scanLocalTransfer(
     PterodactylLocalInstance local,
   ) {
@@ -1532,12 +1769,16 @@ final class PterodactylTransferService {
   Future<_BackendSnapshot> _captureBackend(
     PterodactylTransferRemoteTarget target, {
     PterodactylTransferBackendSession? session,
+    List<String>? cleanupWarnings,
+    List<Directory>? pendingCleanup,
   }) async {
+    final List<String> warnings = cleanupWarnings ?? <String>[];
     final Directory directory = _createPrivateTempDirectory('snapshot-');
     final bool ownsSession = session == null;
-    final PterodactylTransferBackendSession backend =
-        session ?? await _remoteGateway.openBackend(target);
+    PterodactylTransferBackendSession? backend = session;
+    _BackendSnapshot? snapshot;
     try {
+      backend ??= await _remoteGateway.openBackend(target);
       await backend.snapshotTo(directory.path);
       _hardenPrivateTree(directory.path);
       final PterodactylTransferFileManifest full = await _fileEngine.scan(
@@ -1553,44 +1794,75 @@ final class PterodactylTransferService {
           'Remote symlinks are not supported by safe transfer operations.',
         );
       }
-      return _BackendSnapshot(
+      snapshot = _BackendSnapshot(
         directory: directory,
         full: full,
         transferable: transferable,
       );
-    } catch (_) {
-      if (directory.existsSync()) directory.deleteSync(recursive: true);
-      rethrow;
+      return snapshot;
     } finally {
-      if (ownsSession) await backend.close();
+      if (ownsSession && backend != null) {
+        await _closeBackend(backend, warnings);
+      }
+      if (snapshot == null && !ownsSession && pendingCleanup != null) {
+        pendingCleanup.add(directory);
+      } else if (snapshot == null) {
+        await _cleanupPrivateDirectory(
+          directory,
+          warnings,
+          noun: 'Remote snapshot',
+        );
+      }
     }
   }
 
-  void _deleteSnapshot(_BackendSnapshot? snapshot) {
-    if (snapshot != null && snapshot.directory.existsSync()) {
-      snapshot.directory.deleteSync(recursive: true);
+  Future<void> _closeBackend(
+    PterodactylTransferBackendSession backend,
+    List<String> warnings,
+  ) async {
+    try {
+      await backend.close();
+    } catch (error) {
+      warnings.add('Direct backend cleanup failed: $error');
     }
   }
 
-  void _cleanupSnapshot(_BackendSnapshot? snapshot, List<String> warnings) {
+  Future<void> _cleanupSnapshot(
+    _BackendSnapshot? snapshot,
+    List<String> warnings,
+  ) async {
     if (snapshot == null) return;
-    _cleanupPrivateDirectory(
+    await _cleanupPrivateDirectory(
       snapshot.directory,
       warnings,
       noun: 'Remote snapshot',
     );
   }
 
-  void _cleanupPrivateDirectory(
+  Future<void> _cleanupPrivateDirectory(
     Directory directory,
     List<String> warnings, {
     required String noun,
-  }) {
-    try {
-      if (directory.existsSync()) directory.deleteSync(recursive: true);
-    } catch (error) {
-      warnings.add('$noun cleanup failed: $error');
+  }) async {
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (directory.existsSync()) await _temporaryDirectoryDeleter(directory);
+        return;
+      } catch (error) {
+        if (error is FileSystemException && attempt < 3) {
+          await _delay(Duration(milliseconds: 75 * attempt));
+          continue;
+        }
+        warnings.add(
+          '$noun cleanup failed; retained ${directory.path}: $error',
+        );
+        return;
+      }
     }
+  }
+
+  static Future<void> _deleteTemporaryDirectory(Directory directory) async {
+    await directory.delete(recursive: true);
   }
 
   Directory _createPrivateTempDirectory(String prefix) {
@@ -1721,13 +1993,10 @@ final class PterodactylTransferService {
     required String sourceFingerprint,
     required List<PterodactylTransferChange> changes,
     required PterodactylTransferFileManifest? destination,
+    List<String>? warnings,
   }) {
     final List<String> confirmationScope =
         changes
-            .where(
-              (PterodactylTransferChange change) =>
-                  change.kind != PterodactylTransferChangeKind.add,
-            )
             .map((PterodactylTransferChange change) {
               final PterodactylTransferFileEntry? targetEntry =
                   destination?.files[change.path];
@@ -1771,7 +2040,7 @@ final class PterodactylTransferService {
       confirmationToken: token,
       createdAt: _clock().toUtc(),
       changes: changes,
-      warnings: const <String>[_driveRaceWarning],
+      warnings: warnings ?? const <String>[_driveRaceWarning],
     );
   }
 
@@ -2018,7 +2287,11 @@ final class PterodactylTransferService {
       _hardenPrivateTree(backupRoot.path);
       return backup;
     } catch (_) {
-      if (backupRoot.existsSync()) backupRoot.deleteSync(recursive: true);
+      await _cleanupPrivateDirectory(
+        backupRoot,
+        <String>[],
+        noun: 'incomplete backup',
+      );
       rethrow;
     }
   }

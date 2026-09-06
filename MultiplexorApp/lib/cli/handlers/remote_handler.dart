@@ -320,6 +320,9 @@ Future<int> _pullRemote(_RemoteArguments parsed) async {
       '${_safe(result.plan.localInstanceName)}, stopped and linked to '
       '${_safe(result.plan.profileId)}/${_safe(result.plan.serverIdentifier)}.',
     );
+    for (final String warning in result.warnings) {
+      stdout.writeln('[WARN] ${_safe(warning)}');
+    }
     return 0;
   } on ArgumentError catch (error) {
     stderr.writeln('[ERROR] $error');

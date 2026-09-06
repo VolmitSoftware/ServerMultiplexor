@@ -900,6 +900,36 @@ void main() {
       expect(remote.startCount, 0);
     });
 
+    test('no-op approval cannot authorize a newly missing Remote file', () async {
+      final PterodactylLocalInstance instance = local.seed('local');
+      _write(instance.path, 'server.properties', 'same');
+      _write(remote.folder.path, 'server.properties', 'same');
+      final PterodactylTransferPlan plan = await service.planPush(
+        localInstanceName: 'local',
+        profileId: 'panel',
+        serverIdentifier: 'abc123',
+      );
+      expect(plan.isNoop, isTrue);
+      File(p.join(remote.folder.path, 'server.properties')).deleteSync();
+
+      await expectLater(
+        service.push(
+          localInstanceName: 'local',
+          profileId: 'panel',
+          serverIdentifier: 'abc123',
+          expectedPlanToken: plan.confirmationToken,
+        ),
+        throwsStateError,
+      );
+
+      expect(remote.applyCount, 0);
+      expect(remote.stopCount, 0);
+      expect(
+        File(p.join(remote.folder.path, 'server.properties')).existsSync(),
+        isFalse,
+      );
+    });
+
     test('update push applies an empty-directory-only delta', () async {
       final PterodactylLocalInstance instance = local.seed('local');
       _write(instance.path, 'server.properties', 'same');

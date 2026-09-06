@@ -74,6 +74,36 @@ void main() {
     },
   );
 
+  test(
+    'transfer stop requests graceful shutdown and propagates failure',
+    () async {
+      final _RecordingPassthrough passthrough = _RecordingPassthrough(
+        ManagerContext(rootDir: temporary.path, verbose: false),
+        consumers,
+      );
+      final PterodactylNativeLocalInstanceGateway local =
+          PterodactylNativeLocalInstanceGateway(
+            passthrough: passthrough,
+            loadConsumer: () => ConsumerProfile.plugin,
+          );
+      const PterodactylLocalInstance instance = PterodactylLocalInstance(
+        name: 'fixture',
+        consumer: 'fabric',
+        path: '/unused/fixture',
+      );
+      await local.stop(instance);
+      expect(passthrough.commands.single, <String>[
+        'runtime',
+        'stop',
+        'fixture',
+        '--graceful',
+      ]);
+      expect(passthrough.effectiveConsumer, ConsumerProfile.fabric);
+      passthrough.fail = true;
+      await expectLater(local.stop(instance), throwsStateError);
+    },
+  );
+
   test('loads the selected consumer for each new operation', () async {
     final PterodactylLocalInstance plugin = await gateway.createStopped(
       'plugin-copy',
@@ -235,6 +265,7 @@ final class _PartialCreatePassthrough extends PassthroughService {
       name,
     );
     Directory(_createdPath!).createSync(recursive: true);
+    setConsumerOverride(ConsumerProfile.fabric);
     return CapturedResult(
       exitCode: 1,
       stdout: '',
@@ -248,9 +279,26 @@ final class _PartialCreatePassthrough extends PassthroughService {
     required String creationToken,
   }) {
     cleanupCalled = true;
+    expect(effectiveConsumer, ConsumerProfile.plugin);
     if (creationToken != _creationToken || _createdPath == null) return false;
     final Directory partial = Directory(_createdPath!);
     if (partial.existsSync()) partial.deleteSync(recursive: true);
     return true;
+  }
+}
+
+final class _RecordingPassthrough extends PassthroughService {
+  _RecordingPassthrough(super.context, super.consumerService);
+  final List<List<String>> commands = <List<String>>[];
+  bool fail = false;
+
+  @override
+  Future<CapturedResult> capture(List<String> args) async {
+    commands.add(List<String>.of(args));
+    return CapturedResult(
+      exitCode: fail ? 1 : 0,
+      stdout: '',
+      stderr: fail ? 'Graceful shutdown timed out' : '',
+    );
   }
 }

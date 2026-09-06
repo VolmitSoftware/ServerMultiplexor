@@ -4,6 +4,9 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../models/build_cache.dart';
+import '../models/build_version_catalog.dart';
+import '../models/backup_summary.dart';
+import '../models/template_summary.dart';
 import '../models/consumer_profile.dart';
 import '../utils/async_work_pool.dart';
 import '../utils/duration_format.dart';
@@ -39,6 +42,7 @@ import 'runtime_state.dart';
 
 part 'interactive_wizard_addons.dart';
 part 'interactive_wizard_selection.dart';
+part 'interactive_wizard_local.dart';
 
 /// The side effect a Remote quick key is allowed to perform after a fresh
 /// resource-state check.
@@ -693,11 +697,7 @@ class InteractiveWizard {
     Map<String, InstanceFlags> flags = const <String, InstanceFlags>{};
     Future<String> captureMetrics() async {
       final String raw = await _captureMetrics();
-      if (raw.isNotEmpty) {
-        // An empty capture is a failed one; the last good flags outlive it,
-        // the same way the last good readings do.
-        flags = metricsTsvFlagsByInstance(raw);
-      }
+      flags = metricsTsvFlagsByInstance(raw);
       return raw;
     }
 
@@ -1020,10 +1020,13 @@ class InteractiveWizard {
         await _pushLocalToRemote(name);
       case InstanceModalAction.addons:
         await _configureInstanceAddons(name);
+      case InstanceModalAction.backups:
+        await _instanceBackups(name);
       case InstanceModalAction.pullToLocal:
         Ui.note('That action is Remote-only.');
         await Ui.pause();
       case InstanceModalAction.settings:
+        await _instanceRuntimeSettings(name);
       case InstanceModalAction.history:
       case InstanceModalAction.reinstall:
         Ui.note('That action is Remote-only.');
@@ -1087,6 +1090,11 @@ class InteractiveWizard {
       return;
     }
     switch (action) {
+      case WorkspaceModalAction.diagnostics:
+        await _shellRun(<String>['doctor']);
+        await Ui.pause();
+      case WorkspaceModalAction.templates:
+        await _createFromTemplate();
       case WorkspaceModalAction.buildTuning:
         await _buildAndTuningMenu();
       case WorkspaceModalAction.pullBuilds:
@@ -1219,6 +1227,7 @@ class InteractiveWizard {
       case InstanceModalAction.shared:
       case InstanceModalAction.copyDropins:
       case InstanceModalAction.addons:
+      case InstanceModalAction.backups:
       case InstanceModalAction.update:
       case InstanceModalAction.factoryReset:
         Ui.note('That action is Local-only.');
@@ -1252,6 +1261,8 @@ class InteractiveWizard {
       case WorkspaceModalAction.createMany:
         await _remoteCreateMany();
       case WorkspaceModalAction.buildTuning:
+      case WorkspaceModalAction.diagnostics:
+      case WorkspaceModalAction.templates:
       case WorkspaceModalAction.pullBuilds:
       case WorkspaceModalAction.wipe:
         Ui.note('That workspace action is Local-only.');
@@ -1471,7 +1482,7 @@ class InteractiveWizard {
 
   Future<PterodactylTransferMode> _chooseRemoteTransferMode() async {
     final int selected = await Ui.choose('Transfer mode', <String>[
-      'Update · copy changed/new files, preserve Remote-only files',
+      'Update · push file changes, preserve Remote-only files',
       'Mirror · exact Local copy, delete Remote-only files',
       'Back to destination',
     ]);
@@ -1976,7 +1987,8 @@ class InteractiveWizard {
             : 'backup and remain stopped',
       );
     }
-    if (plan.mode == PterodactylTransferMode.mirror) {
+    if (plan.direction == PterodactylTransferDirection.push &&
+        plan.mode == PterodactylTransferMode.mirror) {
       Ui.warn('Mirror deletes every Remote-only file listed below.');
     }
     for (final String warning in remoteTransferPlanWarnings(plan)) {
@@ -4154,15 +4166,19 @@ class InteractiveWizard {
     }
   }
 
-  /// The metrics feed behind the sampler: one `runtime metrics` capture per
-  /// sweep. A failed capture yields no rows rather than an error, so the
-  /// dashboard keeps its last good readings and tries again next sweep.
   Future<String> _captureMetrics() async {
     final CapturedResult result = await passthrough.capture(<String>[
       'runtime',
       'metrics',
     ]);
-    return result.success ? result.stdout : '';
+    if (!result.success) {
+      throw StateError(
+        result.stderr.trim().isEmpty
+            ? 'Local metrics capture failed (exit ${result.exitCode})'
+            : result.stderr.trim(),
+      );
+    }
+    return result.stdout;
   }
 
   /// Assembles the workspace view around the rings the sampler already
@@ -4176,6 +4192,8 @@ class InteractiveWizard {
     final List<String> instances = sampler.instances;
     return MonitorSnapshot(
       instances: instances,
+      captureError: sampler.lastError,
+      lastSuccessfulCapture: sampler.lastSuccessfulSweep,
       history: <String, List<MetricSample>>{
         for (final String instance in instances)
           instance: sampler.history(instance),
@@ -4344,6 +4362,17 @@ class InteractiveWizard {
   // ─── Create flow ─────────────────────────────────────────────────────
 
   Future<void> _createInstance() async {
+    if (passthrough.listTemplates().isNotEmpty) {
+      final String choice =
+          await menuSelect<String>('New instance', const <MenuEntry<String>>[
+            MenuEntry<String>('Choose platform and version', value: 'platform'),
+            MenuEntry<String>('Use a saved template', value: 'template'),
+          ]);
+      if (choice == 'template') {
+        await _createFromTemplate();
+        return;
+      }
+    }
     final String type = await _pickServerPlatform();
     final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String version = versionChoice.version;
@@ -4359,6 +4388,7 @@ class InteractiveWizard {
       type: type,
       version: version,
       cachedAge: versionChoice.cachedAge,
+      offline: versionChoice.offline,
     );
 
     final bool isMohist = type == 'mohist';
@@ -4742,14 +4772,51 @@ class InteractiveWizard {
         }
       }
     }
-    type ??= 'purpur';
+    type ??= 'custom';
     final String currentType = type;
 
     final bool confirmedRisk = await Ui.confirm(
-      'Update $name to a new $currentType version? '
-      'Worlds may corrupt and dropins may stop loading.',
+      'Back up $name, test the update on a staging copy, then apply it? '
+      'A failed startup restores the backup.',
     );
     if (!confirmedRisk) {
+      return;
+    }
+
+    if (!const <String>{
+      'paper',
+      'purpur',
+      'folia',
+      'canvas',
+      'leaf',
+      'spigot',
+      'forge',
+      'mohist',
+      'fabric',
+      'neoforge',
+    }.contains(currentType)) {
+      final String jar = await Ui.input(
+        'Replacement server jar',
+        validator: (String path) =>
+            path.toLowerCase().endsWith('.jar') && File(path).existsSync(),
+        validationMessage: 'Enter the path to an existing .jar file.',
+      );
+      final String minecraft = await Ui.input(
+        'Minecraft version',
+        validator: _looksLikeMinecraftVersion,
+        validationMessage: 'Use a version like 1.21.11 or 26.1.2.',
+      );
+      await _shellRun(<String>[
+        'instance',
+        'safe-update',
+        name,
+        '--jar',
+        jar,
+        '--mc',
+        minecraft,
+        '--promote',
+      ]);
+      await Ui.pause();
       return;
     }
 
@@ -4758,6 +4825,7 @@ class InteractiveWizard {
       type: currentType,
       version: choice.version,
       cachedAge: choice.cachedAge,
+      offline: choice.offline,
     );
 
     Ui.doing(
@@ -4765,8 +4833,9 @@ class InteractiveWizard {
     );
     final int code = await _shellRun(<String>[
       'instance',
-      'update',
+      'safe-update',
       name,
+      '--promote',
       '--type',
       currentType,
       '--mc',
@@ -4775,7 +4844,7 @@ class InteractiveWizard {
     ]);
     if (code == 0) {
       Ui.success(
-        '$name now points at ${_serverTypeLabel(currentType)} ${choice.version}.',
+        '$name update passed startup validation. Its backup is available under Backups.',
       );
     }
     await Ui.pause();
@@ -4788,6 +4857,9 @@ class InteractiveWizard {
       name,
     ]);
     final int? current = int.tryParse((currentRaw ?? '').trim());
+    final Map<int, List<String>> configured = passthrough
+        .configuredInstancePorts();
+    final String identity = '${_activeConsumer().shortName}/$name';
 
     final List<int> pool = <int>{
       for (int port = 25565; port <= 25575; port++) port,
@@ -4795,22 +4867,53 @@ class InteractiveWizard {
     }.toList(growable: false)..sort();
 
     final List<MenuEntry<int>> entries = <MenuEntry<int>>[
+      const MenuEntry<int>('Choose an available port', value: -1),
+      const MenuEntry<int>('Enter a custom port', value: -2),
       for (final int port in pool)
         MenuEntry<int>(
           '$port',
           value: port,
-          detail: port == current ? 'current' : null,
+          detail: <String>[
+            if (port == current) 'current',
+            ...?configured[port]
+                ?.where((String owner) => owner != identity)
+                .map((String owner) => 'used by $owner'),
+          ].join(' · '),
         ),
     ];
     final int initialIndex = current == null
         ? 0
-        : pool.indexOf(current).clamp(0, pool.length - 1);
+        : pool.indexOf(current).clamp(0, pool.length - 1) + 2;
 
-    final int port = await menuSelect<int>(
+    int port = await menuSelect<int>(
       'Port for $name',
       entries,
       initialIndex: initialIndex,
     );
+    if (port == -1) {
+      port = await passthrough.availableInstancePort(name);
+    } else if (port == -2) {
+      final String value = await Ui.input(
+        'Server port',
+        defaultValue: current?.toString(),
+        validator: (String value) {
+          final int? number = int.tryParse(value);
+          return number != null && number >= 1 && number <= 65535;
+        },
+        validationMessage: 'Use a port from 1 to 65535.',
+      );
+      port = int.parse(value);
+    }
+    final List<String> owners =
+        configured[port]?.where((String owner) => owner != identity).toList() ??
+        const <String>[];
+    if (owners.isNotEmpty &&
+        !await Ui.confirm(
+          'Port $port is also configured for ${owners.join(', ')}. Use it anyway?',
+          defaultValue: false,
+        )) {
+      return;
+    }
     await _shellRun(<String>['instance', 'port', name, '$port']);
   }
 
@@ -5085,7 +5188,7 @@ class InteractiveWizard {
   Future<_BuildVersionChoice> _pickSupportedVersion(String type) async {
     final String label = _serverTypeLabel(type);
     late final List<String> supported;
-    late final String latest;
+    late final String? latest;
     late final List<BuildCacheEntry> cache;
     final PassthroughService scoped = _commandsForConsumer(_activeConsumer());
     try {
@@ -5107,6 +5210,13 @@ class InteractiveWizard {
       scoped.disposeRcon();
     }
 
+    final BuildVersionCatalog catalog = BuildVersionCatalog(
+      type: type,
+      supported: supported,
+      latest: latest,
+      cache: cache,
+    );
+
     Future<_BuildVersionChoice> manualEntry() async {
       final String manual = await Ui.input(
         '$label Minecraft version',
@@ -5119,18 +5229,11 @@ class InteractiveWizard {
         version: trimmed,
         isLatest: trimmed == latest,
         cachedAge: newestCachedAge(cache, version: trimmed),
+        offline: catalog.metadataUnavailable,
       );
     }
 
-    if (supported.isEmpty) {
-      return manualEntry();
-    }
-
-    final List<String> newestFirst = supported.reversed.toList(growable: false);
-    final List<String> visible = newestFirst.take(30).toList(growable: true);
-    if (!visible.contains(latest)) {
-      visible.insert(0, latest);
-    }
+    final List<String> visible = catalog.versions.take(30).toList();
 
     String? versionDetail(String version) {
       final List<String> parts = <String>[
@@ -5150,7 +5253,9 @@ class InteractiveWizard {
 
     final Duration? newestAny = newestCachedAge(cache);
     final String footer = Ansi.style(
-      newestAny == null
+      catalog.metadataUnavailable
+          ? 'Upstream metadata unavailable · cached versions remain usable · retry or enter a version'
+          : newestAny == null
           ? '$label builds: none cached · create fetches fresh from upstream'
           : '$label builds updated ${formatBuildAge(newestAny)} · auto-refresh after ${BuildCachePolicy.ttl.inHours}h',
       Ansi.gray,
@@ -5170,13 +5275,16 @@ class InteractiveWizard {
             ? '${supported.length - visible.length} older not shown'
             : null,
       ),
+      if (catalog.metadataUnavailable)
+        const MenuEntry<String>('Retry upstream metadata', value: 'retry'),
     ];
 
     final String selected = await menuSelect<String>(
-      '$label version (${supported.length} supported)',
+      '$label version${catalog.metadataUnavailable ? ' (metadata unavailable)' : ' (${supported.length} supported)'}',
       entries,
       footer: footer,
     );
+    if (selected == 'retry') return _pickSupportedVersion(type);
     if (selected.isEmpty) {
       return manualEntry();
     }
@@ -5184,6 +5292,7 @@ class InteractiveWizard {
       version: selected,
       isLatest: selected == latest,
       cachedAge: newestCachedAge(cache, version: selected),
+      offline: catalog.metadataUnavailable,
     );
   }
 
@@ -5193,8 +5302,15 @@ class InteractiveWizard {
     required String type,
     required String version,
     required Duration? cachedAge,
+    bool offline = false,
   }) {
     final String label = _serverTypeLabel(type);
+    if (offline && cachedAge != null) {
+      Ui.note(
+        'Using cached $label $version; upstream metadata is unavailable.',
+      );
+      return false;
+    }
     final bool refresh = BuildCachePolicy.shouldRefresh(
       type: type,
       cachedAge: cachedAge,
@@ -5383,7 +5499,7 @@ class InteractiveWizard {
     );
   }
 
-  Future<String> _resolveLatestVersion(
+  Future<String?> _resolveLatestVersion(
     String type, {
     PassthroughService? source,
   }) async {
@@ -5391,7 +5507,7 @@ class InteractiveWizard {
       <String>['build', 'latest', type],
     );
     if (!result.success) {
-      return '1.21.1';
+      return null;
     }
     final List<String> lines = '${result.stdout}\n${result.stderr}'
         .split('\n')
@@ -5403,7 +5519,7 @@ class InteractiveWizard {
         return line;
       }
     }
-    return '1.21.1';
+    return null;
   }
 
   Future<List<String>> _resolveSupportedVersions(
@@ -5559,10 +5675,12 @@ class _BuildVersionChoice {
     required this.version,
     required this.isLatest,
     this.cachedAge,
+    this.offline = false,
   });
 
   final String version;
   final bool isLatest;
+  final bool offline;
 
   /// Age of the newest cached jar matching [version]; null when nothing is
   /// cached. Drives the automatic refresh decision.

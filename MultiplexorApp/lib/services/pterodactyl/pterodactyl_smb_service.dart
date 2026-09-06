@@ -53,7 +53,8 @@ final class PterodactylSmbDirectSession {
   )
   _apply;
   final Future<void> Function() _close;
-  bool _busy = false;
+  Completer<void>? _activeOperation;
+  Future<void>? _closing;
   bool _closed = false;
 
   Future<void> snapshotTo(String destinationPath) =>
@@ -64,21 +65,28 @@ final class PterodactylSmbDirectSession {
     required PterodactylSmbDirectWriteMode mode,
   }) => _run(() => _apply(sourcePath, mode));
 
-  Future<void> close() async {
-    if (_closed) return;
-    if (_busy) throw StateError('A direct SFTP operation is still running.');
+  Future<void> close() => _closing ??= _closeAfterOperation();
+
+  Future<void> _closeAfterOperation() async {
     _closed = true;
+    // The transfer owner may delete its snapshot as soon as close returns.
+    // Keep the exclusive backend slot until all subprocess writes have ended.
+    await _activeOperation?.future;
     await _close();
   }
 
   Future<void> _run(Future<void> Function() operation) async {
     if (_closed) throw StateError('The direct SFTP session is closed.');
-    if (_busy) throw StateError('A direct SFTP operation is already running.');
-    _busy = true;
+    if (_activeOperation != null) {
+      throw StateError('A direct SFTP operation is already running.');
+    }
+    final Completer<void> completed = Completer<void>();
+    _activeOperation = completed;
     try {
       await operation();
     } finally {
-      _busy = false;
+      _activeOperation = null;
+      completed.complete();
     }
   }
 }

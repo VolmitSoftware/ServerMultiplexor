@@ -52,6 +52,7 @@ enum InstanceModalAction {
   pullToLocal,
   pushToRemote,
   addons,
+  backups,
   settings,
   history,
   reinstall,
@@ -86,6 +87,8 @@ enum WorkspaceModalAction {
   connect,
   files,
   bulkActions,
+  diagnostics,
+  templates,
 }
 
 /// The id prefix every instance-card button hitbox carries: the id is
@@ -158,6 +161,7 @@ String instanceModalActionHotkey(InstanceModalAction action) =>
       InstanceModalAction.pullToLocal ||
       InstanceModalAction.pushToRemote => 'p',
       InstanceModalAction.addons => 'o',
+      InstanceModalAction.backups => 'b',
       InstanceModalAction.settings => 'e',
       InstanceModalAction.history => 'h',
       InstanceModalAction.reinstall => 'n',
@@ -186,6 +190,8 @@ String workspaceModalActionHotkey(WorkspaceModalAction action) =>
       WorkspaceModalAction.newInstance => 'n',
       WorkspaceModalAction.connect => 'c',
       WorkspaceModalAction.files => 'f',
+      WorkspaceModalAction.diagnostics => 'd',
+      WorkspaceModalAction.templates => 't',
     };
 
 /// The hotkey carried by a modal button id, or null for a non-button id.
@@ -490,6 +496,10 @@ List<List<ButtonSpec>> _instanceRows({
       _instanceButton(InstanceModalAction.update, 'UPDATE', enabled: stopped),
     ],
     <ButtonSpec>[
+      _instanceButton(InstanceModalAction.backups, 'BACKUPS'),
+      _instanceButton(InstanceModalAction.settings, 'RUNTIME'),
+    ],
+    <ButtonSpec>[
       _instanceButton(
         InstanceModalAction.factoryReset,
         'FACTORY RESET',
@@ -509,6 +519,10 @@ List<List<ButtonSpec>> _instanceRows({
 /// The chip rows of the workspace card, top to bottom. Every workspace action
 /// is always available; only WIPE carries the danger tone.
 List<List<ButtonSpec>> _workspaceRows() => <List<ButtonSpec>>[
+  <ButtonSpec>[
+    _workspaceButton(WorkspaceModalAction.diagnostics, 'DIAGNOSTICS'),
+    _workspaceButton(WorkspaceModalAction.templates, 'TEMPLATES'),
+  ],
   <ButtonSpec>[
     _workspaceButton(WorkspaceModalAction.buildTuning, 'BUILD & TUNING'),
     _workspaceButton(WorkspaceModalAction.pullBuilds, 'PULL BUILDS'),

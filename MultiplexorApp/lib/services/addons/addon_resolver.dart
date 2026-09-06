@@ -15,6 +15,7 @@ final class ResolvedAddon {
     this.hashType,
     this.projectId,
     this.versionId,
+    this.fileName,
     this.requiredProjects = const <String>[],
     this.requiredVersions = const <String, String>{},
   });
@@ -25,18 +26,43 @@ final class ResolvedAddon {
   final String? hashType;
   final String? projectId;
   final String? versionId;
+  final String? fileName;
   final List<String> requiredProjects;
   final Map<String, String> requiredVersions;
 }
 
 /// Provider selection is independent of menus, consumers and filesystem state.
 final class AddonResolver {
-  AddonResolver(this.workspace);
+  AddonResolver(this.workspace, {Future<Object?> Function(Uri)? jsonLoader})
+    : _jsonLoader = jsonLoader;
+  final Future<Object?> Function(Uri)? _jsonLoader;
   final String workspace;
   final HttpClient _client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 30);
 
   void close() => _client.close(force: true);
+
+  Future<Map<String, Object?>> modrinthProject(String project) async =>
+      addonObject(
+        await _json(Uri.https('api.modrinth.com', '/v2/project/$project')),
+      );
+
+  Future<ResolvedAddon> resolveModrinth({
+    required String project,
+    required String kind,
+    required String serverType,
+    required String minecraft,
+  }) => resolve(
+    AddonDefinition(<String, Object?>{
+      'id': 'content',
+      'name': project,
+      'kind': kind,
+      'serverTypes': <String>[serverType],
+      'source': <String, Object?>{'type': 'modrinth', 'project': project},
+    }),
+    serverType,
+    minecraft,
+  );
 
   Future<ResolvedAddon> resolve(
     AddonDefinition addon,
@@ -245,6 +271,7 @@ final class AddonResolver {
               hashType: 'sha512',
               projectId: addonString(version, 'project_id'),
               versionId: addonString(version, 'id'),
+              fileName: addonString(file, 'filename'),
               requiredProjects: dependencies,
               requiredVersions: requiredVersions,
             );
@@ -403,6 +430,7 @@ final class AddonResolver {
   }
 
   Future<Object?> _json(Uri uri) async {
+    if (_jsonLoader != null) return _jsonLoader(uri);
     final HttpClientResponse response = await _response(uri);
     final List<int> bytes = <int>[];
     await for (final List<int> chunk in response.timeout(

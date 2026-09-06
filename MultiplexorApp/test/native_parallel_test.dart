@@ -45,6 +45,7 @@ void main() {
     service = NativeCommandService(
       context: context,
       consumerService: consumers,
+      javaInspector: (String _) async => 25,
       processExecutor: (String executable, List<String> args) async {
         if (executable != 'tmux') return ProcessResult(0, 0, '', '');
         String target(String flag) => args[args.indexOf(flag) + 1];

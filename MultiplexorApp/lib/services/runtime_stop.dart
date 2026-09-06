@@ -10,6 +10,7 @@ Future<bool> stopRuntime({
   required Future<void> Function() forceStop,
   Duration timeout = runtimeStopTimeout,
   Duration pollInterval = const Duration(milliseconds: 100),
+  bool allowForce = true,
 }) async {
   final Stopwatch elapsed = Stopwatch()..start();
   try {
@@ -25,6 +26,12 @@ Future<bool> stopRuntime({
     // A stalled command or health check must not postpone the force stop.
   } finally {
     elapsed.stop();
+  }
+  if (!allowForce) {
+    throw TimeoutException(
+      'Graceful shutdown did not complete; runtime was not force-stopped',
+      timeout,
+    );
   }
   await forceStop();
   return false;

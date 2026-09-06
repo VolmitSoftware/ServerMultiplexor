@@ -504,11 +504,12 @@ List<String> _headerPanel({
       '${local.hour.toString().padLeft(2, '0')}:'
       '${local.minute.toString().padLeft(2, '0')}';
 
-  final String facts =
-      'VIEW ${snapshot.view.name.toUpperCase()} · '
-      'ACTIVE ${snapshot.activeInstance == null ? 'none' : snapshot.displayNameFor(snapshot.activeInstance!)} · '
-      'RANGE ${rangeLabel(range)} · '
-      '$instances SERVERS';
+  final String facts = snapshot.captureError != null
+      ? 'METRICS ${snapshot.lastSuccessfulCapture == null ? 'UNAVAILABLE' : 'STALE'} · retrying automatically · ${snapshot.captureError}'
+      : 'VIEW ${snapshot.view.name.toUpperCase()} · '
+            'ACTIVE ${snapshot.activeInstance == null ? 'none' : snapshot.displayNameFor(snapshot.activeInstance!)} · '
+            'RANGE ${rangeLabel(range)} · '
+            '$instances SERVERS';
 
   final String switchLabel =
       'TAB ${snapshot.view == MonitorView.local ? 'REMOTE' : 'LOCAL'}';
@@ -545,7 +546,12 @@ List<String> _headerPanel({
         '${theme.paint(badgePrefix, theme.faint)}'
         '${theme.paint(switchLabel, switchTone)}'
         '${theme.paint(badgeSuffix, theme.faint)}',
-    content: <String>[theme.paint(facts, theme.faint)],
+    content: <String>[
+      theme.paint(
+        facts,
+        snapshot.captureError == null ? theme.faint : theme.accent,
+      ),
+    ],
     width: columns,
     theme: theme,
   );

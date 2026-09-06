@@ -30,6 +30,7 @@ void main() {
         final NativeCommandService service = NativeCommandService(
           context: context,
           consumerService: consumers,
+          javaInspector: (String _) async => 25,
           processRunner: runner,
         );
         for (final ConsumerProfile profile in <ConsumerProfile>[

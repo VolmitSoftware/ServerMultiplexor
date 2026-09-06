@@ -31,6 +31,8 @@ Every successful branch push assigns the build a monotonically increasing semant
 
 ## Live monitor
 
+A failed Local capture preserves the last successful server list and readings and displays **METRICS STALE** while retrying. A first-capture failure displays **METRICS UNAVAILABLE**. A successful empty capture clears the list. `runtime watch --once` exits nonzero on capture failure instead of printing an empty fleet as if the read succeeded.
+
 `./start.sh runtime watch` opens the full-screen monitor; `./start.sh` with no args lands on the same screen. `Tab` switches between the Local workspace and the saved Pterodactyl Remote fleet. Local sweeps `runtime metrics` every two seconds. On macOS it reads real per-Java-process packet and byte counters from `nettop`; platforms without trustworthy zero-dependency per-process counters leave Local network telemetry unavailable. Remote uses Pterodactyl's resource API at a rate-aware interval of at least 20 seconds and automatically slows down for large panels. Pterodactyl exposes byte counters rather than packet counters, so Remote correctly reports RX/TX bytes per second instead of estimating packets. The first sample after opening the monitor reads `n/a`; later samples derive rates from the measured counter delta and interval, rejecting counter resets and server restarts. Both views keep per-server history seeded from their own trend stores so charts survive a restart. History is kept at full resolution for 24 hours, rolled up into five-minute means for a week, and dropped after that.
 
 The landing view is a `MULTIPLEXOR` header, a KPI strip (`FLEET` servers-up and players, a fleet `TPS` sparkline, a `HOST` memory and CPU card), a full-width `SERVERS` table (state, players, TPS, a trend sparkline, memory, CPU and uptime per row — narrow terminals drop the rightmost readings whole), and a compact card for the selected server. The card is sized by the selection's own state: a running server expands into small side-by-side charts (TPS, CPU, memory as width allows), a facts line, and a dedicated bottom RX/TX network monitor with comparable sparklines. It labels true macOS packet telemetry as `PPS` and Pterodactyl throughput as `B/s`. A stopped server collapses to a single line and leaves the rows to the table. Under them sit two action bars — the selected server's, then the workspace's — over the key hint footer.
@@ -72,6 +74,12 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
+Local instance cards include **BACKUPS** for creating, verifying, and restoring snapshots, and **RUNTIME** for per-instance Java, heap, presets, compatibility checks, and template export. The workspace card includes **DIAGNOSTICS** and **TEMPLATES**. New offers saved templates when available; templates apply runtime settings only to the new instance.
+
+**UPDATE** prepares a candidate, backs up the instance, starts an isolated loopback staging copy, and promotes the exact tested artifact after a Minecraft status response. Jar and Forge/NeoForge installer updates use this flow. Custom servers accept a replacement jar and an explicit Minecraft version. Promotion checks the original server too, restores the prior running/stopped state, and rolls back on startup failure. Status checks do not prove plugin loading or gameplay behavior.
+
+The port picker includes custom entry across 1–65535, an available-port choice, and labels for ports configured on other instances across consumers.
+
 `Shift+R` also repaints wizard menus without activating an action or changing the selection.
 
 `./start.sh` with no args lands on the live monitor above. Everything the monitor does not do itself it hands back to the wizard, on a suspended terminal, returning to the dashboard when the flow finishes or when you press Esc. Local keeps the existing state-aware server and workspace actions. Remote exposes permission-aware power, console, history, account, lifecycle, settings, creation, transfer, and Multiplexor Drive workflows. **Pull to Local** copies a Remote server into a new, stopped Local instance and links the pair. **Push to Remote** shows a file diff before it can update the linked server, another existing server, or a newly created stopped server. Remote creation can clone an existing configuration or build directly from a Panel egg, so a completely empty panel can create its first server. Its workspace card includes Create many and Bulk actions; `b` opens the bulk selector directly, with all/selected/running/stopped presets, per-server toggles, bounded execution, progress, and an outcome for every target. Suspended, installing, maintenance, unavailable, and otherwise non-runnable servers retain their rows but have mutating actions disabled. Mirror push, kill, reinstall, and delete default to no and require typed confirmation.
@@ -89,6 +97,8 @@ The Remote connection card is the guided account surface. It can add, select, re
 Remote cards show every configured advertised allocation and every bind allocation. DNS A/AAAA results are shown beside configured aliases when resolution succeeds. These are intentionally separate: Pterodactyl does not know an upstream NAT port mapping, so Multiplexor never guesses that a private bind address, node FQDN, and public game endpoint are interchangeable.
 
 The workspace card (`[ MORE ]` on the workspace bar) holds the actions that are not per-instance: Build & tuning, Pull latest builds, Create many, Start all stopped, Stop all running, and Wipe everything. An isolated server's instance card includes **Copy drop-ins**, which opens the same per-artifact checklist for one-time local plugin or mod copies without subscribing the server to future syncs. Destructive prompts (wipe, delete, factory reset) default to no and show that default in red. In Build & tuning, JVM controls include heap, flag preset, console line wrap, and console log format.
+
+When upstream version metadata is unavailable, the picker offers known cached versions, manual entry, and Retry. Cached choices remain usable without a refresh, and no fallback is labeled latest.
 
 Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `build spigot --force`.
 
@@ -118,6 +128,8 @@ Independent builds, repository syncs, addon preparation, Remote fleet polling, D
 - **Multiplexor Drive** — the local `~/Multiplexor Drive` folder containing one live folder for every accessible Pterodactyl server, grouped by remote account. Selecting Open folder for a remote server opens its folder here in Finder.
 
 ## CLI Reference
+
+Local commands share argument validation with wizard operations. Unknown options, missing option values, repeated single-value options, and extra positional arguments are rejected before execution. Boolean options accept `--flag`, `--flag=true`, or `--flag=false`.
 
 Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--consumer <profile>` for a one-shot profile override, `--root <path>` for a different workspace, `--verbose` for arg-normalization debug output. Use `./start.sh help <command>` or `<command> --help` for focused command help.
 
@@ -169,7 +181,9 @@ Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--cons
 
 The active account is used when `--profile` is omitted; `--profile` remains available as a one-command override. `ptero` is an alias for `remote`.
 
-Transfers carry worlds, server jars, plugins/mods, and normal configuration while excluding runtime-only `logs/`, `crash-reports/`, `session.lock`, and Multiplexor's own metadata. They reuse Multiplexor Drive account credentials but connect directly to only the selected server over SFTP; they never start or require the cached browsing mount or unrelated profiles. An interactive terminal can add a missing account and approve that target's displayed host fingerprint, while headless use exits with exact `remote drive install --profile ... --no-open` and target-scoped `remote drive trust <server> --profile ...` recovery commands. Push confirmation tokens bind the exact Local snapshot and the Remote overwrite/delete path scope; Create & Push additionally binds every resolved creation field, desired final state, and link decision. A changed input requires a fresh preview. Remote contents are re-read after the server stops, then every non-empty push snapshots the complete Remote tree under `.multiplexor/pterodactyl-transfers/backups/` before applying files, writes a recovery manifest, and rolls back automatically if the upload fails. Create & Push also writes a durable intent under `.multiplexor/pterodactyl-transfers/intents/` and assigns its unique ID as the Panel `external_id`. That stable identity binds the Local consumer and canonical instance path, profile, proposed server name, immutable creation configuration, and requested start/link postconditions, but not the changing file fingerprint. A newly confirmed current snapshot can therefore discover and resume the same committed server after an ambiguous create response, Local edits, or transfer failure. If only its requested durable link or final running state failed and Local is unchanged, the exact retry repairs those postconditions without uploading files again; changed Local files resume the normal diff and transfer against the same server. Ambiguous, duplicated, or mismatched identities stop without another Panel mutation. The CLI prints the relevant intent, backup, and recovery paths.
+Pull records a file baseline for the exact Local instance and Remote UUID. Subsequent Update pushes upload only changed and new files from the preview. Files changed or deleted only on Remote stay untouched; a file edited differently on both sides blocks the push and identifies the conflict. Local deletions also preserve Remote files in Update mode. Mirror still makes the transferable Remote tree match Local and requires its destructive confirmation. A target without a recorded baseline uses the current Local/Remote comparison shown in its preview. Baselines live under `.multiplexor/pterodactyl-transfer-baselines/` and advance after verified transfers, including across app restarts.
+
+Transfers carry worlds, server jars, plugins/mods, and normal configuration while excluding runtime-only `logs/`, `crash-reports/`, `session.lock`, and Multiplexor's own metadata. They reuse Multiplexor Drive account credentials but connect directly to only the selected server over SFTP; they never start or require the cached browsing mount or unrelated profiles. An interactive terminal can add a missing account and approve that target's displayed host fingerprint, while headless use exits with exact `remote drive install --profile ... --no-open` and target-scoped `remote drive trust <server> --profile ...` recovery commands. Push confirmation tokens bind the exact Local snapshot and every planned add, overwrite, and delete operation; Create & Push additionally binds every resolved creation field, desired final state, and link decision. A changed input requires a fresh preview. Remote contents are re-read after the server stops, then every non-empty push snapshots the complete Remote tree under `.multiplexor/pterodactyl-transfers/backups/` before applying files, writes a recovery manifest, and rolls back automatically if the upload fails. Create & Push also writes a durable intent under `.multiplexor/pterodactyl-transfers/intents/` and assigns its unique ID as the Panel `external_id`. That stable identity binds the Local consumer and canonical instance path, profile, proposed server name, immutable creation configuration, and requested start/link postconditions, but not the changing file fingerprint. A newly confirmed current snapshot can therefore discover and resume the same committed server after an ambiguous create response, Local edits, or transfer failure. If only its requested durable link or final running state failed and Local is unchanged, the exact retry repairs those postconditions without uploading files again; changed Local files resume the normal diff and transfer against the same server. Ambiguous, duplicated, or mismatched identities stop without another Panel mutation. The CLI prints the relevant intent, backup, and recovery paths.
 
 Multiplexor Drive never treats an API key as an SFTP password. It creates a dedicated local Ed25519 identity per remote profile, registers only the public key with the account, and requires explicit Wings host-key trust. API keys, private-key contents, and cleartext Panel passwords are never written to Drive settings or runtime state. The mounted files remain live remote server files: normal Finder edits, moves, and deletions affect the server immediately.
 
@@ -198,14 +212,14 @@ For CI/non-macOS sessions, set both an origin-bound key and its companion origin
 | `instance activate <name>` | Make this instance the default target. |
 | `instance path [name]` | Print the on-disk path. Active instance if omitted. |
 | `instance open [name]` | Open the instance folder in the host file manager. |
-| `instance update <name> [--mc <v>] [--jar <path>] [--auto-build] [--type <t>]` | Re-point `server.jar` at a new version. Stops the instance first. Preserves worlds, dropins, config, and the isolated flag. Jar-launch only — installer-based servers (Forge/NeoForge) must be recreated. |
-| `instance safe-update <name> [--mc <v>] [--jar <path>] [--auto-build] [--type <t>] [--promote] [--cleanup] [--timeout <s>]` | Create a backup, clone the instance to staging on a free port, update staging, start it, and wait for a Minecraft ping. Without `--promote`, the original stays unchanged. With `--promote`, the original is updated after staging passes and can be restored from the backup on promotion failure. |
+| `instance update <name> [--mc <v>] [--jar <path>] [--type <t>] [--loader <v>] [--installer <v>] [--auto-build]` | Prepare and validate the replacement before shutdown, create a backup, and apply the jar or installer payload. Restart and check readiness when the instance was running; restore the previous state on failure. |
+| `instance safe-update <name> [--mc <v>] [--jar <path>] [--auto-build] [--type <t>] [--loader <v>] [--installer <v>] [--promote] [--cleanup] [--keep-staging] [--label <label>] [--timeout <s>]` | Prepare one immutable candidate, back up, and validate it on isolated loopback staging. `--promote` applies that exact candidate and verifies the original; otherwise staging is kept stopped. Promotion removes staging unless `--keep-staging`; `--cleanup` removes staging after a successful validation-only run. |
 | `instance isolated [name] [true\|false]` | Read the flag (no value) or toggle it. Turning it off re-links shared Iris packs and merges shared ops. |
 | `instance lock <name> [--pin <digits>]` | Lock the instance so it cannot be deleted or factory-reset. Prompts for a 4–12 digit PIN (or pass `--pin`). The PIN is stored salted+hashed in `.server-source` and survives factory reset. Settings stay editable. |
 | `instance unlock <name> [--pin <digits>]` | Verify the PIN and unlock, re-enabling delete and factory reset. |
 | `instance locked [name]` | Print `true`/`false` for the lock state. |
 | `instance port [instance] [port]` | Read or set `server-port` in `server.properties`. |
-| `instance motd-style [name]` | Apply the styled MOTD template (alias: `motd-style`). |
+| `instance motd-style [name\|--all]` | Apply the styled MOTD template (alias: `motd-style`). |
 | `instance reset <name>` | Wipe worlds/config/plugins/mods/logs back to baseline. Keeps the launch artifacts and the isolated flag, and re-applies the styled MOTD for the server type. Refused while the instance is locked. |
 | `instance delete <name>` | Delete the instance entirely (kills any running process first). Refused while the instance is locked. |
 | `instance delete-all [--force]` | Delete every instance in the active profile. Asks for `DELETE` confirmation unless `--force`. Locked instances are skipped and left untouched. |
@@ -225,6 +239,10 @@ Single `server create` and `build <type>` commands must run under the consumer t
 
 ### runtime — start, stop, attach
 
+Consumer settings provide defaults. Each instance can override Java, heap, JVM preset, and console settings in `.multiplexor-runtime.env`; `--instance <name>` scopes a settings command to that instance. Resetting instance settings removes only its overrides. Environment variables `JAVA_EXECUTABLE`, `HEAP_SIZE`, `JVM_PROFILE`, and `JVM_ARGS` take precedence.
+
+Before installation or startup, Multiplexor checks the selected Java executable and the known Minecraft minimum. Minecraft 1.17 needs Java 16, 1.18 needs Java 17, 1.20.5 and later 1.x releases need Java 21, and 26.x releases need Java 25. Loader and plugin requirements can be stricter; an unknown Minecraft version is reported as unchecked. `runtime settings check --instance <name>` shows the effective executable and compatibility result.
+
 macOS/Linux runtimes use named `tmux` sessions. `Tab` is passed through to the server; Paper, Purpur, Folia, Canvas, and Leaf retain their native JLine/Brigadier completion for real server/plugin commands and current player names even with Multiplexor's minimal console format. Windows uses a native background host built into `multiplexor.exe`, so the release executable does not require Git Bash, `sh`, `chmod`, or `tmux`. Runtime output is captured under `consumers/<profile>/state/runtime/<instance>.log`; the Minecraft server also writes `logs/latest.log` inside its instance. Windows consoles show live runtime logs in a native terminal grid and send commands to the selected server through its configured RCON connection.
 
 In the Windows grid, `Tab` selects the next console; left/right also switch consoles when the command line is empty. Type a command and press `Enter` to send it. `Esc` or `Ctrl-C` returns to the dashboard while the servers keep running. Without an interactive terminal, console commands print the runtime log paths.
@@ -243,13 +261,15 @@ In the Windows grid, `Tab` selects the next console; left/right also switch cons
 | `runtime states` | Print one line per instance: `name<TAB>state<TAB>port<TAB>pid<TAB>locked<TAB>isolated`. State is `stopped` / `starting` / `running` / `stopping` / `restarting`; the final two columns are `locked`/`unlocked` and `isolated`/`shared`. |
 | `runtime metrics` | Print one line per instance: `name<TAB>state<TAB>port<TAB>locked<TAB>players<TAB>max<TAB>version<TAB>tps<TAB>isolated<TAB>uptimeSeconds<TAB>cpuPercent<TAB>rssBytes<TAB>logPath<TAB>latencyMs<TAB>diskBytes<TAB>networkRxBytes<TAB>networkTxBytes<TAB>memoryLimitBytes<TAB>diskLimitBytes<TAB>networkRxPackets<TAB>networkTxPackets`. Running servers are pinged (and RCON-queried for TPS) concurrently. Every sweep of the [live monitor](#live-monitor) is one of these. TPS is `-` unless the server is Paper-family and was started with RCON enabled. Uptime is whole seconds since launch; CPU and resident memory come from one batched `ps`; the log path is absolute; latency is the server-list-ping round trip. The resource columns carry Pterodactyl disk/network/limit counters in Remote monitoring. On macOS Local monitoring, one batched `nettop` supplies the network byte and packet counters for each tracked Java pid; unsupported platforms leave them unavailable. The dashboard derives per-second rates from consecutive samples. `cpuPercent` is BSD `ps %cpu` — a lifetime average, not an instantaneous load reading. Any unavailable value is `-`, never a zero. Columns are append-only, so readers written against shorter rows keep working. |
 | `runtime list` | Print running instance names. |
-| `runtime settings show` | Print the active heap, JVM preset, and flags. |
+| `runtime settings set-java <executable> [--instance <name>]` | Select the Java executable used for installation and startup. Paths containing spaces are supported. |
+| `runtime settings check [--instance <name>]` | Inspect Java and check the known Minecraft minimum without starting a server. |
+| `runtime settings show [--instance <name>]` | Print the active heap, JVM preset, and flags. |
 | `runtime settings presets` | List available JVM presets (`aikar`, `vanilla`, `conservative`). |
-| `runtime settings set-heap <2G\|4G\|...>` | Set JVM `-Xmx`. |
-| `runtime settings set-preset <name>` | Apply a JVM preset's flags. |
-| `runtime settings set-wrap <on\|off>` | Toggle tmux console line wrap on macOS/Linux. Default `off` (long server lines clip at the pane edge instead of wrapping). Takes effect on next `runtime start`. **The `logs/latest.log` file is unaffected** — wrapping is purely a terminal-renderer concern. |
-| `runtime settings set-log-format <minimal\|default>` | Toggle the console log pattern. Default `minimal` — strips the `[HH:mm:ss INFO]` prefix from the console only, and filters out the `RCON Client … started` / `… shutting down` lines the manager's live TPS polling triggers (from both the console and `logs/latest.log`). `default` restores the server's bundled Log4j pattern (RCON lines reappear). **The `logs/latest.log` file always keeps the full timestamped pattern.** Takes effect on next `runtime start`. |
-| `runtime settings reset` | Restore default runtime settings. |
+| `runtime settings set-heap <2G\|4G\|...> [--instance <name>]` | Set JVM `-Xmx`. |
+| `runtime settings set-preset <name> [--instance <name>]` | Apply a JVM preset's flags. |
+| `runtime settings set-wrap <on\|off> [--instance <name>]` | Toggle tmux console line wrap on macOS/Linux. Default `off` (long server lines clip at the pane edge instead of wrapping). Takes effect on next `runtime start`. **The `logs/latest.log` file is unaffected** — wrapping is purely a terminal-renderer concern. |
+| `runtime settings set-log-format <minimal\|default> [--instance <name>]` | Toggle the console log pattern. Default `minimal` — strips the `[HH:mm:ss INFO]` prefix from the console only, and filters out the `RCON Client … started` / `… shutting down` lines the manager's live TPS polling triggers (from both the console and `logs/latest.log`). `default` restores the server's bundled Log4j pattern (RCON lines reappear). **The `logs/latest.log` file always keeps the full timestamped pattern.** Takes effect on next `runtime start`. |
+| `runtime settings reset [--instance <name>]` | Reset consumer defaults, or remove only the named instance's overrides. |
 
 Paper/Spigot/Purpur `/restart` is wired to a per-instance `multiplexor-restart.sh` on macOS/Linux or `multiplexor-restart.cmd` on Windows, so `/restart` re-enters Multiplexor instead of exiting permanently. While that script waits, the instance reports `restarting`.
 
@@ -264,8 +284,8 @@ Every gameplay run starts a first-person Prismarine web feed on a free loopback 
 | `gameplay setup` | Install the pinned Mineflayer, pathfinder, and Prismarine Viewer dependencies with `npm ci`. |
 | `gameplay doctor [--json]` | Verify Node and the pinned gameplay dependency versions. |
 | `gameplay list [--json]` | List built-in scenarios. |
-| `gameplay prepare [instance]` | Prepare a stopped, isolated instance for loopback-only offline bot authentication. |
-| `gameplay run <scenario> [instance] [flags]` | Run a built-in name or `.mjs` scenario. Supports `--prepare`, `--start`, `--stop-after`, `--username`, `--timeout`, `--command`, `--expect`, `--effect`, `--viewer-port`, `--no-viewer`, `--no-op`, and `--json`. |
+| `gameplay prepare [instance] [--instance <name>]` | Prepare a stopped, isolated instance for loopback-only offline bot authentication. |
+| `gameplay run <scenario> [instance] [flags]` | Run a built-in name or `.mjs` scenario. Supports `--scenario`, `--instance`, `--profiles-folder`, `--version`, `--auth`, `--startup-timeout`, `--connect-timeout`, `--assertion-timeout`, `--prepare`, `--start`, `--stop-after`, `--username`, `--timeout`, `--command`, `--expect`, `--effect`, `--viewer-port`, `--no-viewer`, `--no-op`, and `--json`. |
 
 The built-in `connect` scenario validates login, spawn, position, health, and connection stability. `command` requires `--command` plus an `--expect` regular expression. `effect` optionally runs `--command` and requires the named `--effect`. Custom modules default-export `{ name, description, async run(context) }`; the context supplies `bot`, `step`, `expect`, `command`, `waitForEvent`, `waitForMessage`, `sleep`, server metadata, and a safe-by-default pathfinder configuration.
 
@@ -288,13 +308,17 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 
 ### backup — restorable instance snapshots
 
+Backups require a stopped instance. A snapshot contains regular files, including copies of launch jars and shared data, so later build pruning cannot remove its dependencies. Verification checks the complete manifest, file sizes, and SHA-256 hashes before restore can stop or replace a target. Restore prepares the replacement beside the target and keeps the original directory until installation succeeds.
+
+Updates and restores allow up to 60 seconds for a clean shutdown. If the server does not stop, the operation fails without force-killing it or taking a snapshot of a running world.
+
 | Command | What it does |
 |---------|--------------|
-| `backup create [instance] [--label <label>] [--include-logs]` | Snapshot an instance into `consumers/<profile>/backups/<instance>/...`. Active instance if omitted. Logs are skipped unless `--include-logs`. |
+| `backup create [instance] [--label <label>] [--include-logs]` | Snapshot a stopped instance into `consumers/<profile>/backups/<instance>/...`. Active instance if omitted. Logs are skipped unless `--include-logs`. |
 | `backup list [instance\|--all]` | List backups in the active consumer. |
-| `backup restore [instance] <backup-id>` | Stop the target if needed, verify checksums, and replace the instance with the snapshot. Refused if the target is locked. |
-| `backup verify [instance] <backup-id>` | Verify the backup manifest and file checksums. |
-| `backup delete [instance] <backup-id>` | Delete one backup. |
+| `backup restore [instance] <backup-id> [--instance <name>]` | Verify the complete snapshot before stopping the target, then replace it with rollback on installation failure. Refused if locked. |
+| `backup verify [instance] <backup-id> [--instance <name>]` | Verify the backup manifest and file checksums. |
+| `backup delete [instance] <backup-id> [--instance <name>]` | Delete one backup. |
 | `backup prune [instance] [--keep <n>]` | Keep the newest `n` backups per instance and delete older ones. Default `10`. |
 
 ### template — reusable server blueprints
@@ -304,7 +328,7 @@ The two namespaces are mirrors. Use `plugins` when the active consumer is `plugi
 | `template list` | List templates under `.multiplexor/templates/`. |
 | `template init <name> [--type <type>] [--mc <v>] [--heap <size>] [--preset <name>] [--isolated]` | Write a starter YAML template. |
 | `template show <name>` | Print the YAML template. |
-| `template apply <template> <instance> [--auto-build] [--sync]` | Create an instance from a template, apply server.properties overrides, apply runtime heap/preset settings, and optionally sync dropins. |
+| `template apply <template> <instance> [--auto-build] [--sync] [--isolated]` | Create an instance from a template, apply server.properties overrides, apply per-instance runtime overrides, and optionally sync dropins. |
 | `template export <instance> <template>` | Create a template from an existing instance's source metadata, runtime settings, isolation flag, and `server.properties`. |
 | `template delete <name>` | Delete a template file. |
 
@@ -372,10 +396,14 @@ Each source can restrict `serverTypes` and `minecraftVersions` to exact lists. U
 
 ### content — Modrinth/URL plugin and mod manager
 
+Content and addons share release selection and artifact verification. Modrinth installation requires an explicit `--mc` or Minecraft metadata on the active instance. Selection retains the requested loader and exact Minecraft version; it never broadens the search to unrelated loaders. Downloads must be valid jars, and Modrinth downloads must match their upstream checksum.
+
+Install, update, and remove stage file and lockfile changes before commit. A failed download or commit restores the previous files and manifest. A filename collision with unmanaged content is rejected.
+
 | Command | What it does |
 |---------|--------------|
 | `content search <query>` | Search Modrinth for plugin content under the plugin consumer, or mod content under mod consumers. |
-| `content install <modrinth-slug\|url> [--mc <v>] [--loader <loader>] [--name <alias>] [--sync]` | Download a compatible Modrinth jar or direct jar URL into the active consumer's dropin source and record it in `content-lock.yaml`. |
+| `content install <modrinth-slug\|url> [--mc <v>] [--loader <loader>] [--name <alias>] [--file <filename.jar>] [--sync]` | Download a compatible Modrinth jar or direct jar URL into the active consumer's dropin source and record it in `content-lock.yaml`. |
 | `content list` | List managed content entries. |
 | `content update [name\|--all] [--sync]` | Re-download managed content, preserving recorded MC/loader compatibility. |
 | `content remove <name>` | Remove the manifest entry and downloaded jar. |
@@ -420,6 +448,21 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 | `config status [instance]` | Print which config files are symlinked vs localized. |
 
 ## Common Workflows
+
+**Pull, test locally, then push file changes**
+
+```bash
+# Stop Remote in the dashboard before pulling its files
+./start.sh remote pull LEAF --as LEAF-local
+./start.sh runtime start LEAF-local
+# Make and test your changes, then stop Local before comparing files
+./start.sh runtime stop LEAF-local --graceful
+./start.sh remote push LEAF-local
+# Review the diff, then repeat with the exact printed token
+./start.sh remote push LEAF-local --confirm <token>
+```
+
+Update preserves Remote-only changes and uploads only the listed files. If a file changed on both sides, reconcile that file before retrying. Backups and verification still read Remote files; the displayed transfer byte count measures the upload payload.
 
 **Windows consoles**
 
@@ -468,13 +511,17 @@ The Local dashboard's `g` or `G` opens the same grid. Use `Shift+R` to repaint t
 # Wipe every instance across every consumer (asks for a double y/N confirmation)
 ./start.sh instance delete-all --everywhere
 
-# Update an existing server to a new MC version (worlds may not survive)
-./start.sh runtime stop lobby
-./start.sh instance update lobby --mc 1.21.11 --auto-build
-./start.sh runtime start lobby
+# Test and promote an update with a restore point
+./start.sh instance safe-update lobby --mc 1.21.11 --auto-build --promote
 
 # Create a restore point before experimenting
+./start.sh runtime stop lobby
 ./start.sh backup create lobby --label before-plugin-test
+
+# Give one server its own Java and heap settings
+./start.sh runtime settings set-java /absolute/path/to/java --instance lobby
+./start.sh runtime settings set-heap 6G --instance lobby
+./start.sh runtime settings check --instance lobby
 
 # Apply a reusable server blueprint
 ./start.sh template init purpur-dev --type purpur --heap 6G --preset aikar
@@ -561,6 +608,7 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   dropins/plugins or dropins/mods   # dropin jars (manual and content-managed)
   instances/<name>/                 # one server's worldroot
     .server-source                # type, launch mode, jar path, isolation/subscriptions
+    .multiplexor-runtime.env       # per-instance Java/JVM/console overrides
     .multiplexor-remote.json      # durable link after pull, first new push, or --link
     .multiplexor-dropins.json     # last synchronized jar hashes
     .multiplexor-addons.json      # this instance's checked addons and jar hashes

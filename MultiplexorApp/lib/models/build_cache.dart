@@ -6,6 +6,8 @@
 /// and renders "updated Xh ago" notes instead of asking the user.
 library;
 
+import 'server_minecraft_version.dart';
+
 /// One cached build jar reported by `build cache-info`.
 class BuildCacheEntry {
   const BuildCacheEntry({
@@ -49,9 +51,12 @@ class BuildCacheEntry {
         .toList(growable: false);
   }
 
-  /// Whether this jar looks like a build of [version] (filename match, the
-  /// same heuristic the native jar-cache lookup uses).
-  bool matchesVersion(String version) => jarName.contains(version);
+  bool matchesVersion(String version) =>
+      inferServerMinecraftVersion(
+        serverType: type,
+        jarPaths: <String>[jarName],
+      ) ==
+      version;
 }
 
 /// Age of the most recently fetched jar in [entries], optionally restricted

@@ -3,6 +3,14 @@ import 'package:test/test.dart';
 
 void main() {
   group('command help', () {
+    test('keeps help as a positional value or option value', () {
+      expect(isCliHelpRequest(<String>['instance', 'create', 'help']), isFalse);
+      expect(isCliHelpRequest(<String>['content', 'search', 'help']), isFalse);
+      expect(
+        isCliHelpRequest(<String>['backup', 'create', '--label', 'help']),
+        isFalse,
+      );
+    });
     test('recognizes focused help forms', () {
       expect(isCliHelpRequest(<String>['help', 'runtime']), isTrue);
       expect(isCliHelpRequest(<String>['runtime', '--help']), isTrue);

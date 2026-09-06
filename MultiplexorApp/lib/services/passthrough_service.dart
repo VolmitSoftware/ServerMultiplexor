@@ -1,4 +1,6 @@
 import '../models/consumer_profile.dart';
+import '../models/backup_summary.dart';
+import '../models/template_summary.dart';
 import '../utils/process_runner.dart';
 import 'consumer_service.dart';
 import 'manager_context.dart';
@@ -46,6 +48,14 @@ class PassthroughService {
   Future<CapturedResult> capture(List<String> args) async {
     return _native.execute(args, stream: false);
   }
+
+  List<BackupSummary> listBackups(String instance) =>
+      _native.listBackups(instance);
+  List<TemplateSummary> listTemplates() => _native.listTemplates();
+  Map<int, List<String>> configuredInstancePorts() =>
+      _native.configuredInstancePorts();
+  Future<int> availableInstancePort(String instance) =>
+      _native.availableInstancePort(instance);
 
   Future<CapturedResult> createIsolatedTransferInstance(
     String name, {

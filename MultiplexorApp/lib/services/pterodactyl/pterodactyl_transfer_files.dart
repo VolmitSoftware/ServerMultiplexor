@@ -43,20 +43,33 @@ final class PterodactylTransferFileManifest {
   /// thing preventing removal. Directory deltas below them remain independent.
   final Set<String> excludedContentDirectories;
 
+  /// Excluded-only branches do not exist in the transferred snapshot. Parents
+  /// of included files or genuinely empty directories still travel with them.
+  late final Set<String> transferableDirectories = Set<String>.unmodifiable(
+    _computeTransferableDirectories(),
+  );
+
+  Set<String> _computeTransferableDirectories() {
+    final Set<String> included = directories.difference(
+      excludedContentDirectories,
+    );
+    for (final String path in <String>[...files.keys, ...included]) {
+      String ancestor = p.posix.dirname(path);
+      while (ancestor != '.') {
+        if (directories.contains(ancestor)) included.add(ancestor);
+        ancestor = p.posix.dirname(ancestor);
+      }
+    }
+    return included;
+  }
+
   String get fingerprint {
     final StringBuffer buffer = StringBuffer();
-    final List<String> directoryPaths = directories.toList()..sort();
+    final List<String> directoryPaths = transferableDirectories.toList()
+      ..sort();
     for (final String path in directoryPaths) {
       buffer
         ..write('d\u0000')
-        ..write(path)
-        ..write('\n');
-    }
-    final List<String> protectedDirectoryPaths =
-        excludedContentDirectories.toList()..sort();
-    for (final String path in protectedDirectoryPaths) {
-      buffer
-        ..write('x\u0000')
         ..write(path)
         ..write('\n');
     }
@@ -150,7 +163,15 @@ final class PterodactylTransferFileEngine {
     required PterodactylTransferFileManifest source,
     required PterodactylTransferFileManifest target,
     required PterodactylTransferMode mode,
+    PterodactylTransferFileManifest? baseline,
   }) {
+    if (baseline != null && mode == PterodactylTransferMode.update) {
+      return _diffSinceBaseline(
+        source: source,
+        target: target,
+        baseline: baseline,
+      );
+    }
     for (final String path in source.files.keys) {
       if (target.directories.contains(path)) {
         throw StateError(
@@ -158,7 +179,7 @@ final class PterodactylTransferFileEngine {
         );
       }
     }
-    for (final String path in source.directories) {
+    for (final String path in source.transferableDirectories) {
       if (target.files.containsKey(path)) {
         throw StateError(
           'Transfer cannot replace target file with directory: $path',
@@ -236,6 +257,185 @@ final class PterodactylTransferFileEngine {
     return List<PterodactylTransferChange>.unmodifiable(changes);
   }
 
+  List<PterodactylTransferChange> _diffSinceBaseline({
+    required PterodactylTransferFileManifest source,
+    required PterodactylTransferFileManifest target,
+    required PterodactylTransferFileManifest baseline,
+  }) {
+    final Set<String> sourceDirectories = source.transferableDirectories;
+    final Set<String> targetDirectories = target.transferableDirectories;
+    final Set<String> baselineDirectories = baseline.transferableDirectories;
+    final Set<String> conflicts = <String>{};
+    final List<PterodactylTransferChange> candidates =
+        <PterodactylTransferChange>[];
+    final Set<String> sourcePaths = <String>{
+      ...source.files.keys,
+      ...source.transferableDirectories,
+    };
+    for (final String path in sourcePaths) {
+      final String? local = _entryIdentity(source, path, sourceDirectories);
+      final String? previous = _entryIdentity(
+        baseline,
+        path,
+        baselineDirectories,
+      );
+      final String? remote = _entryIdentity(target, path, targetDirectories);
+      if (local == previous || local == remote) continue;
+      if (remote != previous) {
+        conflicts.add(path);
+        continue;
+      }
+      // A changed child must not silently resurrect a directory removed or
+      // replaced remotely since the common snapshot.
+      String ancestor = p.posix.dirname(path);
+      while (ancestor != '.') {
+        final String? before = _entryIdentity(
+          baseline,
+          ancestor,
+          baselineDirectories,
+        );
+        if (before == 'directory' &&
+            _entryIdentity(target, ancestor, targetDirectories) != before) {
+          conflicts.add(ancestor);
+        }
+        ancestor = p.posix.dirname(ancestor);
+      }
+      candidates.add(
+        PterodactylTransferChange(
+          path: path,
+          kind: remote == null
+              ? PterodactylTransferChangeKind.add
+              : PterodactylTransferChangeKind.update,
+          entryKind: source.files.containsKey(path)
+              ? PterodactylTransferEntryKind.file
+              : PterodactylTransferEntryKind.directory,
+        ),
+      );
+    }
+    if (conflicts.isNotEmpty) throw PterodactylTransferConflict(conflicts);
+    return diff(
+      source: selectSource(source: source, changes: candidates),
+      target: target,
+      mode: PterodactylTransferMode.update,
+    );
+  }
+
+  String? _entryIdentity(
+    PterodactylTransferFileManifest manifest,
+    String path,
+    Set<String> directories,
+  ) {
+    final PterodactylTransferFileEntry? file = manifest.files[path];
+    if (file != null) return 'file:${file.sha256}';
+    return directories.contains(path) ? 'directory' : null;
+  }
+
+  /// The exact source tree required by a preview, without unchanged files.
+  PterodactylTransferFileManifest selectSource({
+    required PterodactylTransferFileManifest source,
+    required List<PterodactylTransferChange> changes,
+  }) {
+    final Map<String, PterodactylTransferFileEntry> files =
+        <String, PterodactylTransferFileEntry>{};
+    final Set<String> directories = <String>{};
+    for (final PterodactylTransferChange change in changes) {
+      if (change.kind == PterodactylTransferChangeKind.delete) continue;
+      _validatedParts(change.path);
+      if (change.entryKind == PterodactylTransferEntryKind.file) {
+        final PterodactylTransferFileEntry? file = source.files[change.path];
+        if (file == null) {
+          throw StateError('Transfer source file is missing: ${change.path}');
+        }
+        files[change.path] = file;
+      } else {
+        if (!source.transferableDirectories.contains(change.path)) {
+          throw StateError(
+            'Transfer source directory is missing: ${change.path}',
+          );
+        }
+        directories.add(change.path);
+      }
+      String ancestor = p.posix.dirname(change.path);
+      while (ancestor != '.') {
+        directories.add(ancestor);
+        ancestor = p.posix.dirname(ancestor);
+      }
+    }
+    return PterodactylTransferFileManifest(
+      rootPath: source.rootPath,
+      files: files,
+      directories: directories,
+      excludedContentDirectories: const <String>{},
+    );
+  }
+
+  /// Only committed entries advance the common snapshot. Remote drift and
+  /// Local deletions keep their previous base for a later conflict check.
+  PterodactylTransferFileManifest advanceBaseline({
+    required PterodactylTransferFileManifest baseline,
+    required PterodactylTransferFileManifest source,
+    required List<PterodactylTransferChange> changes,
+    PterodactylTransferFileManifest? target,
+  }) {
+    final PterodactylTransferFileManifest selected = selectSource(
+      source: source,
+      changes: changes,
+    );
+    final Map<String, PterodactylTransferFileEntry> commonFiles =
+        <String, PterodactylTransferFileEntry>{
+          ...selected.files,
+          if (target != null)
+            for (final MapEntry<String, PterodactylTransferFileEntry> file
+                in source.files.entries)
+              if (target.files[file.key]?.sha256 == file.value.sha256)
+                file.key: file.value,
+        };
+    final Set<String> commonDirectories = <String>{
+      ...selected.directories,
+      if (target != null)
+        ...source.transferableDirectories.intersection(
+          target.transferableDirectories,
+        ),
+    };
+    final Map<String, PterodactylTransferFileEntry> files =
+        Map<String, PterodactylTransferFileEntry>.from(baseline.files);
+    final Set<String> directories = Set<String>.from(
+      baseline.transferableDirectories,
+    );
+    if (target != null) {
+      final Set<String> sourceDirectories = source.transferableDirectories;
+      final Set<String> targetDirectories = target.transferableDirectories;
+      bool absentOnBoth(String path) =>
+          _entryIdentity(source, path, sourceDirectories) == null &&
+          _entryIdentity(target, path, targetDirectories) == null;
+      files.removeWhere(
+        (String path, PterodactylTransferFileEntry _) => absentOnBoth(path),
+      );
+      directories.removeWhere(absentOnBoth);
+    }
+    for (final String directory in commonDirectories) {
+      files.remove(directory);
+      directories.add(directory);
+    }
+    for (final MapEntry<String, PterodactylTransferFileEntry> file
+        in commonFiles.entries) {
+      files.removeWhere(
+        (String path, PterodactylTransferFileEntry _) =>
+            path.startsWith('${file.key}/'),
+      );
+      directories.removeWhere(
+        (String path) => path == file.key || path.startsWith('${file.key}/'),
+      );
+      files[file.key] = file.value;
+    }
+    return PterodactylTransferFileManifest(
+      rootPath: source.rootPath,
+      files: files,
+      directories: directories,
+      excludedContentDirectories: const <String>{},
+    );
+  }
+
   Future<void> apply({
     required PterodactylTransferFileManifest source,
     required String targetRootPath,
@@ -245,6 +445,7 @@ final class PterodactylTransferFileEngine {
     bool replaceDestinationLinks = false,
   }) async {
     final String targetRoot = p.normalize(p.absolute(targetRootPath));
+    _validateComponent(operationId);
     _requireDirectoryRoot(targetRoot);
     final List<PterodactylTransferChange> directoryAdds =
         changes
@@ -291,7 +492,10 @@ final class PterodactylTransferFileEngine {
         '.${p.basename(destination)}.multiplexor-$operationId.part',
       );
       final File temporaryFile = File(temporary);
-      if (temporaryFile.existsSync()) temporaryFile.deleteSync();
+      if (FileSystemEntity.typeSync(temporary, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        throw StateError('Transfer staging path already exists: $temporary');
+      }
       try {
         await File(sourceEntry.sourcePath).copy(temporary);
         final String copiedHash = await _hashFile(temporaryFile);
@@ -327,6 +531,7 @@ final class PterodactylTransferFileEngine {
       for (final PterodactylTransferChange change in deletions) {
         if (change.entryKind != PterodactylTransferEntryKind.file) continue;
         final String destination = _safeDestination(targetRoot, change.path);
+        _requireSafeParents(targetRoot, change.path);
         final FileSystemEntityType type = FileSystemEntity.typeSync(
           destination,
           followLinks: false,
@@ -351,6 +556,7 @@ final class PterodactylTransferFileEngine {
             ..sort(_compareDeepestFirst);
       for (final PterodactylTransferChange change in directoryDeletions) {
         final String destination = _safeDestination(targetRoot, change.path);
+        _requireSafeParents(targetRoot, change.path);
         final FileSystemEntityType type = FileSystemEntity.typeSync(
           destination,
           followLinks: false,
@@ -559,6 +765,24 @@ final class PterodactylTransferFileEngine {
     }
   }
 
+  void _requireSafeParents(String root, String relative) {
+    final List<String> parts = _validatedParts(relative);
+    String parent = root;
+    for (final String part in parts.take(parts.length - 1)) {
+      parent = p.join(parent, part);
+      final FileSystemEntityType type = FileSystemEntity.typeSync(
+        parent,
+        followLinks: false,
+      );
+      if (type == FileSystemEntityType.notFound) return;
+      if (type != FileSystemEntityType.directory) {
+        throw StateError(
+          'Transfer deletion parent is not a real directory: $relative',
+        );
+      }
+    }
+  }
+
   String _safeDestination(String root, String relative) {
     final List<String> parts = _validatedParts(relative);
     final String destination = p.normalize(p.joinAll(<String>[root, ...parts]));
@@ -655,4 +879,15 @@ final class PterodactylTransferFileEngine {
       File(path).deleteSync();
     }
   }
+}
+
+final class PterodactylTransferConflict implements Exception {
+  PterodactylTransferConflict(Iterable<String> conflictingPaths)
+    : paths = List<String>.unmodifiable(conflictingPaths.toList()..sort());
+
+  final List<String> paths;
+
+  @override
+  String toString() =>
+      'Local and Remote both changed since the last shared snapshot: ${paths.join(', ')}. Resolve these files before pushing.';
 }

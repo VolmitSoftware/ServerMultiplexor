@@ -46,6 +46,9 @@ class MetricsSampler {
   /// even though its ring (see [history]) is retained.
   List<String> get instances => List<String>.unmodifiable(_instances);
 
+  String? lastError;
+  DateTime? lastSuccessfulSweep;
+
   /// Captures one round of metrics, parses each row, and pushes the result
   /// into each instance's ring (and, if a [TrendStore] was supplied, appends
   /// each row to it).
@@ -100,10 +103,10 @@ class MetricsSampler {
       _instances = <String>[
         for (final MetricSample sample in parsed) sample.instance,
       ];
-    } catch (_) {
-      // captureMetrics (or a downstream step) failed: swallow it so the
-      // dashboard's event loop keeps running. State is left as it was
-      // before this sweep started.
+      lastError = null;
+      lastSuccessfulSweep = now;
+    } catch (error) {
+      lastError = error.toString();
     } finally {
       _sweeping = false;
     }

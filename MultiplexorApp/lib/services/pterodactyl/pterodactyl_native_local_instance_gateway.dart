@@ -63,6 +63,7 @@ final class PterodactylNativeLocalInstanceGateway
       return instance;
     } catch (error, stackTrace) {
       if (!created) {
+        _passthrough.setConsumerOverride(selected);
         final bool cleaned = _passthrough.cleanupPartialTransferInstance(
           name,
           creationToken: creationToken,
@@ -336,8 +337,10 @@ final class PterodactylNativeLocalInstanceGateway
   }
 
   @override
-  Future<void> stop(PterodactylLocalInstance instance) =>
-      _run(_consumer(instance), <String>['runtime', 'stop', instance.name]);
+  Future<void> stop(PterodactylLocalInstance instance) => _run(
+    _consumer(instance),
+    <String>['runtime', 'stop', instance.name, '--graceful'],
+  );
 
   @override
   Future<void> start(PterodactylLocalInstance instance) => _run(

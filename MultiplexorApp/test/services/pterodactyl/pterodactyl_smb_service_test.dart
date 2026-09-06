@@ -1929,6 +1929,81 @@ Future<void> main(List<String> arguments) async {
     },
   );
 
+  for (final bool fail in <bool>[false, true]) {
+    test(
+      'closing a direct session drains ${fail ? 'failed' : 'successful'} downloads before releasing the backend',
+      () async {
+        final _Fixture fixture = _Fixture();
+        addTearDown(fixture.close);
+        final PterodactylSmbService service = fixture.service(
+          loadPanelUsername: (String _) async => 'operator',
+          ensureSshPublicKey:
+              (
+                String _, {
+                required String name,
+                required String publicKey,
+              }) async {},
+        );
+        service.configureShare(
+          mountRoot: fixture.mountRoot.path,
+          knownHostsFile: fixture.knownHosts.path,
+        );
+        await service.configureAccount(profileId: 'remote');
+        final Directory snapshot = Directory(
+          '${fixture.temporary.path}/closing-snapshot',
+        )..createSync();
+        final PterodactylSmbDirectSession session = await service
+            .openDirectServerFiles(
+              profileId: 'remote',
+              serverIdentifier: 'ABC12345',
+            );
+        final Completer<PterodactylSmbCommandResult> process =
+            Completer<PterodactylSmbCommandResult>();
+        fixture.runner.directRcloneCompletion = process;
+        final Future<void> snapshotResult = expectLater(
+          session.snapshotTo(snapshot.path),
+          fail ? throwsStateError : completes,
+        );
+        await Future<void>.delayed(Duration.zero);
+        bool closed = false;
+        final Future<void> closing = session.close().then((_) => closed = true);
+        await Future<void>.delayed(Duration.zero);
+        expect(closed, isFalse);
+        await expectLater(session.snapshotTo(snapshot.path), throwsStateError);
+        await expectLater(
+          service.openDirectServerFiles(
+            profileId: 'remote',
+            serverIdentifier: 'ABC12345',
+          ),
+          throwsStateError,
+        );
+        File(
+          '${snapshot.path}/last-download',
+        ).writeAsStringSync('finished writing');
+        process.complete(
+          fail
+              ? const PterodactylSmbCommandResult(
+                  exitCode: 1,
+                  stdout: '',
+                  stderr: 'fixture failure',
+                )
+              : _success,
+        );
+        await snapshotResult;
+        await closing;
+        await session.close();
+        snapshot.deleteSync(recursive: true);
+        expect(closed, isTrue);
+        final PterodactylSmbDirectSession next = await service
+            .openDirectServerFiles(
+              profileId: 'remote',
+              serverIdentifier: 'ABC12345',
+            );
+        await next.close();
+      },
+    );
+  }
+
   test('direct transfer failure does not expose password material', () async {
     final _Fixture fixture = _Fixture();
     addTearDown(fixture.close);

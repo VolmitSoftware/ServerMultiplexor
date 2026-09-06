@@ -124,6 +124,20 @@ MonitorFrame workspaceOverlay({
   lines: lines,
 );
 
+typedef CardBounds = ({int top, int bottom, int left, int right});
+
+CardBounds cardBounds(MonitorFrame frame) {
+  final List<MonitorHitbox> card = frame.hitboxes
+      .where((MonitorHitbox box) => box.id == modalCardHitId)
+      .toList();
+  return (
+    top: card.first.row,
+    bottom: card.last.row,
+    left: card.first.colStart,
+    right: card.first.colEnd,
+  );
+}
+
 void main() {
   group('MonitorModalState', () {
     test('an instance modal carries the instance it acts on', () {
@@ -146,6 +160,7 @@ void main() {
         InstanceModalAction.pullToLocal,
         InstanceModalAction.pushToRemote,
         InstanceModalAction.addons,
+        InstanceModalAction.backups,
         InstanceModalAction.settings,
         InstanceModalAction.history,
         InstanceModalAction.reinstall,
@@ -207,6 +222,8 @@ void main() {
         WorkspaceModalAction.connect,
         WorkspaceModalAction.files,
         WorkspaceModalAction.bulkActions,
+        WorkspaceModalAction.diagnostics,
+        WorkspaceModalAction.templates,
       ]);
     });
 
@@ -288,10 +305,15 @@ void main() {
 
     test('centers the instance card horizontally and vertically', () {
       final MonitorFrame frame = instanceOverlay();
-      // 46 wide over 100 columns, 10 rows over 30 lines.
-      expect(plainRows(frame)[10].substring(27, 73), startsWith('┌─ alpha '));
-      expect(plainRows(frame)[19].substring(27, 73), startsWith('└'));
-      expect(plainRows(frame)[19][72], '┘');
+      final CardBounds bounds = cardBounds(frame);
+      expect(bounds.left, (100 - (bounds.right - bounds.left)) ~/ 2);
+      expect(bounds.top, (30 - (bounds.bottom - bounds.top + 1)) ~/ 2);
+      expect(
+        plainRows(frame)[bounds.top].substring(bounds.left, bounds.right),
+        startsWith('┌─ alpha '),
+      );
+      expect(plainRows(frame)[bounds.bottom][bounds.left], '└');
+      expect(plainRows(frame)[bounds.bottom][bounds.right - 1], '┘');
     });
 
     test('leaves the base rows above and below the card untouched', () {
@@ -306,7 +328,11 @@ void main() {
         columns: 100,
         lines: 30,
       );
-      for (final int index in <int>[0, 5, 9, 20, 25, 29]) {
+      final CardBounds bounds = cardBounds(frame);
+      for (final int index in <int>[
+        for (int row = 0; row < 30; row++)
+          if (row < bounds.top || row > bounds.bottom) row,
+      ]) {
         expect(frame.rows[index], base.rows[index], reason: 'row $index');
       }
     });
@@ -314,7 +340,8 @@ void main() {
     test('keeps the base text left of the card on every card row', () {
       final MonitorFrame base = baseFrame();
       final MonitorFrame frame = instanceOverlay();
-      for (int index = 10; index <= 19; index++) {
+      final CardBounds bounds = cardBounds(frame);
+      for (int index = bounds.top; index <= bounds.bottom; index++) {
         expect(
           plainRows(frame)[index].substring(0, 27),
           Ansi.strip(base.rows[index]).substring(0, 27),
@@ -325,7 +352,8 @@ void main() {
 
     test('blanks the base text right of the card on every card row', () {
       final MonitorFrame frame = instanceOverlay();
-      for (int index = 10; index <= 19; index++) {
+      final CardBounds bounds = cardBounds(frame);
+      for (int index = bounds.top; index <= bounds.bottom; index++) {
         expect(
           plainRows(frame)[index].substring(73),
           ' ' * 27,
@@ -336,29 +364,29 @@ void main() {
 
     test('draws the esc hint on the row just inside the bottom border', () {
       final MonitorFrame frame = instanceOverlay();
-      expect(plainRows(frame)[18], contains('esc closes'));
-      expect(rowWith(frame, 'esc closes'), 18);
+      expect(rowWith(frame, 'esc closes'), cardBounds(frame).bottom - 1);
     });
 
     test('badges the instance card with the sampled state', () {
       final MonitorFrame frame = instanceOverlay(state: RuntimeState.stopped);
-      expect(plainRows(frame)[10], contains('stopped'));
+      expect(plainRows(frame)[cardBounds(frame).top], contains('stopped'));
     });
 
     test('badges an unsampled instance as having no data', () {
       final MonitorFrame frame = instanceOverlay(state: null);
-      expect(plainRows(frame)[10], contains('no data'));
+      expect(plainRows(frame)[cardBounds(frame).top], contains('no data'));
     });
 
     test('centers the workspace card over its own smaller height', () {
       final MonitorFrame frame = workspaceOverlay();
-      // 6 rows over 30 lines.
+      final CardBounds bounds = cardBounds(frame);
+      expect(bounds.top, (30 - (bounds.bottom - bounds.top + 1)) ~/ 2);
       expect(
-        plainRows(frame)[12].substring(27, 73),
+        plainRows(frame)[bounds.top].substring(bounds.left, bounds.right),
         startsWith('┌─ WORKSPACE'),
       );
-      expect(plainRows(frame)[17][72], '┘');
-      expect(rowWith(frame, 'esc closes'), 16);
+      expect(plainRows(frame)[bounds.bottom][bounds.right - 1], '┘');
+      expect(rowWith(frame, 'esc closes'), bounds.bottom - 1);
     });
   });
 
@@ -439,11 +467,11 @@ void main() {
       final MonitorFrame frame = instanceOverlay();
       final MonitorHitbox stop = boxFor(frame, 'im:stop')!;
       // card left 27 + border/pad 2 + row indent 2, then hotkey + label.
-      expect(stop.row, 11);
+      expect(stop.row, cardBounds(frame).top + 1);
       expect(stop.colStart, 31);
       expect(stop.colEnd, 41);
       final MonitorHitbox restart = boxFor(frame, 'im:restart')!;
-      expect(restart.row, 11);
+      expect(restart.row, cardBounds(frame).top + 1);
       expect(restart.colStart, 43);
       expect(restart.colEnd, 56);
     });
@@ -471,34 +499,64 @@ void main() {
       final List<MonitorHitbox> cardBoxes = frame.hitboxes
           .where((MonitorHitbox box) => box.id == modalCardHitId)
           .toList();
-      expect(cardBoxes.length, 10);
+      final int topBorder = rowWith(frame, '┌─ alpha ');
+      final int bottomBorder = rowWith(frame, '└');
+      expect(cardBoxes.length, bottomBorder - topBorder + 1);
       for (final MonitorHitbox box in cardBoxes) {
         expect(box.kind, MonitorHitKind.modalScrim);
         expect(box.colStart, 27);
         expect(box.colEnd, 73);
       }
       expect(cardBoxes.map((MonitorHitbox box) => box.row).toSet(), <int>{
-        for (int index = 10; index <= 19; index++) index,
+        for (int index = topBorder; index <= bottomBorder; index++) index,
       });
     });
 
     test('hit-tests the card border, title and padding as the card', () {
       final MonitorFrame frame = instanceOverlay();
-      // Top-left corner, the inlaid title, and a chip row's left padding.
-      expect(hitTest(frame.hitboxes, row: 10, col: 27), modalCardHitId);
-      expect(hitTest(frame.hitboxes, row: 10, col: 31), modalCardHitId);
-      expect(hitTest(frame.hitboxes, row: 11, col: 28), modalCardHitId);
-      // The gap between the two chips, and the bottom border.
-      expect(hitTest(frame.hitboxes, row: 11, col: 41), modalCardHitId);
-      expect(hitTest(frame.hitboxes, row: 19, col: 72), modalCardHitId);
+      final CardBounds bounds = cardBounds(frame);
+      final MonitorHitbox stop = boxFor(frame, 'im:stop')!;
+      expect(
+        hitTest(frame.hitboxes, row: bounds.top, col: bounds.left),
+        modalCardHitId,
+      );
+      expect(
+        hitTest(frame.hitboxes, row: bounds.top, col: bounds.left + 4),
+        modalCardHitId,
+      );
+      expect(
+        hitTest(frame.hitboxes, row: stop.row, col: bounds.left + 1),
+        modalCardHitId,
+      );
+      expect(
+        hitTest(frame.hitboxes, row: stop.row, col: stop.colEnd),
+        modalCardHitId,
+      );
+      expect(
+        hitTest(frame.hitboxes, row: bounds.bottom, col: bounds.right - 1),
+        modalCardHitId,
+      );
     });
 
     test('hit-tests just past the card edges as the scrim', () {
       final MonitorFrame frame = instanceOverlay();
-      expect(hitTest(frame.hitboxes, row: 10, col: 26), modalScrimHitId);
-      expect(hitTest(frame.hitboxes, row: 10, col: 73), modalScrimHitId);
-      expect(hitTest(frame.hitboxes, row: 9, col: 40), modalScrimHitId);
-      expect(hitTest(frame.hitboxes, row: 20, col: 40), modalScrimHitId);
+      final CardBounds bounds = cardBounds(frame);
+      expect(
+        hitTest(frame.hitboxes, row: bounds.top, col: bounds.left - 1),
+        modalScrimHitId,
+      );
+      expect(
+        hitTest(frame.hitboxes, row: bounds.top, col: bounds.right),
+        modalScrimHitId,
+      );
+      expect(
+        hitTest(frame.hitboxes, row: bounds.top - 1, col: bounds.left + 10),
+        modalScrimHitId,
+      );
+      expect(
+        hitTest(frame.hitboxes, row: bounds.bottom + 1, col: bounds.left + 10),
+        modalScrimHitId,
+      );
     });
   });
 
@@ -830,8 +888,10 @@ void main() {
   });
 
   group('overlayModal workspace actions', () {
-    test('offers exactly the six workspace card actions', () {
+    test('offers exactly the eight workspace card actions', () {
       expect(buttonIds(workspaceOverlay()), <String>{
+        'wm:diagnostics',
+        'wm:templates',
         'wm:buildTuning',
         'wm:pullBuilds',
         'wm:createMany',
@@ -945,8 +1005,11 @@ void main() {
     test('narrows the card to eight columns short of the frame', () {
       final MonitorFrame frame = instanceOverlay(columns: 50);
       // 50 - 8 = 42 wide, centered at column 4.
-      expect(plainRows(frame)[10].substring(4, 46), startsWith('┌─ alpha '));
-      expect(plainRows(frame)[19][45], '┘');
+      expect(
+        plainRows(frame)[cardBounds(frame).top].substring(4, 46),
+        startsWith('┌─ alpha '),
+      );
+      expect(plainRows(frame)[cardBounds(frame).bottom][45], '┘');
       for (final String row in frame.rows) {
         expect(Ansi.visibleLength(row), 50);
       }
@@ -991,6 +1054,8 @@ void main() {
           'im:setPort',
           'im:pushToRemote',
           'im:addons',
+          'im:backups',
+          'im:settings',
           'im:makeActive',
           'im:motd',
           'im:lock',
@@ -1026,6 +1091,8 @@ void main() {
       final MonitorFrame frame = workspaceOverlay(columns: 41);
       expect(Ansi.visibleLength(frame.rows[12]), 41);
       expect(buttonIds(frame), <String>{
+        'wm:diagnostics',
+        'wm:templates',
         'wm:buildTuning',
         'wm:pullBuilds',
         'wm:createMany',
