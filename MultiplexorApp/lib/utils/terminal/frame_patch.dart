@@ -2,18 +2,22 @@
 ///
 /// Periodic complete frames act as replay checkpoints for terminal hosts that
 /// detach and later reconstruct their display from a bounded output history.
-/// The budget advances only when a visible patch is emitted, so an idle
-/// dashboard still writes nothing.
+/// The budget advances only when a visible patch is emitted.
 const int terminalFullFrameCheckpointCharacters = 1_000_000;
 
-/// Whether [nextPatchCharacters] would exhaust the incremental output budget.
+/// Repair quiet dashboards even when they never reach the output budget.
+const Duration terminalFullFrameCheckpointInterval = Duration(seconds: 30);
+
+/// Whether the output budget or time since the last full frame is exhausted.
 bool terminalFullFrameCheckpointDue({
   required int charactersSinceFullFrame,
   required int nextPatchCharacters,
+  Duration elapsedSinceFullFrame = Duration.zero,
   int threshold = terminalFullFrameCheckpointCharacters,
 }) =>
-    nextPatchCharacters > 0 &&
-    charactersSinceFullFrame + nextPatchCharacters >= threshold;
+    elapsedSinceFullFrame >= terminalFullFrameCheckpointInterval ||
+    (nextPatchCharacters > 0 &&
+        charactersSinceFullFrame + nextPatchCharacters >= threshold);
 
 /// Computes a differential ANSI patch that turns a previously rendered
 /// terminal frame into [next], writing only the lines that actually

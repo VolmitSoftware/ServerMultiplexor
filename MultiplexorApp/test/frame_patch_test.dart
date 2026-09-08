@@ -27,11 +27,49 @@ void main() {
       );
     });
 
-    test('does not checkpoint an empty idle update', () {
+    test('does not checkpoint an empty idle update before its deadline', () {
       expect(
         terminalFullFrameCheckpointDue(
           charactersSinceFullFrame: terminalFullFrameCheckpointCharacters,
           nextPatchCharacters: 0,
+          elapsedSinceFullFrame: const Duration(milliseconds: 29999),
+        ),
+        isFalse,
+      );
+    });
+
+    test('repaints an unchanged frame at and beyond thirty seconds', () {
+      for (final Duration age in <Duration>[
+        const Duration(seconds: 30),
+        const Duration(hours: 8),
+      ]) {
+        final bool full = terminalFullFrameCheckpointDue(
+          charactersSinceFullFrame: 0,
+          nextPatchCharacters: 0,
+          elapsedSinceFullFrame: age,
+        );
+        expect(full, isTrue);
+        expect(
+          renderTerminalPatch(previous: 'same', next: 'same', forceFull: full),
+          startsWith('\x1B[H\x1B[2Jsame'),
+        );
+      }
+    });
+
+    test('ordinary patches do not defer the repaint deadline', () {
+      expect(
+        terminalFullFrameCheckpointDue(
+          charactersSinceFullFrame: 12,
+          nextPatchCharacters: 10,
+          elapsedSinceFullFrame: const Duration(seconds: 30),
+        ),
+        isTrue,
+      );
+      expect(
+        terminalFullFrameCheckpointDue(
+          charactersSinceFullFrame: 0,
+          nextPatchCharacters: 0,
+          elapsedSinceFullFrame: Duration.zero,
         ),
         isFalse,
       );

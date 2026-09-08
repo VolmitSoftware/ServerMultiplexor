@@ -288,6 +288,7 @@ class MonitorScreen {
   Duration _range = monitorRanges.first;
   bool _forceFull = true;
   int _incrementalCharactersSinceFullFrame = 0;
+  final Stopwatch _fullFrameAge = Stopwatch()..start();
   int _lastColumns = -1;
   int _lastLines = -1;
   final MonitorGeometryStabilizer _geometry = MonitorGeometryStabilizer();
@@ -469,7 +470,7 @@ class MonitorScreen {
 
     _clampSelection();
     // The monitor deliberately has no heartbeat animation. Telemetry changes
-    // still patch their affected rows, while idle ticks write nothing.
+    // still patch their affected rows between periodic full repaints.
     const int activityFrame = -1;
     final DateTime chartNow = _dataTime;
     final MonitorModalState? modal = _modal;
@@ -526,7 +527,7 @@ class MonitorScreen {
     _pressedId = _liveId(_pressedId);
 
     final String text = frame.rows.join('\n');
-    bool fullFrame = _forceFull;
+    bool fullFrame = _forceFull || _last == null;
     String patch = renderTerminalPatch(
       previous: _last,
       next: text,
@@ -544,6 +545,7 @@ class MonitorScreen {
         terminalFullFrameCheckpointDue(
           charactersSinceFullFrame: _incrementalCharactersSinceFullFrame,
           nextPatchCharacters: output.length,
+          elapsedSinceFullFrame: _fullFrameAge.elapsed,
         )) {
       fullFrame = true;
       patch = renderTerminalPatch(previous: _last, next: text, forceFull: true);
@@ -555,7 +557,13 @@ class MonitorScreen {
     if (output.isEmpty) {
       return;
     }
+    if (fullFrame) {
+      io.enableMouse();
+    }
     stdout.write(output);
+    if (fullFrame) {
+      _fullFrameAge.reset();
+    }
     _incrementalCharactersSinceFullFrame = fullFrame
         ? 0
         : _incrementalCharactersSinceFullFrame + output.length;
