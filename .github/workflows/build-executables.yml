@@ -135,6 +135,10 @@ jobs:
           import 'dart:async';
           import 'dart:io';
           Future<void> main(List<String> args) async {
+            if (args.contains('-version')) {
+              stderr.writeln('openjdk version "21.0.1"');
+              return;
+            }
             if (args.contains('--installServer')) {
               final Directory argsDir = Directory('libraries\\fake')..createSync(recursive: true);
               File('${argsDir.path}\\win_args.txt').writeAsStringSync('--launchTarget forge_server');
@@ -276,7 +280,7 @@ jobs:
       - name: Package macOS executable
         if: runner.os == 'macOS'
         shell: bash
-        run: tar -czf "$RUNNER_TEMP/$ARCHIVE_NAME" -C "$RUNNER_TEMP" "$EXECUTABLE_NAME"
+        run: COPYFILE_DISABLE=1 tar --format=ustar --no-xattrs -czf "$RUNNER_TEMP/$ARCHIVE_NAME" -C "$RUNNER_TEMP" "$EXECUTABLE_NAME"
 
       - name: Package Windows executable
         if: runner.os == 'Windows'
@@ -301,6 +305,9 @@ jobs:
       - version
       - build
     runs-on: ubuntu-latest
+    concurrency:
+      group: executable-releases-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
@@ -313,6 +320,33 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Check release archives and write checksums
+        shell: bash
+        working-directory: release-assets
+        env:
+          BUILD_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob dotglob
+          archives=(
+            "multiplexor-v$BUILD_VERSION-macos-arm64.tar.gz"
+            "multiplexor-v$BUILD_VERSION-macos-x64.tar.gz"
+            "multiplexor-v$BUILD_VERSION-windows-x64.zip"
+          )
+          downloaded=(*)
+          if [[ ${#downloaded[@]} -ne ${#archives[@]} ]]; then
+            echo "Expected exactly three executable archives, got ${#downloaded[@]}." >&2
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            if [[ ! -f "$archive" || -L "$archive" || ! -s "$archive" ]]; then
+              echo "Missing or invalid release archive: $archive" >&2
+              exit 1
+            fi
+          done
+          sha256sum -- "${archives[@]}" > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+
       - name: Publish release
         shell: bash
         env:
@@ -322,33 +356,69 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             release_tag="$GITHUB_REF_NAME"
-            target_args=(--verify-tag)
-            channel_args=(--latest)
+            target_args=(--target "$BUILD_SHA" --verify-tag)
           else
             release_tag="v$BUILD_VERSION"
             target_args=(--target "$BUILD_SHA")
-            if [[ "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
-              current_default_sha="$(
-                gh api "repos/$GH_REPO/commits/$DEFAULT_BRANCH" --jq .sha
-              )"
-              if [[ "$current_default_sha" == "$BUILD_SHA" ]]; then
-                channel_args=(--latest)
-              else
-                channel_args=(--prerelease)
-              fi
-            else
-              channel_args=(--prerelease)
-            fi
           fi
 
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            gh release upload "$release_tag" release-assets/* --clobber
+          verify_tag_target() {
+            local tag_count tag_sha
+            tag_count="$(gh api "repos/$GH_REPO/git/matching-refs/tags/$release_tag" \
+              --jq "map(select(.ref == \"refs/tags/$release_tag\")) | length")"
+            if [[ "$tag_count" -ne 0 ]]; then
+              tag_sha="$(gh api "repos/$GH_REPO/commits/$release_tag" --jq .sha)"
+              if [[ "$tag_sha" != "$BUILD_SHA" ]]; then
+                echo "Release tag $release_tag points to $tag_sha, expected $BUILD_SHA." >&2
+                exit 1
+              fi
+            elif [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+              echo "Pushed release tag $release_tag no longer exists." >&2
+              exit 1
+            fi
+          }
+          verify_tag_target
+
+          already_published=false
+          if is_draft="$(gh release view "$release_tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$is_draft" == "true" ]]; then
+              gh release edit "$release_tag" --target "$BUILD_SHA"
+              gh release upload "$release_tag" release-assets/* --clobber
+            else
+              already_published=true
+            fi
           else
             gh release create "$release_tag" release-assets/* \
               --title "Multiplexor v$BUILD_VERSION" \
-              --generate-notes \
-              "${target_args[@]}" \
-              "${channel_args[@]}"
+              --generate-notes --draft \
+              "${target_args[@]}"
           fi
+
+          verification_dir="$(mktemp -d)"
+          trap 'rm -rf "$verification_dir"' EXIT
+          gh release download "$release_tag" --dir "$verification_dir"
+          diff --recursive --brief release-assets "$verification_dir"
+          (cd "$verification_dir" && sha256sum --check --strict SHA256SUMS)
+          if [[ "$already_published" == "true" ]]; then
+            echo "Release $release_tag is already published with these exact assets."
+            exit 0
+          fi
+
+          verify_tag_target
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            channel_args=(--latest --prerelease=false)
+          elif [[ "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
+            current_default_sha="$(gh api "repos/$GH_REPO/commits/$DEFAULT_BRANCH" --jq .sha)"
+            if [[ "$current_default_sha" == "$BUILD_SHA" ]]; then
+              channel_args=(--latest --prerelease=false)
+            else
+              channel_args=(--latest=false --prerelease)
+            fi
+          else
+            channel_args=(--latest=false --prerelease)
+          fi
+          gh release edit "$release_tag" --draft=false \
+            "${target_args[@]}" "${channel_args[@]}"

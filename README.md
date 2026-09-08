@@ -6,6 +6,14 @@ Everything is driven through `./start.sh` — either the interactive wizard (no 
 
 Every successful branch push assigns the build a monotonically increasing semantic patch version, embeds that version in the CLI, uploads versioned Apple Silicon macOS, Intel macOS, and Windows archives as GitHub Actions artifacts retained for 30 days, and publishes the same archives in a GitHub Release tagged at the exact pushed commit. The newest default-branch push becomes the latest release; other branches and default-branch builds superseded while CI was running publish as prereleases. The checked-in version remains the release baseline, so CI never adds surprise commits to a branch. Explicit tag pushes matching `v*` must match that baseline and publish at that existing tag.
 
+Compiled releases update themselves from the latest stable [GitHub Release](https://github.com/VolmitSoftware/ServerMultiplexor/releases/latest). On an interactive dashboard launch (no arguments, `wizard`, or `runtime watch`), Multiplexor checks at most once every six hours, compares the embedded semantic version, and downloads the matching macOS Apple Silicon, macOS Intel, or Windows x64 archive. It never downgrades or selects a prerelease. Release publication includes `SHA256SUMS`; downloads must pass the checksum, archive, and executable-version checks before installation.
+
+An automatic update replaces the executable and reopens the dashboard with the same arguments and working directory. Windows uses a temporary helper to finish after the running executable exits. Preparation failures keep the existing executable; failed replacement restores it. Network failures leave the dashboard usable and retry on a later launch after fifteen minutes. Server instances, worlds, credentials, and workspace files are not part of the executable update.
+
+`multiplexor update` installs an update immediately; `multiplexor update check` only checks. Use `multiplexor update auto off` to disable automatic updates, `multiplexor update auto on` to enable them, or `multiplexor update status` to inspect the current build and settings. Preferences and check times are stored per executable under `~/.multiplexor/self-update` (`%USERPROFILE%\.multiplexor\self-update` on Windows). `MULTIPLEXOR_NO_UPDATE=1` skips the automatic check for one launch. Help, version, noninteractive commands, and background server/watch processes do not auto-update.
+
+Only release builds made with `tool/build_exe.dart --version <semver>` enable self-installation. Source runs and ordinary `./start.sh` development builds continue to compile local source. Existing downloads need one manual replacement with an updater-enabled release before they can update themselves. A writable executable directory is required; the updater does not request elevation.
+
 ## Requirements
 
 - `dart` 3.10+ (`./start.sh` compiles `MultiplexorApp/` on demand)
@@ -134,6 +142,17 @@ Independent builds, repository syncs, addon preparation, Remote fleet polling, D
 Local commands share argument validation with wizard operations. Unknown options, missing option values, repeated single-value options, and extra positional arguments are rejected before execution. Boolean options accept `--flag`, `--flag=true`, or `--flag=false`.
 
 Every command is `./start.sh <namespace> <action> [args]`. Global flags: `--consumer <profile>` for a one-shot profile override, `--root <path>` for a different workspace, `--verbose` for arg-normalization debug output. Use `./start.sh help <command>` or `<command> --help` for focused command help.
+
+### update — compiled Multiplexor releases
+
+These commands also work directly on the downloaded executable, without a Dart SDK or workspace. `update` runs before workspace initialization.
+
+| Command | What it does |
+|---------|--------------|
+| `update [install]` | Download, verify, and install a newer stable compiled release. Requires a release build. |
+| `update check` | Check for a newer stable version without downloading the executable or changing settings. |
+| `update status` | Show the embedded version, executable path, automatic-update setting, and last check time. |
+| `update auto [on\|off]` | Read or change automatic updates for this installed executable. |
 
 ### remote — Pterodactyl fleet
 
@@ -476,6 +495,11 @@ Update preserves Remote-only changes and uploads only the listed files. If a fil
 The Local dashboard's `g` or `G` opens the same grid. Use `Shift+R` to repaint the dashboard or an open wizard menu.
 
 ```bash
+# Update a downloaded Multiplexor executable
+multiplexor update check
+multiplexor update
+multiplexor update auto on
+
 # Create a paper server on the latest upstream version, refreshing the cache first
 ./start.sh server create lobby --type paper --auto-build
 

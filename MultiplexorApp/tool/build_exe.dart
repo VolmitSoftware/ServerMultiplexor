@@ -77,6 +77,7 @@ Future<void> main(List<String> args) async {
       'compile',
       'exe',
       if (requestedVersion != null) '-DMULTIPLEXOR_VERSION=$requestedVersion',
+      if (requestedVersion != null) '-DMULTIPLEXOR_RELEASE=true',
       'bin/main.dart',
       '-o',
       outputPath,

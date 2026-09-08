@@ -5,6 +5,9 @@ const String multiplexorVersion = String.fromEnvironment(
   'MULTIPLEXOR_VERSION',
   defaultValue: multiplexorSourceVersion,
 );
+const bool multiplexorReleaseBuild = bool.fromEnvironment(
+  'MULTIPLEXOR_RELEASE',
+);
 
 class CommandHelpGroup {
   const CommandHelpGroup(this.command, this.forms);
@@ -14,6 +17,12 @@ class CommandHelpGroup {
 }
 
 const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
+  CommandHelpGroup('update', <String>[
+    'install',
+    'check',
+    'status',
+    'auto [on|off]',
+  ]),
   CommandHelpGroup('remote', <String>[
     'connect --url <https://panel> [--id <id>] [--name <name>] [--application] [--replace]',
     'account list',

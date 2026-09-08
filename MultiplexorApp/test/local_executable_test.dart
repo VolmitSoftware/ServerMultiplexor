@@ -1,10 +1,29 @@
+@Timeout(Duration(minutes: 3))
+library;
+
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
+  late Directory buildRoot;
+  late String executable;
   late Directory root;
+
+  setUpAll(() async {
+    buildRoot = Directory.systemTemp.createTempSync('multiplexor-cli-build-');
+    executable = p.join(
+      buildRoot.path,
+      Platform.isWindows ? 'multiplexor.exe' : 'multiplexor',
+    );
+    final ProcessResult compile = await Process.run(
+      Platform.resolvedExecutable,
+      <String>['compile', 'exe', 'bin/main.dart', '-o', executable],
+    );
+    expect(compile.exitCode, 0, reason: '${compile.stdout}\n${compile.stderr}');
+  });
+  tearDownAll(() => buildRoot.deleteSync(recursive: true));
 
   setUp(() {
     root = Directory.systemTemp.createTempSync('multiplexor-cli-test-');
@@ -12,13 +31,35 @@ void main() {
   tearDown(() => root.deleteSync(recursive: true));
 
   Future<ProcessResult> run(List<String> args) => Process.run(
-    Platform.resolvedExecutable,
-    <String>['run', 'bin/main.dart', '--root', root.path, ...args],
+    executable,
+    <String>['--root', root.path, ...args],
     environment: <String, String>{
       'JVM_ARGS': '',
       'JVM_PROFILE': '',
       'HEAP_SIZE': '',
       'JAVA_EXECUTABLE': '',
+    },
+  );
+
+  test(
+    'source executable update commands do not bootstrap or replace anything',
+    () async {
+      final ProcessResult status = await run(<String>['update', 'status']);
+      expect(status.exitCode, 0, reason: '${status.stderr}');
+      expect(status.stdout, contains('Source build'));
+      final ProcessResult install = await run(<String>['update']);
+      expect(install.exitCode, 2);
+      expect(install.stderr, contains('requires a compiled release'));
+      final ProcessResult invalid = await run(<String>[
+        'update',
+        'check',
+        '--install',
+      ]);
+      expect(invalid.exitCode, 2);
+      expect(root.listSync(), isEmpty);
+      final ProcessResult help = await run(<String>['help', 'update']);
+      expect(help.exitCode, 0);
+      expect(help.stdout, contains('update auto [on|off]'));
     },
   );
 

@@ -24,6 +24,7 @@ void main() {
       context: context,
       consumerService: consumers,
       processRunner: const _InstallerRunner(),
+      javaInspector: (String executable) async => 21,
     );
   });
 

@@ -14,6 +14,11 @@ import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
+  final String oldArgsRelativePath = p.join(
+    'libraries',
+    'old',
+    Platform.isWindows ? 'win_args.txt' : 'unix_args.txt',
+  );
   late Directory root;
   late NativeCommandService service;
   late ConsumerService consumers;
@@ -478,15 +483,18 @@ void main() {
     () async {
       final File source = File(p.join(instancePath, '.server-source'));
       source.writeAsStringSync(
-        'type=custom\nlaunch=argsfile\nargs_file_rel=libraries/old/unix_args.txt\nisolated=true\n',
+        'type=custom\nlaunch=argsfile\nargs_file_rel=$oldArgsRelativePath\nisolated=true\n',
       );
-      File(p.join(instancePath, 'libraries', 'old', 'unix_args.txt'))
+      File(p.join(instancePath, oldArgsRelativePath))
         ..createSync(recursive: true)
         ..writeAsStringSync('old');
       File(
         p.join(instancePath, 'installer.jar'),
       ).writeAsStringSync('old installer');
-      File(p.join(instancePath, 'run.sh')).writeAsStringSync('old launcher');
+      final String launcherName = Platform.isWindows ? 'run.bat' : 'run.sh';
+      File(
+        p.join(instancePath, launcherName),
+      ).writeAsStringSync('old launcher');
       final CapturedResult result = await command(<String>[
         'instance',
         'update',
@@ -500,7 +508,7 @@ void main() {
         isFalse,
       );
       expect(File(p.join(instancePath, 'installer.jar')).existsSync(), isFalse);
-      expect(File(p.join(instancePath, 'run.sh')).existsSync(), isFalse);
+      expect(File(p.join(instancePath, launcherName)).existsSync(), isFalse);
       expect(source.readAsStringSync(), isNot(contains('args_file_rel=')));
       expect(
         File(p.join(instancePath, 'server.jar')).readAsStringSync(),
@@ -516,7 +524,7 @@ void main() {
       p.join(consumers.rootFor(ConsumerProfile.forge), 'instances', 'fixture'),
     )..createSync(recursive: true);
     File('${mod.path}/.server-source').writeAsStringSync(
-      'type=forge\nlaunch=argsfile\nargs_file_rel=libraries/old/unix_args.txt\nisolated=true\n',
+      'type=forge\nlaunch=argsfile\nargs_file_rel=$oldArgsRelativePath\nisolated=true\n',
     );
     final File jar = File('${root.path}/forge-installer.jar')
       ..writeAsStringSync('installer');
@@ -548,9 +556,9 @@ void main() {
         ),
       )..createSync(recursive: true);
       File('${mod.path}/.server-source').writeAsStringSync(
-        'type=forge\nlaunch=argsfile\nargs_file_rel=libraries/old/unix_args.txt\nisolated=true\n',
+        'type=forge\nlaunch=argsfile\nargs_file_rel=$oldArgsRelativePath\nisolated=true\n',
       );
-      File('${mod.path}/libraries/old/unix_args.txt')
+      File(p.join(mod.path, oldArgsRelativePath))
         ..createSync(recursive: true)
         ..writeAsStringSync('-cp old.jar Main');
       File(

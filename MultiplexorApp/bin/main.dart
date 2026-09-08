@@ -5,8 +5,16 @@ import 'package:fast_log/fast_log.dart';
 import 'package:multiplexor/cli/command_help.dart';
 import 'package:multiplexor/cli/runner.dart';
 import 'package:multiplexor/services/app_context.dart';
+import 'package:multiplexor/services/self_update_installer.dart';
+import 'package:multiplexor/services/self_update_release.dart';
+import 'package:multiplexor/services/self_update_service.dart';
+import 'package:multiplexor/services/self_update_settings.dart';
 
 Future<void> main(List<String> arguments) async {
+  final int? helperCode = await runSelfUpdateHelper(arguments);
+  if (helperCode != null) {
+    exit(helperCode);
+  }
   final parsed = _parseGlobalFlags(arguments);
   final normalizedArgs = parsed.args;
 
@@ -27,6 +35,51 @@ Future<void> main(List<String> arguments) async {
   if (isCliVersionRequest(normalizedArgs)) {
     printCliVersion();
     return;
+  }
+
+  final bool updateCommand =
+      normalizedArgs.isNotEmpty && normalizedArgs.first == 'update';
+  final bool releaseBuild =
+      multiplexorReleaseBuild && isRunningCompiledExecutable();
+  final bool automaticUpdate =
+      releaseBuild &&
+      opensUpdateDashboard(normalizedArgs) &&
+      stdin.hasTerminal &&
+      stdout.hasTerminal &&
+      Platform.environment['MULTIPLEXOR_NO_UPDATE'] != '1';
+  if (updateCommand || automaticUpdate) {
+    GithubUpdateClient? client;
+    try {
+      client = GithubUpdateClient();
+      final String executable = File(
+        Platform.resolvedExecutable,
+      ).resolveSymbolicLinksSync();
+      final SelfUpdateService updater = SelfUpdateService(
+        currentVersion: UpdateVersion.parse(multiplexorVersion),
+        executablePath: executable,
+        releaseBuild: releaseBuild,
+        platform: UpdatePlatform.current(),
+        store: SelfUpdateStore(SelfUpdateStore.defaultDirectory(), executable),
+        client: client,
+      );
+      if (updateCommand) {
+        exitCode = await updater.command(normalizedArgs.sublist(1));
+        if (updater.exitRequired) exit(exitCode);
+        return;
+      }
+      final int? restartCode = await updater.automatic(arguments);
+      if (restartCode != null) {
+        exit(restartCode);
+      }
+    } catch (error) {
+      stderr.writeln('[update] $error');
+      if (updateCommand) {
+        exitCode = error is FormatException ? 2 : 1;
+        return;
+      }
+    } finally {
+      client?.close();
+    }
   }
 
   try {
