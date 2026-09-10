@@ -4,6 +4,8 @@ A Dart-native Minecraft server workspace manager. One workspace holds many serve
 
 Everything is driven through `./start.sh` — either the interactive wizard (no args) or a direct CLI command. There is no separate build step: `start.sh` compiles `MultiplexorApp/` to the `multiplexor` binary whenever a `.dart` source, `pubspec.yaml`, or `pubspec.lock` is newer than the binary, then execs it. Unchanged sources skip straight to the binary. A failed compile leaves the previous binary in place and exits non-zero rather than running stale-but-working code silently. Set `MULTIPLEXOR_REBUILD=1` to force a recompile; everything `start.sh` itself prints goes to stderr, so stdout stays parseable.
 
+On Windows, use `.\start.ps1` from PowerShell with the same arguments. Both launchers build `multiplexor.exe` on Windows, resolve Dart dependencies before compiling, and use Flutter's cached Dart SDK directly when it is installed. The build tool invokes that same SDK for compilation. PowerShell does not require WSL, Git Bash, or tmux. The launcher preserves quoted command arguments on Windows PowerShell 5.1 and PowerShell 7.
+
 Every successful branch push assigns the build a monotonically increasing semantic patch version, embeds that version in the CLI, uploads versioned Apple Silicon macOS, Intel macOS, and Windows archives as GitHub Actions artifacts retained for 30 days, and publishes the same archives in a GitHub Release tagged at the exact pushed commit. The newest default-branch push becomes the latest release; other branches and default-branch builds superseded while CI was running publish as prereleases. The checked-in version remains the release baseline, so CI never adds surprise commits to a branch. Explicit tag pushes matching `v*` must match that baseline and publish at that existing tag.
 
 Compiled releases update themselves from the latest stable [GitHub Release](https://github.com/VolmitSoftware/ServerMultiplexor/releases/latest). On an interactive dashboard launch (no arguments, `wizard`, or `runtime watch`), Multiplexor checks at most once every six hours, compares the embedded semantic version, and downloads the matching macOS Apple Silicon, macOS Intel, or Windows x64 archive. It never downgrades or selects a prerelease. Release publication includes `SHA256SUMS`; downloads must pass the checksum, archive, and executable-version checks before installation.
@@ -266,6 +268,8 @@ Before installation or startup, Multiplexor checks the selected Java executable 
 
 macOS/Linux runtimes use named `tmux` sessions. `Tab` is passed through to the server; Paper, Purpur, Folia, Canvas, and Leaf retain their native JLine/Brigadier completion for real server/plugin commands and current player names even with Multiplexor's minimal console format. Windows uses a native background host built into `multiplexor.exe`, so the release executable does not require Git Bash, `sh`, `chmod`, or `tmux`. Runtime output is captured under `consumers/<profile>/state/runtime/<instance>.log`; the Minecraft server also writes `logs/latest.log` inside its instance. Windows consoles show live runtime logs in a native terminal grid and send commands to the selected server through its configured RCON connection.
 
+Startup preserves the configured server port when it is available and not reserved by another running instance. If it conflicts, Multiplexor selects a free port starting at 25565. Failed bind checks, including Windows address-in-use errors, exclude that port from selection.
+
 In the Windows grid, `Tab` selects the next console; left/right also switch consoles when the command line is empty. Type a command and press `Enter` to send it. `Esc` or `Ctrl-C` returns to the dashboard while the servers keep running. Without an interactive terminal, console commands print the runtime log paths.
 
 | Command | What it does |
@@ -298,6 +302,8 @@ Paper/Spigot/Purpur `/restart` is wired to a per-instance `multiplexor-restart.s
 
 The harness is pinned under `MultiplexorApp/tool/mineflayer/`; `gameplay setup` installs it locally with npm. Offline bots are restricted to stopped, isolated instances: `gameplay prepare` binds the server to loopback, disables online authentication and whitelisting, and removes spawn protection. It never weakens a shared instance. `--start` starts a stopped target, while `--stop-after` only stops an instance that the gameplay command itself started.
 
+The harness package lock is checked in. Setup and launcher installs use `npm ci`; gameplay commands through either launcher refresh an installation when its installed lock is missing or older than the manifest or package lock. An installation failure stops the command with a nonzero exit code. Use `gameplay setup` to repair a damaged installation explicitly, then run `gameplay doctor --json`.
+
 Every gameplay run starts a first-person Prismarine web feed on a free loopback port. The reachable URL is printed as soon as the feed is ready, included under `viewer.url` in the JSON report, and written immediately to `state/gameplay-tests/<instance>/viewer-<port>.json`; the state file changes from `active` to `closed` when the run ends. Use `--viewer-port <port>` when a stable port is useful or `--no-viewer` only when the feed is intentionally unnecessary.
 
 | Command | What it does |
@@ -311,6 +317,8 @@ Every gameplay run starts a first-person Prismarine web feed on a free loopback 
 The built-in `connect` scenario validates login, spawn, position, health, and connection stability. `command` requires `--command` plus an `--expect` regular expression. `effect` optionally runs `--command` and requires the named `--effect`. Custom modules default-export `{ name, description, async run(context) }`; the context supplies `bot`, `step`, `expect`, `command`, `waitForEvent`, `waitForMessage`, `sleep`, server metadata, and a safe-by-default pathfinder configuration.
 
 The harness pins bleeding-edge [Mineflayer commit `f603758e`](https://github.com/PrismarineJS/mineflayer/commit/f603758e4228a7e61d1337526e6066e79308b976), which identifies itself as version 4.38.0 and requires Node 22+. It supports vanilla Java protocols through 26.1. Minecraft 26.2 is outside its tested protocol range. Gameplay results prove protocol-visible behavior, not client rendering, resource packs, sound, camera behavior, client mods, or human feel.
+
+For protocol QA with this dependency set, create an isolated 1.21.11 server instead of using a 26.2 instance. A passing doctor check verifies the harness installation; it does not make an unsupported server protocol compatible.
 
 ### plugins / mods — dropin sources & sync
 
@@ -669,3 +677,19 @@ End-to-end testing always goes through the root entrypoint:
 ```bash
 ./start.sh <command>
 ```
+
+On macOS, `./start.sh` builds the extensionless `multiplexor` executable and uses tmux for runtime consoles. If tmux is missing and Homebrew is available, the launcher runs `brew install tmux`. The Windows executable, PowerShell launcher, and MSYS tooling are not required on macOS.
+
+Run `/bin/bash MultiplexorApp/tool/test_launcher.sh` from the repository root for isolated launcher regression checks. The tests use temporary tools and fixtures, including the Darwin startup path, without installing dependencies or starting Minecraft. CI runs this suite with macOS's `/bin/bash`, plus Mineflayer installation, tests, and diagnostics on both Apple Silicon and Intel macOS runners. The existing macOS executable builds and Dart tests remain enabled.
+
+Windows PowerShell uses the native entrypoint:
+
+```powershell
+.\start.ps1 --version
+.\start.ps1 gameplay doctor --json
+.\start.ps1 --consumer plugin server create gameplay-qa --type paper --mc 1.21.11 --auto-build --isolated
+.\start.ps1 --consumer plugin gameplay run connect gameplay-qa --prepare --start --stop-after --json
+.\start.ps1 --consumer plugin instance delete gameplay-qa
+```
+
+If `dart` resolves to a Flutter launcher that stalls, use its cached `bin/cache/dart-sdk/bin/dart.exe` for the Dart development commands above. Both root launchers select it automatically. Run the harness unit tests from `MultiplexorApp/tool/mineflayer` with `npm ci`, then `npm test` and `npm run doctor`.

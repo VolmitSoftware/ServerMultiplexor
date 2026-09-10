@@ -44,6 +44,51 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+  gameplay:
+    name: Test Mineflayer (${{ matrix.runner }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - windows-latest
+          - macos-15
+          - macos-15-intel
+    defaults:
+      run:
+        working-directory: MultiplexorApp/tool/mineflayer
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: MultiplexorApp/tool/mineflayer/package-lock.json
+
+      - name: Install Mineflayer dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Test macOS launcher
+        if: runner.os == 'macOS'
+        working-directory: .
+        shell: bash
+        run: /bin/bash MultiplexorApp/tool/test_launcher.sh
+
+      - name: Test Mineflayer harness
+        run: npm test
+
+      - name: Check Mineflayer dependencies
+        run: npm run doctor -- --json
+
   build:
     name: Build ${{ matrix.name }}
     needs: version
@@ -304,6 +349,7 @@ jobs:
     needs:
       - version
       - build
+      - gameplay
     runs-on: ubuntu-latest
     concurrency:
       group: executable-releases-${{ github.repository }}

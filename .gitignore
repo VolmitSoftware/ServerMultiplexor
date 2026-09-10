@@ -100,7 +100,9 @@ plugins/
 # Local binaries/tools
 BuildTools.jar
 multiplexor
+multiplexor.exe
 multiplexor.building.*
+multiplexor.exe.building.*
 .multiplexor-update-*/
 .*.update.lock
 

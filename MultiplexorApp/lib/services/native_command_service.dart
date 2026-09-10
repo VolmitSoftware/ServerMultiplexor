@@ -8396,11 +8396,15 @@ class NativeCommandService {
     String instance,
     _NativeIoBuffer io,
   ) async {
-    var port = 25565;
+    final int current = _instanceGetServerPort(profile, instance);
+    if (!_reservedRuntimePorts.contains(current) &&
+        !await _runtimePortInUse(profile, instance, current)) {
+      return;
+    }
+    int port = 25565;
     while (port <= 65535) {
       if (!_reservedRuntimePorts.contains(port) &&
           !await _runtimePortInUse(profile, instance, port)) {
-        final current = _instanceGetServerPort(profile, instance);
         if (current != port) {
           _instanceSetServerPort(profile, instance, port);
           io.write('[INFO] Auto-assigned port for $instance: $port');
@@ -8539,18 +8543,18 @@ class NativeCommandService {
     bool v6Only = false,
   }) async {
     try {
-      final socket = await ServerSocket.bind(address, port, v6Only: v6Only);
+      final ServerSocket socket = await ServerSocket.bind(
+        address,
+        port,
+        v6Only: v6Only,
+      );
       await socket.close();
       return true;
-    } on SocketException catch (e) {
-      final message = '${e.message} ${e.osError?.message ?? ''}'.toLowerCase();
-      if (message.contains('address already in use') ||
-          message.contains('address in use')) {
-        return false;
-      }
-      return true;
-    } catch (_) {
-      return true;
+    } on SocketException catch (error) {
+      return address.type == InternetAddressType.IPv6 &&
+          const <int>{47, 49, 97, 99, 10047, 10049}.contains(
+            error.osError?.errorCode,
+          );
     }
   }
 

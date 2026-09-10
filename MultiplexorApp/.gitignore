@@ -50,6 +50,7 @@ debug.log
 # Node (in case of tooling)
 node_modules/
 package-lock.json
+!tool/mineflayer/package-lock.json
 yarn.lock
 pnpm-lock.yaml
 .run/

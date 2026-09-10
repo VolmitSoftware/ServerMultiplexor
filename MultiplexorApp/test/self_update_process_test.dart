@@ -266,7 +266,12 @@ void main() {
             'Multiplexor CLI v$_newVersion',
           );
           expect(sentinel.readAsStringSync(), 'preserve workspace data');
-          expect(requests, <String>['/latest', '/SHA256SUMS', '/$archiveName']);
+          expect(requests, <String>[
+            '/latest',
+            '/SHA256SUMS',
+            '/$archiveName',
+            if (Platform.isWindows) '/latest',
+          ]);
           await _waitUntil(
             () => _activeProcesses(processLog).isEmpty,
             'update child process did not exit',

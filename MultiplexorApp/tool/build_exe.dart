@@ -72,7 +72,7 @@ Future<void> main(List<String> args) async {
   }
 
   final Process result = await Process.start(
-    'dart',
+    Platform.resolvedExecutable,
     <String>[
       'compile',
       'exe',
@@ -83,7 +83,6 @@ Future<void> main(List<String> args) async {
       outputPath,
     ],
     workingDirectory: appRoot.path,
-    runInShell: true,
   );
 
   await stdout.addStream(result.stdout);
