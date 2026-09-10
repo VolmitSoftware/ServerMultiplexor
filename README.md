@@ -678,7 +678,7 @@ End-to-end testing always goes through the root entrypoint:
 ./start.sh <command>
 ```
 
-On macOS, `./start.sh` builds the extensionless `multiplexor` executable and uses tmux for runtime consoles. If tmux is missing and Homebrew is available, the launcher runs `brew install tmux`. The Windows executable, PowerShell launcher, and MSYS tooling are not required on macOS.
+On macOS, `./start.sh` builds the extensionless `multiplexor` executable and uses tmux for runtime consoles. If tmux is missing and Homebrew is available, the launcher runs `brew install tmux`. A failed compilation preserves the previous executable and removes the partial build. The Windows executable, PowerShell launcher, and MSYS tooling are not required on macOS.
 
 Run `/bin/bash MultiplexorApp/tool/test_launcher.sh` from the repository root for isolated launcher regression checks. The tests use temporary tools and fixtures, including the Darwin startup path, without installing dependencies or starting Minecraft. CI runs this suite with macOS's `/bin/bash`, plus Mineflayer installation, tests, and diagnostics on both Apple Silicon and Intel macOS runners. The existing macOS executable builds and Dart tests remain enabled.
 

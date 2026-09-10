@@ -33,7 +33,7 @@ assert_equal() {
 }
 
 run_launcher() {
-  "$BASH" -c 'OSTYPE=darwin; source "$0" "$@"' "$WORKSPACE/start.sh" "$@" \
+  OSTYPE=darwin "$BASH" "$WORKSPACE/start.sh" "$@" \
     >"$TEMP_ROOT/stdout" 2>"$TEMP_ROOT/stderr"
 }
 

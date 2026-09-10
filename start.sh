@@ -242,7 +242,7 @@ build() {
   if is_windows; then
     staging="$(cygpath -m "$staging")"
   fi
-  trap 'rm -f "$staging"' EXIT INT TERM
+  trap "$(printf 'rm -f -- %q' "$staging")" EXIT INT TERM
   log 'Sources changed; compiling multiplexor'
   if ! (cd "$APP_DIR" && "$dart_executable" run tool/build_exe.dart --output "$staging" >&2); then
     log 'Build failed; not replacing the existing binary.'
