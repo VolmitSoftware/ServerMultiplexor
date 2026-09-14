@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "name": "Persistent settlement",
+  "seed": 42,
+  "durationSeconds": 3600,
+  "completion": "duration",
+  "goals": {
+    "projectsCompleted": 2,
+    "resourceTransfers": 150,
+    "foodCrafted": 3,
+    "sessionsCompleted": 4
+  },
+  "population": {
+    "identities": 8,
+    "concurrent": 4,
+    "usernamePrefix": "Home",
+    "arrivalIntervalSeconds": 2,
+    "sessionSeconds": [
+      240,
+      600
+    ],
+    "offlineSeconds": [
+      20,
+      60
+    ],
+    "groupSize": 4
+  },
+  "playerRoles": [
+    "miner",
+    "lumberjack",
+    "builder",
+    "farmer",
+    "crafter",
+    "courier",
+    "explorer",
+    "mechanic"
+  ],
+  "playerWorlds": [
+    "settlement"
+  ],
+  "pacing": {
+    "minSeconds": 0.5,
+    "maxSeconds": 3
+  },
+  "recovery": {
+    "maxConsecutiveFailures": 8,
+    "maxTotalFailures": 100,
+    "retrySeconds": 5,
+    "death": "respawn"
+  },
+  "timeouts": {
+    "connectSeconds": 45,
+    "actionSeconds": 45,
+    "settleSeconds": 5
+  },
+  "checkpointSeconds": 10,
+  "worlds": [
+    {
+      "id": "settlement",
+      "backend": "standalone",
+      "dimension": "overworld",
+      "bounds": {
+        "min": [
+          0,
+          79,
+          0
+        ],
+        "max": [
+          47,
+          95,
+          47
+        ]
+      },
+      "setup": {
+        "kind": "settlement",
+        "origin": [
+          0,
+          80,
+          0
+        ]
+      },
+      "home": [
+        24,
+        80,
+        24
+      ],
+      "storage": [
+        6,
+        80,
+        6
+      ],
+      "craftingTable": [
+        8,
+        80,
+        6
+      ],
+      "meetingPoint": [
+        4,
+        80,
+        10
+      ],
+      "resourceAreas": [
+        {
+          "id": "quarry",
+          "kind": "mine",
+          "min": [
+            12,
+            80,
+            2
+          ],
+          "max": [
+            25,
+            80,
+            7
+          ]
+        },
+        {
+          "id": "grove",
+          "kind": "wood",
+          "min": [
+            12,
+            80,
+            12
+          ],
+          "max": [
+            25,
+            93,
+            17
+          ]
+        }
+      ],
+      "farmAreas": [
+        {
+          "id": "wheat",
+          "min": [
+            2,
+            80,
+            18
+          ],
+          "max": [
+            8,
+            80,
+            24
+          ]
+        }
+      ],
+      "buildPlots": [
+        {
+          "id": "shelter-1",
+          "origin": [
+            28,
+            80,
+            24
+          ],
+          "blueprint": "shelter"
+        },
+        {
+          "id": "shelter-2",
+          "origin": [
+            36,
+            80,
+            24
+          ],
+          "blueprint": "shelter"
+        }
+      ],
+      "protectedAreas": [
+        {
+          "id": "stores",
+          "min": [
+            5,
+            79,
+            5
+          ],
+          "max": [
+            9,
+            81,
+            7
+          ]
+        }
+      ],
+      "frontiers": [
+        {
+          "id": "outskirts",
+          "min": [
+            28,
+            80,
+            34
+          ],
+          "max": [
+            44,
+            84,
+            44
+          ]
+        }
+      ],
+      "redstone": [
+        {
+          "control": [
+            4,
+            80,
+            32
+          ],
+          "lamp": [
+            4,
+            79,
+            32
+          ],
+          "piston": [
+            5,
+            79,
+            32
+          ],
+          "head": [
+            5,
+            80,
+            32
+          ]
+        }
+      ]
+    }
+  ]
+}

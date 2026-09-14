@@ -1,0 +1,5 @@
+name: MultiplexorObserver
+version: '1.0.0'
+main: dev.multiplexor.observer.PaperObserver
+api-version: '1.21'
+description: Local snapshots of session, world and JVM measurements.

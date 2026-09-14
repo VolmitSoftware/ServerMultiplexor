@@ -264,6 +264,13 @@ extension _NativeRecoveryCommands on NativeCommandService {
     Map<String, String> options,
     _NativeIoBuffer io,
   ) async {
+    _ensureNetworkDetached(profile, name, action: 'updating it');
+    if (_serverSource(profile, name)['type'] == 'velocity') {
+      throw _NativeCommandException(
+        'Velocity updates require recreating the stopped network with the selected proxy jar.',
+        2,
+      );
+    }
     if (!_instanceExists(profile, name)) {
       throw _NativeCommandException('Instance not found: $name', 2);
     }
@@ -841,8 +848,23 @@ extension _NativeRecoveryCommands on NativeCommandService {
     _NativeIoBuffer io,
   ) async {
     _validateSimpleName(instance, label: 'instance');
+    _ensureNetworkDetached(profile, instance, action: 'restoring a backup');
     final _BackupEntry backup = _findBackup(profile, id, instance: instance);
     _backupVerify(backup);
+    final File snapshotSource = File(
+      p.join(backup.path, 'snapshot', '.server-source'),
+    );
+    if (snapshotSource.existsSync() &&
+        snapshotSource.readAsLinesSync().any(
+          (String line) =>
+              line.startsWith('network=') &&
+              line.substring(8).trim().isNotEmpty,
+        )) {
+      throw _NativeCommandException(
+        'This snapshot contains network forwarding settings. Restore a snapshot taken before attachment or after detachment.',
+        2,
+      );
+    }
     if (_instanceExists(profile, instance)) {
       _ensureUnlocked(profile, instance, action: 'restored');
     }

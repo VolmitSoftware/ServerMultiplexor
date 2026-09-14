@@ -86,6 +86,14 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 Local instance cards include **BACKUPS** for creating, verifying, and restoring snapshots, and **RUNTIME** for per-instance Java, heap, presets, compatibility checks, and template export. The workspace card includes **DIAGNOSTICS** and **TEMPLATES**. New offers saved templates when available; templates apply runtime settings only to the new instance.
 
+An isolated Local instance's **RUNTIME → Run bot swarm** action selects idle, wander, redstone, workshop, mixed, stress, or a custom JSON recipe. Choose the bot count, duration, seed, activity radius, placement, origin, and scripted chat. Stress also offers a JSON workload, coordinate bounds, activity goals, and duration or goal completion. The wizard shows persistent arena changes before starting. A stopped target is prepared for offline loopback access, started for the run, and stopped afterward; an already running target stays running.
+
+**RUNTIME → Persistent player sessions** offers the five bundled profiles or a custom JSON path and lists previous runs. Before starting, review identities, concurrency, session lengths, goals, world bounds, and required fixture setup. Select a run to view player activity, stop and save, resume, or read its report. Offline Velocity networks expose the same action in their network menu. Session runs continue when the wizard closes. The wizard starts stopped targets and stops only those targets when the run ends.
+
+Velocity networks appear as trees in the Local dashboard. A `Velocity / <network>` parent shows the proxy port, followed by `├─` and `└─` backend rows with their ports. Each row keeps its own state and metrics. Select a parent or child to open its instance actions. The selected panel identifies the network and route. An asterisk marks an active network instance. ASCII terminals use `|-` and `` `- `` branches. Standalone servers keep their ordinary rows. Keyboard focus and checked instances stay attached to their instance identities when the tree changes.
+
+The Local plugin workspace card also includes **NETWORKS** (`v` while the card is open). Create a Velocity network from a checklist of compatible stopped servers, choose its entry server, port, and local or LAN access, then download Velocity or select a local jar. A network menu shows its join address, state, and connected player count from the proxy, with start, stop, restart, proxy console, status, and configuration checks. An unavailable player count is shown separately from zero players. Stop the whole network to add or remove backends, edit the entry server and fallback order, change the proxy bind/port, repair configuration, or delete the network. Velocity plugin sync only requires the proxy to be stopped. Deleting restores backend settings and retains server and proxy files.
+
 **UPDATE** prepares a candidate, backs up the instance, starts an isolated loopback staging copy, and promotes the exact tested artifact after a Minecraft status response. Jar and Forge/NeoForge installer updates use this flow. Custom servers accept a replacement jar and an explicit Minecraft version. Promotion checks the original server too, restores the prior running/stopped state, and rolls back on startup failure. Status checks do not prove plugin loading or gameplay behavior.
 
 The port picker includes custom entry across 1–65535, an available-port choice, and labels for ports configured on other instances across consumers.
@@ -127,6 +135,7 @@ Independent builds, repository syncs, addon preparation, Remote fleet polling, D
 - **Consumer profile** — one of `plugin`, `forge`, `fabric`, `neoforge`. Each profile has its own instances, dropin sources, and build cache. The active profile is set with `consumer use`. Mohist is the explicit hybrid exception: it is Forge-owned and can subscribe to plugin-consumer dropins.
 - **Instance** — one server install inside a consumer. Lives at `consumers/<profile>/instances/<name>` (or under `~/.multiplexor/instance-store/...` if the workspace path contains `[` or `]`). Metadata is in `.server-source` (type, launch mode, jar path, isolation, Mohist dropin sources, and lock state + hashed PIN).
 - **Active instance** — the default target when an instance name is omitted. Set with `instance activate`.
+- **Network** — one local Velocity proxy and a group of plugin-consumer backends. Players join the proxy address and switch routing names with `/server`. Each backend belongs to at most one network; unrelated standalone servers and multiple networks can coexist.
 - **Dropins** — plugin or mod jars under `consumers/<profile>/dropins/plugins` or `consumers/<profile>/dropins/mods`. On `runtime start` and via the watcher, these jars are copied into subscribed instances. Mohist records whether it tracks Forge mods, plugin-consumer plugins, or both, placing them in separate `mods/` and `plugins/` folders. Automatic sync tracks the last synchronized SHA-256 per instance: it updates untouched jars but preserves and warns about unknown or locally modified jars. An explicit `plugins sync` or `mods sync` remains authoritative and replaces them.
 - **Isolated instance** — opts out of all shared state: no dropin sync, no Iris pack symlink, no shared `ops.json` merge. Created with `server create --isolated` or toggled later with `instance isolated <name> true`.
 - **Shared plugin data** — `consumers/plugin-consumers/shared-plugin-data/` holds Iris packs and a merged `ops.json` for non-isolated plugin instances.
@@ -260,15 +269,46 @@ Single `server create` and `build <type>` commands must run under the consumer t
 
 `<type>` is one of: `paper`, `purpur`, `folia`, `canvas`, `leaf`, `spigot`, `forge`, `mohist`, `fabric`, `neoforge`. `leaf` is a high-performance Paper fork. Mohist is a Forge/Bukkit hybrid owned by the `forge` consumer and launches directly from its downloaded jar. For `forge` / `neoforge`, an installer jar triggers args-file launch mode automatically.
 
+### network — Velocity proxy and connected servers
+
+Networks currently support the Local `plugin` consumer with Paper, Purpur, Folia, Canvas, and Leaf backends on Minecraft 1.19 or newer. Spigot, custom servers, mod consumers, and Remote backends are not supported. Velocity uses modern player forwarding and a generated secret shared with its backends. The proxy authenticates players; backends use offline authentication and bind to loopback so players cannot bypass the proxy from another machine.
+
+Creation requires stopped backend instances. It creates a proxy instance named `<name>-proxy`, downloads Velocity unless `--jar` is supplied, assigns distinct backend ports, and preserves the backend settings it changes. Networks default to `127.0.0.1:25565`; use `--bind 0.0.0.0` for LAN access and connect with the host computer's address. `--offline` is restricted to isolated loopback QA and cannot expose an unauthenticated LAN proxy.
+
+| Command | What it does |
+|---------|--------------|
+| `network list [--json]` | List network definitions in the plugin consumer. Bare `network` runs this command. |
+| `network candidates [--json]` | List stopped, compatible backends that do not already belong to a network. |
+| `network recover` | Restore the original files after an interrupted configuration operation. All affected instances must be stopped. |
+| `network create <name> --members <a,b> --default <alias> [--proxy velocity] [--port <port>] [--bind <127.0.0.1\|0.0.0.0>] [--fallback <a,b>] [--jar <path>] [--proxy-version <version>] [--offline]` | Create the proxy and configure modern forwarding for the selected backends. Initial routing aliases match instance names. |
+| `network add <name> <instance> [--alias <alias>] [--port <port>]` | Add a stopped compatible backend, with an optional routing alias and fixed backend port. |
+| `network remove <name> <alias>` | Detach a backend and restore its saved network settings. Remove its entry/fallback references first. |
+| `network configure <name> [--default <alias>] [--fallback <a,b>] [--port <port>] [--bind <127.0.0.1\|0.0.0.0>]` | Change entry/fallback routing and proxy listening settings. Use `--fallback none` to clear fallback servers. |
+| `network start <name> [--timeout <seconds>]` | Validate configuration, start stopped backends, wait for readiness, then start the proxy. Already running members remain running. |
+| `network stop <name>` | Stop the proxy before stopping its backends. |
+| `network restart <name> [--timeout <seconds>]` | Stop and restart the network in dependency order. |
+| `network status <name> [--json]` | Show network and process states, ports, connected players from the proxy, and detected issues. JSON `playersOnline` is `null` when unavailable. |
+| `network check <name> [--json]` | Validate membership, forwarding configuration, and ports. |
+| `network repair <name>` | Reapply managed network settings after configuration drift. Requires stopped members and an intact forwarding secret; preserves unrelated keys and original backend snapshots. |
+| `network console <name>` | Open the proxy console. |
+| `network plugins-sync <name>` | Copy Velocity plugin jars from `consumers/plugin-consumers/dropins/velocity/` into this stopped proxy. Backends may remain running. |
+| `network delete <name> --confirm <name>` | Restore backend network settings and delete the network definition. Retain backend worlds and proxy files; remove unwanted instances separately. |
+
+Membership, routing, and configuration repair require the whole network to be stopped. Plugin sync requires only the proxy to be stopped. Network ports stay fixed; startup reports a conflict instead of silently changing a route. Managed members cannot be reset, cloned, deleted, restored, or updated independently until detached. Ordinary runtime controls and logs remain available for each process. Velocity plugins use their own dropin source; Bukkit plugin dropins are never copied into the proxy. Proxy TPS and player counts are omitted from the fleet aggregate to avoid counting the same players twice.
+
+An interrupted configuration operation blocks further network commands until `network recover` restores its original files. The wizard offers recovery and retry when it cannot load networks. Backups containing active network forwarding metadata cannot be restored independently, even after detaching the instance; use a backup made before joining or after leaving a network.
+
+For manual changes to managed settings, stop the network, inspect `network check <name>`, then use `network repair <name>` to reapply its saved routing and forwarding settings. Repair preserves the forwarding secret and does not rotate it. Restore a missing or unreadable secret manually before repair.
+
 ### runtime — start, stop, attach
 
 Consumer settings provide defaults. Each instance can override Java, heap, JVM preset, and console settings in `.multiplexor-runtime.env`; `--instance <name>` scopes a settings command to that instance. Resetting instance settings removes only its overrides. Environment variables `JAVA_EXECUTABLE`, `HEAP_SIZE`, `JVM_PROFILE`, and `JVM_ARGS` take precedence.
 
 Before installation or startup, Multiplexor checks the selected Java executable and the known Minecraft minimum. Minecraft 1.17 needs Java 16, 1.18 needs Java 17, 1.20.5 and later 1.x releases need Java 21, and 26.x releases need Java 25. Loader and plugin requirements can be stricter; an unknown Minecraft version is reported as unchecked. `runtime settings check --instance <name>` shows the effective executable and compatibility result.
 
-macOS/Linux runtimes use named `tmux` sessions. `Tab` is passed through to the server; Paper, Purpur, Folia, Canvas, and Leaf retain their native JLine/Brigadier completion for real server/plugin commands and current player names even with Multiplexor's minimal console format. Windows uses a native background host built into `multiplexor.exe`, so the release executable does not require Git Bash, `sh`, `chmod`, or `tmux`. Runtime output is captured under `consumers/<profile>/state/runtime/<instance>.log`; the Minecraft server also writes `logs/latest.log` inside its instance. Windows consoles show live runtime logs in a native terminal grid and send commands to the selected server through its configured RCON connection.
+macOS/Linux runtimes use named `tmux` sessions. `Tab` is passed through to the server; Paper, Purpur, Folia, Canvas, and Leaf retain their native JLine/Brigadier completion for real server/plugin commands and current player names even with Multiplexor's minimal console format. Windows uses a native background host built into `multiplexor.exe`, so the release executable does not require Git Bash, `sh`, `chmod`, or `tmux`. Runtime output is captured under `consumers/<profile>/state/runtime/<instance>.log`; the Minecraft server also writes `logs/latest.log` inside its instance. Windows consoles show live runtime logs in a native terminal grid. Commands use RCON for game servers and an authenticated loopback connection to the native host for Velocity.
 
-Startup preserves the configured server port when it is available and not reserved by another running instance. If it conflicts, Multiplexor selects a free port starting at 25565. Failed bind checks, including Windows address-in-use errors, exclude that port from selection.
+Startup preserves the configured server port when it is available and not reserved by another running instance. If a standalone instance conflicts, Multiplexor selects a free port starting at 25565. Network proxy and backend ports remain fixed and conflicts fail startup. Failed bind checks, including Windows address-in-use errors, exclude that port from selection.
 
 In the Windows grid, `Tab` selects the next console; left/right also switch consoles when the command line is empty. Type a command and press `Enter` to send it. `Esc` or `Ctrl-C` returns to the dashboard while the servers keep running. Without an interactive terminal, console commands print the runtime log paths.
 
@@ -276,7 +316,7 @@ In the Windows grid, `Tab` selects the next console; left/right also switch cons
 |---------|--------------|
 | `runtime watch [--once]` | Open the [live monitor](#live-monitor): full-screen charts over every instance, clickable action bars, and the wizard's flows behind the cards and `n` / `b` / `c`. `--once` sweeps metrics once, prints a single colorless frame to stdout, and exits — no TTY needed and no escape bytes, so it pipes and diffs cleanly. |
 | `runtime start [instance] [--no-console]` | Safely sync dropins and start the instance, then open its console unless `--no-console`: tmux on macOS/Linux, a native terminal view on Windows. Locally modified instance jars are preserved with a warning. |
-| `runtime stop [instance] [--graceful\|--force]` | Send `stop` through tmux on macOS/Linux or RCON on Windows, allowing up to five seconds before forcing termination. `--graceful` is the default; `--force` skips the wait. Restart, delete, and reset use the same five-second stop policy. |
+| `runtime stop [instance] [--graceful\|--force]` | Send `stop` to game servers or `end` to Velocity, allowing up to five seconds before forcing termination. Commands use tmux on macOS/Linux, or RCON/native host control on Windows. `--graceful` is the default; `--force` skips the wait. Restart, delete, and reset use the same five-second stop policy. |
 | `runtime restart [instance] [--no-console]` | Stop and start again, then open its console unless `--no-console`. |
 | `runtime console [instance]` | Start the runtime if needed and open its console: tmux on macOS/Linux, native live logs and command input on Windows. |
 | `runtime consoles` | Open all running consoles in a tmux grid on macOS/Linux or a native terminal grid on Windows. |
@@ -311,14 +351,189 @@ Every gameplay run starts a first-person Prismarine web feed on a free loopback 
 | `gameplay setup` | Install the pinned Mineflayer, pathfinder, and Prismarine Viewer dependencies with `npm ci`. |
 | `gameplay doctor [--json]` | Verify Node and the pinned gameplay dependency versions. |
 | `gameplay list [--json]` | List built-in scenarios. |
+| `gameplay swarm-profiles [--json]` | List the available deterministic swarm behavior profiles. |
+| `gameplay sessions validate <profile.json> [--instance <name>] [--network <name>] [--prepare] [--json]` | Validate the profile, routes, identities, and target without changing it. `--prepare` previews offline loopback preparation of a stopped standalone instance. Exactly one target selector is required. |
+| `gameplay sessions start <profile.json> [--instance <name>] [--network <name>] [--prepare] [--start] [--stop-after] [--startup-timeout <seconds>] [--viewer-port <port>] [--no-viewer] [--json]` | Start a detached persistent simulation and print its run ID. `--prepare` applies only to a stopped standalone instance. `--start` starts stopped targets; `--stop-after` stops only processes started by this run. Startup timeout defaults to 180 seconds. Exactly one target selector is required. |
+| `gameplay sessions list [--json]` | List runs for the selected consumer, with target, population, host state, and artifact paths. |
+| `gameplay sessions status <run> [--json]` | Show host cleanup state, player activities and waiting reasons, project progress, measurements, and the current viewer URL. |
+| `gameplay sessions stop <run> [--json]` | Request bounded action cancellation, save a checkpoint, disconnect workers, and finish owned runtime cleanup. Waits up to 45 seconds; a nonzero result with `active: true` means cleanup is still pending. |
+| `gameplay sessions resume <run> [--json]` | Resume the same identities and evolving world from its checkpoint. Rejects an active run, changed profile, changed target, or reset world identity. Retains the original startup and cleanup policy. |
+| `gameplay sessions report <run> [--json]` | Read the final worker report with the supervisor's cleanup result. |
+| `gameplay swarm <idle\|wander\|redstone\|workshop\|mixed\|stress\|plan.json> [instance] [--instance <name>] [--bots <1-256>] [--duration <seconds>] [--seed <uint32>] [--join-interval <milliseconds>] [--radius <4-64>] [--prefix <name>] [--build-arena] [--origin <x,y,z>] [--scatter <8-4096>] [--workload <path.json>] [--bounds <minX,minY,minZ:maxX,maxY,maxZ>] [--goals <activity=count,...>] [--completion <duration\|goals>] [--chat] [--prepare] [--start] [--stop-after] [--startup-timeout <seconds>] [--connect-timeout <seconds>] [--action-timeout <seconds>] [--version <version>] [--viewer-port <port>] [--no-viewer] [--json]` | Run a bounded group of ordinary-player bots on an isolated, offline, loopback-only standalone instance. Network members and proxies are refused. |
 | `gameplay prepare [instance] [--instance <name>]` | Prepare a stopped, isolated instance for loopback-only offline bot authentication. |
 | `gameplay run <scenario> [instance] [flags]` | Run a built-in name or `.mjs` scenario. Supports `--scenario`, `--instance`, `--profiles-folder`, `--version`, `--auth`, `--startup-timeout`, `--connect-timeout`, `--assertion-timeout`, `--prepare`, `--start`, `--stop-after`, `--username`, `--timeout`, `--command`, `--expect`, `--effect`, `--viewer-port`, `--no-viewer`, `--no-op`, and `--json`. |
 
 The built-in `connect` scenario validates login, spawn, position, health, and connection stability. `command` requires `--command` plus an `--expect` regular expression. `effect` optionally runs `--command` and requires the named `--effect`. Custom modules default-export `{ name, description, async run(context) }`; the context supplies `bot`, `step`, `expect`, `command`, `waitForEvent`, `waitForMessage`, `sleep`, server metadata, and a safe-by-default pathfinder configuration.
 
+Swarm behavior comes from function-based recipes. Built-in profiles idle, wander, interact with redstone, or perform workshop tasks; `mixed` combines activities. JSON plans can coordinate phases of walking, teleportation, mining, building, interaction, and scripted chat. Custom plans and stress workloads are validated before any server preparation or startup. `--chat` enables scripted progress messages. `--scatter` distributes workers evenly across a grid around the origin and finds the terrain height; it cannot be combined with `--build-arena` or the `stress` profile.
+
+Swarm defaults are 4 bots, 60 seconds, seed 1, a 1,000 ms join interval, radius 16, and origin `0,80,0`. Bot count accepts 1–256. Duration accepts 1–604,800 seconds (seven days); join interval accepts 100–10,000 ms; seeds accept 0–4,294,967,295. Startup, connection, and action timeouts default to 180, 30, and 15 seconds, with limits of 1–3,600, 1–300, and 1–120 respectively. Numeric options use decimal integers. A generated per-run prefix keeps worker names separate; an explicit `--prefix` accepts 1–12 letters, numbers, or underscores, followed by worker suffixes `01` through `256`. Existing operator identities are rejected. One swarm may run on an instance at a time. The server needs enough free player slots for every worker plus one temporary controller when setup requires it.
+
+`workshop` and `mixed` require explicit `--build-arena`. Arena setup replaces a square of `12 × ceil(sqrt(bots))` blocks per side starting at `--origin`: the floor is at origin Y, worker feet are at Y+1, and the five blocks above the floor are cleared. Each worker gets a 12×12 tile with setup materials and an iron pickaxe. These changes remain after the run. Origin coordinates are integers, X/Z within ±29,999,000 and Y from -48 through 256. Use a disposable world or make a stopped backup first.
+
+Workers never receive operator access. Arena, custom-plan, and stress workers use survival mode; other runs retain the server-assigned game mode. Only a separate temporary controller receives operator access for arena setup, scattering, a custom plan, or stress workloads; Multiplexor revokes that access in cleanup, including failed runs. Runs without those operations do not grant operator access. `--stop-after` stops only a server started by the same run. Viewer URLs, reports, and runtime-log references use the existing gameplay artifact directory, and the viewer closes when the run ends.
+
+Ctrl+C and termination signals interrupt the Node runner, wait for its bot/viewer cleanup, then revoke the controller's access. Cancellation returns a nonzero exit code and keeps the same server ownership rules as an ordinary run.
+
+The `stress` profile runs repeated activity jobs for extended tests. Role weights assign workers, and activity weights choose each worker's next job. A shared scheduler tracks completed goals, reserves targets, changes the active worker count on a schedule, and stops stalled or failing workloads. This is a reproducible synthetic workload. It is not a statistical model of average human players or a claim that this machine can sustain 256 clients for seven days.
+
+Without a workload file, `stress` uses patrol, exploration, chat, and idle periods in the existing world. With `--build-arena`, its default workload includes every supported activity. `--workload <path.json>` loads a workload with custom roles, pacing, targets, goals, and load stages. Stress always requires one temporary controller in addition to the worker slots.
+
+Stress controls:
+
+| Control | Meaning |
+|---------|---------|
+| `--bounds minX,minY,minZ:maxX,maxY,maxZ` | Override the workload's allowed box. Integer X/Z coordinates stay within ±29,999,000, Y within -48–256, and corners must be ordered. The box must include worker feet, head space, and the complete arena when one is requested. |
+| `--goals mine=1000,build=1000` | Replace the workload's complete goal map. Counts are aggregate successful activity jobs across all workers, from 1–1,000,000,000 per activity. Every goal needs an enabled activity. |
+| `--completion duration` | Run until the duration expires. Goal counts remain acceptance requirements. |
+| `--completion goals` | Stop after all goals pass. The duration remains a hard deadline, and unmet goals fail the run. |
+| `--workload path.json` | Select a stress workload. This file is separate from a coordinated phase plan. |
+
+These four controls require `stress`. CLI bounds, goals, and completion override the corresponding workload fields. Without explicit bounds, an arena uses its complete footprint and height. An outdoor workload uses origin ± radius in X/Z and Y from -48 to 256. `--scatter` is not available for stress. Use bounds and patrol or exploration jobs to control where activity occurs.
+
+Stress workload JSON requires `schemaVersion: 1`, a printable `name`, and `roles`. The validator rejects unknown fields. Optional fields use these defaults and limits:
+
+| Field | Shape and rules |
+|-------|-----------------|
+| `bounds` | `{"min":[x,y,z],"max":[x,y,z]}`. Uses the same coordinate limits as `--bounds`. |
+| `roles` | 1–32 objects with a unique `name`, a positive `weight` (default 1), and an `activities` map. Role and activity weights accept integers up to 10,000; zero activity weights disable that activity. |
+| `goals` | An activity-to-count map, default `{}`. |
+| `completion` | `"duration"` (default) or `"goals"`. Goal completion requires a nonempty goal map. |
+| `pacing` | `{"minMs":250,"maxMs":1750}`. A seeded pause between jobs, from 0–60,000 ms. |
+| `failurePolicy` | `{"maxConsecutive":5,"maxTotal":100}`. Limits consecutive worker failures and total failed jobs. |
+| `schedule` | `[{"atSeconds":0,"activeBots":4}]`. Starts at zero and increases by time, with 1–256 stages before the run deadline. Active counts range from zero to `--bots`. |
+| `reportIntervalSeconds` | Aggregate report interval, default 10, from 1–3,600 seconds. |
+| `stallTimeoutSeconds` | Progress deadline, default 120, from 5–3,600 seconds. |
+| `targets` | Maps `mine`, `build`, `redstone`, `farm`, or `storage` to 1–2,048 distinct `[x,y,z]` positions inside bounds. Enabled target activities require positions when no arena is requested. |
+| `messages` | 1–128 plain chat messages, at most 160 characters each. Supports `{bot}`, `{index}`, `{role}`, `{activity}`, and `{completed}`. Slash commands are rejected. |
+
+| Activity | Repeated player work |
+|----------|----------------------|
+| `patrol` | Short local routes of roughly 2–8 blocks. |
+| `explore` | Routes of roughly 2–32 blocks that follow headings across the allowed area. |
+| `mine` / `build` | Workers share stone targets. Mining frees a target; building refills it. Target leases prevent conflicting edits. |
+| `redstone` | Lever, button, and pressure-plate interactions with observed state changes. |
+| `farm` | Grow wheat with bone meal when needed, harvest it, and plant seeds again. |
+| `craft` | Craft oak planks from logs, then sticks, with inventory confirmations. |
+| `storage` | Open a chest or barrel, deposit eight cobblestone, and withdraw it. A target lease covers the full transaction. |
+| `chat` | Send a scripted plain message and wait for its server echo. |
+| `idle` | Pause between periods of activity. |
+
+Stress workers use survival mode and eat when hungry. The controller supplies missing materials and removes excess test outputs to keep inventories usable. The report separates support operations from successful player activity. The stress arena adds a chest, crafting table, wheat field, water, and shared work blocks to the ordinary tiles. Without `--build-arena`, targets must identify existing fixtures. Farming edits wheat and mining/building edit the supplied stone targets. Block and inventory changes remain after the run.
+
+Final reports and periodic checkpoints include role assignments, active worker counts, goals, successful/skipped/failed jobs, walking distance, and action latency histograms. `newChunkVisits` counts per-worker destination chunks absent from that worker's last 4,096 destinations; it is not a global unique-chunk count. Reported p50/p95 values are histogram bucket upper bounds. Node process memory, CPU, and event-loop measurements describe the load generator. Correlate them with server runtime logs and server metrics to identify the bottleneck. Reports retain bounded event and metric history for long runs.
+
+Goal counts are minimum requirements. Goal mode favors unmet quotas while continuing other enabled activities, so builders can replenish mining targets after their own quota passes. Execution uses the existing [Mineflayer inventory, crafting, and interaction APIs](https://github.com/PrismarineJS/mineflayer/blob/master/docs/api.md) and [pathfinder movement exclusions](https://github.com/PrismarineJS/mineflayer-pathfinder#exclusionareasstep); role selection and coordination use deterministic functions.
+
+Supported activity keys are `patrol`, `explore`, `mine`, `build`, `redstone`, `farm`, `craft`, `storage`, `chat`, and `idle`. The workload must enable at least one activity other than idle. A schedule changes which connected workers perform jobs. It does not repeatedly reconnect clients. Join pacing remains controlled by `--join-interval`. Workload files cannot exceed 256 KiB.
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "Overnight arena activity",
+  "roles": [
+    {"name": "builder", "weight": 2, "activities": {"build": 4, "mine": 4, "patrol": 2, "chat": 1}},
+    {"name": "operator", "weight": 1, "activities": {"redstone": 4, "farm": 3, "craft": 2, "storage": 2, "patrol": 2}}
+  ],
+  "pacing": {"minMs": 250, "maxMs": 1500},
+  "goals": {"mine": 1000, "build": 1000, "redstone": 1000},
+  "completion": "duration",
+  "schedule": [
+    {"atSeconds": 0, "activeBots": 4},
+    {"atSeconds": 300, "activeBots": 8},
+    {"atSeconds": 900, "activeBots": 16},
+    {"atSeconds": 1800, "activeBots": 32}
+  ],
+  "failurePolicy": {"maxConsecutive": 5, "maxTotal": 100},
+  "reportIntervalSeconds": 10,
+  "stallTimeoutSeconds": 120
+}
+```
+
+Run this workload with `--bots 32 --duration 43200 --build-arena`. The bundled [mixed endurance workload](MultiplexorApp/tool/mineflayer/workloads/mixed-endurance.json) includes three roles and eight hours of load stages. [Outdoor endurance](MultiplexorApp/tool/mineflayer/workloads/outdoor-endurance.json) uses a bounded existing world. [Mixed goals](MultiplexorApp/tool/mineflayer/workloads/mixed-goals.json) stops after its activity quotas pass. Start with a smaller run and compare action throughput, latency, failed jobs, process memory, and server metrics before increasing the population. Bot pathfinding and protocol handling also consume CPU and memory on the generator machine.
+
+Custom JSON plans contain a `name` and 1–128 `phases`. Each phase has an `action`, optional `actors` (distinct worker numbers from 1 through `--bots`), and its action fields below. Omitting `actors` selects every worker. Position jobs are distributed round-robin among the selected workers; the next phase waits until every selected worker has completed its current jobs. `--duration` is a hard deadline for the complete plan.
+
+| Action | Fields | Behavior |
+|--------|--------|----------|
+| `teleport` | `positions: [[x,y,z], ...]` | Controller teleports workers; Y is the worker's feet coordinate. |
+| `walk` | `positions: [[x,y,z], ...]` | Workers pathfind to assigned targets. |
+| `mine` | `positions: [[x,y,z], ...]` | Workers receive iron pickaxes and mine the assigned blocks. |
+| `build` | `positions: [[x,y,z], ...]`, `block: "stone"` | Controller supplies materials; workers place the assigned block type. |
+| `interact` | `positions: [[x,y,z], ...]` | Workers interact with the assigned blocks. |
+| `scatter` | `radius: 8–4096` | Controller distributes selected workers over terrain around the run origin. |
+| `chat` | `messages: ["Worker {index} ready", ...]` | Workers send plain messages; `{bot}`, `{index}`, and `{phase}` expand to their current values. Slash commands are rejected. |
+| `wait` | `seconds: 0.1–300` | Wait before the next coordinated phase. |
+
+Positions are integer world coordinates, bounded like `--origin`, with 1–1,024 distinct positions per phase. Scatter origin plus radius must remain inside the X/Z bounds. Plans use an existing world fixture and cannot pass `--build-arena`; create the fixture in a separate run. The [four-worker coordinated demo](MultiplexorApp/tool/mineflayer/plans/coordinated-demo.json) expects four arena tiles at origin `0,80,0` and includes teleport, walking, building, mining, interaction, and chat phases.
+
+```json
+{
+  "name": "Two worker readiness",
+  "phases": [
+    {"action": "teleport", "actors": [1, 2], "positions": [[2, 81, 5], [14, 81, 5]]},
+    {"action": "chat", "actors": [1, 2], "messages": ["Worker {index} reached its station."]},
+    {"action": "walk", "actors": [1, 2], "positions": [[6, 81, 6], [18, 81, 6]]}
+  ]
+}
+```
+
 The harness pins bleeding-edge [Mineflayer commit `f603758e`](https://github.com/PrismarineJS/mineflayer/commit/f603758e4228a7e61d1337526e6066e79308b976), which identifies itself as version 4.38.0 and requires Node 22+. It supports vanilla Java protocols through 26.1. Minecraft 26.2 is outside its tested protocol range. Gameplay results prove protocol-visible behavior, not client rendering, resource packs, sound, camera behavior, client mods, or human feel.
 
 For protocol QA with this dependency set, create an isolated 1.21.11 server instead of using a 26.2 instance. A passing doctor check verifies the harness installation; it does not make an unsupported server protocol compatible.
+
+#### Persistent player sessions
+
+`gameplay sessions` models persistent identities with separate online sessions. Players join, leave, return, eat, store supplies, gather resources, craft, build verified structures, and visit their social group. A seeded population scheduler controls actual connections independently of action completion. Role functions coordinate through project requirements and bounded reservations. Saved intent survives reconnects; Minecraft remains authoritative for inventory, position, and world state. No AI service is involved.
+
+Session JSON is separate from a swarm plan or stress workload. The validator rejects unknown fields and profiles over 1 MiB. Bundled profiles provide complete world descriptions:
+
+| Profile | Purpose |
+|---------|---------|
+| [Settlement](MultiplexorApp/tool/mineflayer/session-profiles/settlement.json) | One hour, eight persistent identities, four concurrent players, real resource delivery and construction. Creates a disposable settlement fixture. |
+| [Settlement goals](MultiplexorApp/tool/mineflayer/session-profiles/settlement-goals.json) | Four players construct two shelters and meet resource-transfer goals, with a one-hour deadline. |
+| [Dispersed established world](MultiplexorApp/tool/mineflayer/session-profiles/dispersed-established.json) | Eight-hour template for two prepared bases separated by 256 blocks. Requires an existing baseline. |
+| [Frontier](MultiplexorApp/tool/mineflayer/session-profiles/frontier.json) | Four-hour exploration template for an existing starting base and surrounding terrain. Requires an existing baseline. |
+| [Velocity settlement](MultiplexorApp/tool/mineflayer/session-profiles/velocity-settlement.json) | Settlement work through a proxy, with lobby visits and backend switches. Edit `lobby` and `survival` aliases to match the network. |
+
+The existing-world templates describe the fixtures they expect; they do not create a mature server world. Restore a representative baseline before a comparison, and use `resume` to continue the same evolving world. A checkpoint is not a world backup. Each run copies its normalized profile and records world identity markers inside the target's world directory.
+
+| Profile field | Shape and meaning |
+|---------------|-------------------|
+| `schemaVersion`, `name`, `seed` | Version `1`, a printable name, and a seeded decision stream. Reproduces decisions and schedules, not identical concurrent server execution. |
+| `durationSeconds`, `completion`, `goals` | Duration is 1–604,800 seconds. Completion is `duration` or `goals`; duration remains the deadline. Goals are minimum verified counters. |
+| `population.identities`, `concurrent` | Persistent roster size, 1–256, and initial intended population. A roster can exceed concurrent connections. |
+| `population.usernamePrefix` | Stable 1–12 character letters/digits/underscore prefix; names append `001` onward. Choose distinct prefixes for independent populations. Existing operator identities are refused. |
+| `population.arrivalIntervalSeconds` | Minimum spacing between connection attempts, including setup controllers, returning players, and retries. Scheduling is independent of action completion, and slow handshakes can overlap. Choose an interval that respects the configured proxy/server login limit; the Velocity profile uses four seconds. |
+| `population.sessionSeconds`, `offlineSeconds` | `[minimum, maximum]` ranges for online sessions and time before returning. |
+| `population.stages` | Increasing `{ "atSeconds": 300, "concurrent": 8 }` population stages. Changes connections, including departures when the target falls. |
+| `population.groupSize` | Size of stable social groups. Meetings have bounded attendance waits. |
+| `population.minimumAchievedFraction` | Optional minimum fraction of requested player-time that must reach the playing state. Leaving it unset records achieved load without making it an acceptance limit. |
+| `playerRoles`, `playerWorlds` | Cycling role names and world IDs assigned to roster identities. Roles: `miner`, `lumberjack`, `builder`, `farmer`, `crafter`, `courier`, `explorer`, `social`, `mechanic`. Construction worlds require assigned producers and builders. |
+| `pacing` | `minSeconds` and `maxSeconds` pauses between tasks. |
+| `recovery` | `maxConsecutiveFailures`, `maxTotalFailures`, `retrySeconds`, and death policy `respawn` or `retire`. Failures remain recorded when a player recovers. |
+| `timeouts` | `connectSeconds`, `actionSeconds`, and `settleSeconds`. Expired work must settle before a new owner uses the same target. |
+| `checkpointSeconds` | Atomic checkpoint interval, default 10 seconds. |
+| `worlds` | 1–32 named world agendas, described below. |
+| `network` | `routes` backend aliases and `switchEverySeconds: [minimum, maximum]`. Only valid against a Velocity target. |
+| `telemetry` | `required`, `maxAgeSeconds`, `warmupSeconds` (default 60), and optional `maxP95TickMs` / `maxP99TickMs` limits. Missing, stale, or warming-up measurements remain unavailable. |
+| `pluginActivities` | Optional server-specific commands and guarded inventory-menu interactions, described below. |
+
+Supported goal counters are `projectsCompleted`, `blocksVerified`, `resourceTransfers`, `foodCrafted`, `sessionsCompleted`, `joins`, `switches`, `exploredChunks`, `gatherings`, `cropsHarvested`, and `pluginActions`. Counters measure different outcomes and must not be added into a single player-load score. Exploration counts distinct chunks visited by each player, capped at 2,048 per player and world without evicting older visits. It does not prove new terrain generation.
+
+Each world agenda specifies `id`, `backend`, `dimension`, `bounds: {min: [x,y,z], max: [x,y,z]}`, `home`, `storage`, `craftingTable`, and `meetingPoint`. `backend: "standalone"` resolves to the selected standalone or entry backend. `resourceAreas` describe named `mine` or `wood` boxes. `farmAreas`, `protectedAreas`, and `frontiers` describe named boxes. `buildPlots` contain an `id`, `origin`, and supported `blueprint`. `redstone` identifies existing controls and the blocks whose changes must be observed. Use the bundled files as complete examples. Regions constrain movement and edits; surrounding chunk simulation still depends on server settings.
+
+`setup: {"kind":"settlement","origin":[0,80,0]}` authorizes persistent fixture construction in the described area, plus initial starter supplies. `setup: {"kind":"existing"}` uses prepared fixtures and inventory. During the measured workload, workers collect and consume real resources; there is no recurring administrative replenishment or output clearing. Shortages, full storage, depleted resource regions, blocked paths, and completed build plots are visible waiting conditions. Fixture setup is skipped on resume.
+
+Velocity sessions require a managed, offline, loopback network with every proxy and backend isolated. They preserve modern forwarding and join through the proxy port. Destination verification uses fresh server-side routing evidence; a respawn event alone is insufficient. Inventories, reservations, and world agendas stay backend-specific. `--prepare` is refused for networks and their members. A run holds exclusive leases for all its target members and the proxy, shared with swarm ownership checks.
+
+Plugin activities use ordinary player commands and inventory operations. Each activity contains `id`, `backend`, optional `roles`, `everySeconds: [min,max]`, `timeoutSeconds`, and `command`. `expect` is a case-insensitive literal reply substring. `{player}` and `{id}` expand from the player identity. Optional `menu` contains `title`, `clicks: [{slot,item}]`, and `expect`: title and reply matching are literal, and every click checks the expected item in that slot. A menu mutation requires an expected reply. Configure activities for the installed plugins; no claim, economy, or shop behavior is assumed automatically.
+
+For server measurements, build the optional [session observer](MultiplexorApp/tool/session-observer/README.md) with `gradle -p MultiplexorApp/tool/session-observer clean test jar` and install its jar in the stopped QA proxy and backends. Session runs automatically read each local observer file. Measurements include tick-time percentiles, interval JVM CPU, heap/GC totals, loaded chunks, actual chunk generation, entities, and backend transitions. Unsupported measurements remain unavailable. Performance is reported as `measured` until tick-time acceptance limits are configured. Recorded breaches survive stop and resume. The observer README lists supported APIs and measurement limits.
+
+Artifacts live under `consumers/<profile>/state/gameplay-sessions/<run>/`: the copied `profile.json`, runtime `configuration.json`, supervisor `host.json` and `host.log`, worker `status.json`, atomic `checkpoint.json`, and final `report.json`. Reports separate workload goals, scheduled versus achieved population, operation latency, server performance, generator resources, and cleanup. `status` shows the active viewer URL; the viewer closes during cleanup. Startup failure rolls back processes started by that attempt. Ordinary completion retains started servers unless `--stop-after` was selected, and never stops preexisting servers.
+
+These are synthetic session profiles. Long configured durations are not evidence of endurance, and passing bot counts are not a human-player capacity rating. Compare against aggregate real-session behavior and server profiles on the same world and plugin stack before treating a mix as representative. Running the generator beside the server also shares CPU and memory.
 
 ### plugins / mods — dropin sources & sync
 
@@ -477,6 +692,65 @@ BuildTools work directories are roughly 700 MB of decompiled sources each and ar
 | `config status [instance]` | Print which config files are symlinked vs localized. |
 
 ## Common Workflows
+
+**Run a reproducible bot swarm**
+
+```bash
+./start.sh --consumer plugin server create swarm-qa --type paper --mc 1.21.11 --auto-build --isolated
+./start.sh --consumer plugin gameplay swarm wander swarm-qa --bots 8 --duration 120 --seed 42 --prepare --start --stop-after
+# Replace a bounded test area with workshop tiles, then exercise ordinary-player actions
+./start.sh --consumer plugin gameplay swarm mixed swarm-qa --bots 4 --duration 60 --build-arena --origin 0,80,0 --start --stop-after
+# Spread workers through the world and send scripted progress messages
+./start.sh --consumer plugin gameplay swarm wander swarm-qa --bots 8 --scatter 128 --chat --start --stop-after
+# Build the fixture, then run the bundled coordinated recipe
+./start.sh --consumer plugin gameplay swarm idle swarm-qa --bots 4 --duration 1 --build-arena --origin 0,80,0 --start --stop-after
+./start.sh --consumer plugin gameplay swarm MultiplexorApp/tool/mineflayer/plans/coordinated-demo.json swarm-qa --bots 4 --duration 60 --start --stop-after
+```
+
+**Run extended activity tests with bounds and goals**
+
+```bash
+# An eight-hour arena run with repeatable activity selection
+./start.sh --consumer plugin gameplay swarm stress swarm-qa --bots 16 --duration 28800 --seed 42 --build-arena --origin 0,80,0 --start --stop-after
+# Require completed work, stopping early once both goals pass
+./start.sh --consumer plugin gameplay swarm stress swarm-qa --bots 8 --duration 7200 --build-arena --goals mine=1000,build=1000 --completion goals --start --stop-after
+# Apply custom roles, pacing, load stages, and acceptance goals
+./start.sh --consumer plugin gameplay swarm stress swarm-qa --bots 32 --duration 28800 --workload MultiplexorApp/tool/mineflayer/workloads/mixed-endurance.json --build-arena --start --stop-after
+# Keep outdoor movement inside a coordinate box
+./start.sh --consumer plugin gameplay swarm stress swarm-qa --bots 8 --duration 3600 --origin 0,80,0 --bounds -128,60,-128:128,120,128 --start --stop-after
+```
+
+Increase the isolated server's `max-players` before launch to cover every worker, the controller, and any observers. For long runs, use a persistent terminal session. Final reports and periodic checkpoints stay in the consumer's `state/gameplay-tests/<instance>` directory. World edits remain after the run.
+
+**Run persistent cooperative sessions**
+
+```bash
+./start.sh --consumer plugin server create settlement-qa --type paper --mc 1.21.11 --auto-build --isolated
+./start.sh --consumer plugin gameplay sessions start MultiplexorApp/tool/mineflayer/session-profiles/settlement-goals.json --instance settlement-qa --prepare --start --stop-after
+# Use the printed run ID for these commands. Closing the wizard does not stop it.
+./start.sh --consumer plugin gameplay sessions list
+./start.sh --consumer plugin gameplay sessions status <run-id>
+./start.sh --consumer plugin gameplay sessions stop <run-id>
+./start.sh --consumer plugin gameplay sessions resume <run-id>
+./start.sh --consumer plugin gameplay sessions report <run-id> --json
+```
+
+For proxy sessions, create isolated `lobby` and `survival` backends and use `network create session-lab --members lobby,survival --default lobby --offline`. Start [Velocity settlement](MultiplexorApp/tool/mineflayer/session-profiles/velocity-settlement.json) with `--network session-lab --start --stop-after`. Do not add `--prepare` to network runs.
+
+**Connect two plugin servers with Velocity**
+
+```bash
+./start.sh --consumer plugin server create lobby --type paper --mc 1.21.11 --auto-build
+./start.sh --consumer plugin server create survival --type paper --mc 1.21.11 --auto-build
+./start.sh --consumer plugin network create dev --members lobby,survival --default lobby
+./start.sh --consumer plugin network check dev
+./start.sh --consumer plugin network start dev
+./start.sh --consumer plugin network status dev
+# Join localhost:25565, then use /server survival
+./start.sh --consumer plugin network stop dev
+```
+
+To allow LAN players, stop the network and run `./start.sh --consumer plugin network configure dev --bind 0.0.0.0`. To return its servers to standalone use, stop it and run `./start.sh --consumer plugin network delete dev --confirm dev`. Their saved backend connection settings are restored.
 
 **Pull, test locally, then push file changes**
 

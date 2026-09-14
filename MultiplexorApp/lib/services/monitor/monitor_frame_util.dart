@@ -17,6 +17,7 @@ import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
 import 'metric_sample.dart';
 import 'monitor_hitbox.dart';
+import 'monitor_network_tree.dart';
 
 /// The smallest terminal the dashboard will render into. Below either bound
 /// the frame degrades to [buildResizeRequiredFrame] rather than emitting a
@@ -61,6 +62,8 @@ class MonitorSnapshot {
     this.operationBlockReasons = const <String, String>{},
     this.captureError,
     this.lastSuccessfulCapture,
+    this.networkRows = const <String, MonitorNetworkRow>{},
+    this.networkTopologyStale = false,
   });
 
   /// Instance names in display order.
@@ -68,6 +71,8 @@ class MonitorSnapshot {
 
   final String? captureError;
   final DateTime? lastSuccessfulCapture;
+  final Map<String, MonitorNetworkRow> networkRows;
+  final bool networkTopologyStale;
 
   /// Metric history per instance, oldest sample first. An instance with no
   /// entry (or an empty list) has no readings yet and renders as such —

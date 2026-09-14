@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "name": "Verified mixed activity quotas",
+  "roles": [
+    { "name": "player", "weight": 1, "activities": { "patrol": 5, "explore": 2, "mine": 5, "build": 5, "redstone": 4, "farm": 2, "craft": 2, "storage": 3, "chat": 1, "idle": 1 } }
+  ],
+  "goals": { "patrol": 100, "mine": 100, "build": 100, "redstone": 100, "farm": 30, "craft": 20, "storage": 30, "chat": 8 },
+  "completion": "goals",
+  "pacing": { "minMs": 250, "maxMs": 1000 },
+  "failurePolicy": { "maxConsecutive": 5, "maxTotal": 100 },
+  "reportIntervalSeconds": 10,
+  "stallTimeoutSeconds": 120
+}

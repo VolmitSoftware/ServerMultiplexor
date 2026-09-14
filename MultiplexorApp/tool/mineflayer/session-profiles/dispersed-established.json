@@ -1,0 +1,380 @@
+{
+  "schemaVersion": 1,
+  "name": "Dispersed established settlement (requires prepared baseline)",
+  "seed": 42,
+  "durationSeconds": 28800,
+  "completion": "duration",
+  "goals": {
+    "projectsCompleted": 4,
+    "resourceTransfers": 300,
+    "foodCrafted": 16,
+    "sessionsCompleted": 16
+  },
+  "population": {
+    "identities": 8,
+    "concurrent": 8,
+    "usernamePrefix": "Base",
+    "arrivalIntervalSeconds": 2,
+    "sessionSeconds": [
+      600,
+      2400
+    ],
+    "offlineSeconds": [
+      60,
+      300
+    ],
+    "groupSize": 4
+  },
+  "playerRoles": [
+    "miner",
+    "lumberjack",
+    "builder",
+    "farmer"
+  ],
+  "playerWorlds": [
+    "west",
+    "west",
+    "west",
+    "west",
+    "east",
+    "east",
+    "east",
+    "east"
+  ],
+  "pacing": {
+    "minSeconds": 0.5,
+    "maxSeconds": 3
+  },
+  "recovery": {
+    "maxConsecutiveFailures": 8,
+    "maxTotalFailures": 100,
+    "retrySeconds": 5,
+    "death": "respawn"
+  },
+  "timeouts": {
+    "connectSeconds": 45,
+    "actionSeconds": 45,
+    "settleSeconds": 5
+  },
+  "checkpointSeconds": 10,
+  "worlds": [
+    {
+      "id": "west",
+      "backend": "standalone",
+      "dimension": "overworld",
+      "bounds": {
+        "min": [
+          -64,
+          -64,
+          -64
+        ],
+        "max": [
+          352,
+          319,
+          128
+        ]
+      },
+      "setup": {
+        "kind": "existing"
+      },
+      "home": [
+        24,
+        80,
+        24
+      ],
+      "storage": [
+        6,
+        80,
+        6
+      ],
+      "craftingTable": [
+        8,
+        80,
+        6
+      ],
+      "meetingPoint": [
+        4,
+        80,
+        10
+      ],
+      "resourceAreas": [
+        {
+          "id": "quarry",
+          "kind": "mine",
+          "min": [
+            12,
+            80,
+            2
+          ],
+          "max": [
+            25,
+            80,
+            7
+          ]
+        },
+        {
+          "id": "grove",
+          "kind": "wood",
+          "min": [
+            12,
+            80,
+            12
+          ],
+          "max": [
+            25,
+            93,
+            17
+          ]
+        }
+      ],
+      "farmAreas": [
+        {
+          "id": "wheat",
+          "min": [
+            2,
+            80,
+            18
+          ],
+          "max": [
+            8,
+            80,
+            24
+          ]
+        }
+      ],
+      "buildPlots": [
+        {
+          "id": "west-shelter-1",
+          "origin": [
+            28,
+            80,
+            24
+          ],
+          "blueprint": "shelter"
+        },
+        {
+          "id": "west-shelter-2",
+          "origin": [
+            36,
+            80,
+            24
+          ],
+          "blueprint": "shelter"
+        }
+      ],
+      "protectedAreas": [
+        {
+          "id": "stores",
+          "min": [
+            5,
+            79,
+            5
+          ],
+          "max": [
+            9,
+            81,
+            7
+          ]
+        }
+      ],
+      "frontiers": [
+        {
+          "id": "outskirts",
+          "min": [
+            28,
+            80,
+            34
+          ],
+          "max": [
+            44,
+            84,
+            44
+          ]
+        }
+      ],
+      "redstone": [
+        {
+          "control": [
+            4,
+            80,
+            32
+          ],
+          "lamp": [
+            4,
+            79,
+            32
+          ],
+          "piston": [
+            5,
+            79,
+            32
+          ],
+          "head": [
+            5,
+            80,
+            32
+          ]
+        }
+      ]
+    },
+    {
+      "id": "east",
+      "backend": "standalone",
+      "dimension": "overworld",
+      "bounds": {
+        "min": [
+          -64,
+          -64,
+          -64
+        ],
+        "max": [
+          352,
+          319,
+          128
+        ]
+      },
+      "setup": {
+        "kind": "existing"
+      },
+      "home": [
+        280,
+        80,
+        24
+      ],
+      "storage": [
+        262,
+        80,
+        6
+      ],
+      "craftingTable": [
+        264,
+        80,
+        6
+      ],
+      "meetingPoint": [
+        260,
+        80,
+        10
+      ],
+      "resourceAreas": [
+        {
+          "id": "quarry",
+          "kind": "mine",
+          "min": [
+            268,
+            80,
+            2
+          ],
+          "max": [
+            281,
+            80,
+            7
+          ]
+        },
+        {
+          "id": "grove",
+          "kind": "wood",
+          "min": [
+            268,
+            80,
+            12
+          ],
+          "max": [
+            281,
+            93,
+            17
+          ]
+        }
+      ],
+      "farmAreas": [
+        {
+          "id": "wheat",
+          "min": [
+            258,
+            80,
+            18
+          ],
+          "max": [
+            264,
+            80,
+            24
+          ]
+        }
+      ],
+      "buildPlots": [
+        {
+          "id": "east-shelter-1",
+          "origin": [
+            284,
+            80,
+            24
+          ],
+          "blueprint": "shelter"
+        },
+        {
+          "id": "east-shelter-2",
+          "origin": [
+            292,
+            80,
+            24
+          ],
+          "blueprint": "shelter"
+        }
+      ],
+      "protectedAreas": [
+        {
+          "id": "stores",
+          "min": [
+            261,
+            79,
+            5
+          ],
+          "max": [
+            265,
+            81,
+            7
+          ]
+        }
+      ],
+      "frontiers": [
+        {
+          "id": "outskirts",
+          "min": [
+            284,
+            80,
+            34
+          ],
+          "max": [
+            300,
+            84,
+            44
+          ]
+        }
+      ],
+      "redstone": [
+        {
+          "control": [
+            260,
+            80,
+            32
+          ],
+          "lamp": [
+            260,
+            79,
+            32
+          ],
+          "piston": [
+            261,
+            79,
+            32
+          ],
+          "head": [
+            261,
+            80,
+            32
+          ]
+        }
+      ]
+    }
+  ]
+}

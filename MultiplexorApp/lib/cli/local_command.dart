@@ -20,11 +20,13 @@ class LocalCommand {
         : _defaults[command] ?? '';
     final String sub =
         _commandAliases['$command $requestedSub'] ?? requestedSub;
-    final bool settings = command == 'runtime' && sub == 'settings';
+    final bool settings =
+        (command == 'runtime' && sub == 'settings') ||
+        (command == 'gameplay' && sub == 'sessions');
     final bool explicitAction =
         settings && input.length > 2 && !input[2].startsWith('-');
     final String? action = settings
-        ? (explicitAction ? input[2] : 'show')
+        ? (explicitAction ? input[2] : (sub == 'sessions' ? 'list' : 'show'))
         : null;
     final String keyPath = '$command $sub${action == null ? '' : ' $action'}';
     if (_internal.contains('$command $sub')) {
@@ -39,8 +41,7 @@ class LocalCommand {
     final List<String> forms = group.forms.where((String form) {
       final String first = form.split(' ').first;
       if (settings) {
-        return form.startsWith('settings $action ') ||
-            form == 'settings $action';
+        return form.startsWith('$sub $action ') || form == '$sub $action';
       }
       return command == 'doctor' ||
           first == sub ||
@@ -177,9 +178,11 @@ const Map<String, String> _defaults = <String, String>{
   'content': 'list',
   'addons': 'list',
   'gameplay': 'doctor',
+  'network': 'list',
 };
 
 const Set<String> _internal = <String>{
+  'gameplay sessions-host',
   'runtime host',
   'runtime restart-worker',
   'plugins watch-daemon',
@@ -224,6 +227,9 @@ const Set<String> _booleanOptions = <String>{
   'prepare',
   'no-viewer',
   'no-op',
+  'offline',
+  'build-arena',
+  'chat',
 };
 
 const Map<String, List<String>> _positionalOptions = <String, List<String>>{
@@ -263,6 +269,22 @@ const Map<String, List<String>> _positionalOptions = <String, List<String>>{
 };
 
 const Map<String, int> _maximumPositionals = <String, int>{
+  'network list': 0,
+  'network candidates': 0,
+  'network recover': 0,
+  'network create': 1,
+  'network add': 2,
+  'network remove': 2,
+  'network configure': 1,
+  'network delete': 1,
+  'network start': 1,
+  'network stop': 1,
+  'network restart': 1,
+  'network status': 1,
+  'network check': 1,
+  'network repair': 1,
+  'network console': 1,
+  'network plugins-sync': 1,
   'instance list': 0,
   'instance current': 0,
   'instance create': 1,
@@ -354,8 +376,17 @@ const Map<String, int> _maximumPositionals = <String, int>{
   'content remove': 1,
   'content sync': 1,
   'gameplay setup': 0,
+  'gameplay sessions validate': 1,
+  'gameplay sessions start': 1,
+  'gameplay sessions list': 0,
+  'gameplay sessions status': 1,
+  'gameplay sessions stop': 1,
+  'gameplay sessions resume': 1,
+  'gameplay sessions report': 1,
   'gameplay doctor': 0,
   'gameplay list': 0,
+  'gameplay swarm-profiles': 0,
+  'gameplay swarm': 2,
   'gameplay prepare': 1,
   'gameplay run': 2,
   'build test-latest': 0,
@@ -370,6 +401,26 @@ const Map<String, String> _commandAliases = <String, String>{
 };
 
 const Map<String, int> _minimumPositionals = <String, int>{
+  'gameplay sessions validate': 1,
+  'gameplay sessions start': 1,
+  'gameplay sessions status': 1,
+  'gameplay sessions stop': 1,
+  'gameplay sessions resume': 1,
+  'gameplay sessions report': 1,
+  'gameplay swarm': 1,
+  'network create': 1,
+  'network add': 2,
+  'network remove': 2,
+  'network configure': 1,
+  'network delete': 1,
+  'network start': 1,
+  'network stop': 1,
+  'network restart': 1,
+  'network status': 1,
+  'network check': 1,
+  'network repair': 1,
+  'network console': 1,
+  'network plugins-sync': 1,
   'consumer use': 1,
   'server create': 1,
   'instance create': 1,

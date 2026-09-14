@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:path/path.dart' as p;
 
@@ -8,6 +9,7 @@ import '../models/build_version_catalog.dart';
 import '../models/backup_summary.dart';
 import '../models/template_summary.dart';
 import '../models/consumer_profile.dart';
+import '../models/gameplay_swarm.dart';
 import '../utils/async_work_pool.dart';
 import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
@@ -21,8 +23,10 @@ import 'monitor/metrics_sampler.dart';
 import 'monitor/monitor_frame_util.dart';
 import 'monitor/monitor_keymap.dart';
 import 'monitor/monitor_modal.dart';
+import 'monitor/monitor_network_tree.dart';
 import 'monitor/monitor_screen.dart';
 import 'monitor/trend_store.dart';
+import 'networks/network_definition.dart';
 import 'passthrough_service.dart';
 import 'pterodactyl/pterodactyl_console_protocol.dart';
 import 'pterodactyl/pterodactyl_console_session.dart';
@@ -43,6 +47,9 @@ import 'runtime_state.dart';
 part 'interactive_wizard_addons.dart';
 part 'interactive_wizard_selection.dart';
 part 'interactive_wizard_local.dart';
+part 'interactive_wizard_networks.dart';
+part 'interactive_wizard_swarm.dart';
+part 'interactive_wizard_sessions.dart';
 
 /// The side effect a Remote quick key is allowed to perform after a fresh
 /// resource-state check.
@@ -695,6 +702,7 @@ class InteractiveWizard {
     // tee'd on the way past: one `runtime metrics` call, samples to the
     // sampler and flags to the snapshot.
     Map<String, InstanceFlags> flags = const <String, InstanceFlags>{};
+    List<WizardNetwork> networks = const <WizardNetwork>[];
     Future<String> captureMetrics() async {
       final String raw = await _captureMetrics();
       flags = metricsTsvFlagsByInstance(raw);
@@ -717,7 +725,31 @@ class InteractiveWizard {
     final MonitorScreen screen = MonitorScreen(
       sampler: sampler,
       theme: MonitorTheme.detect(),
-      loadSnapshot: () => _monitorSnapshot(sampler, flags),
+      loadSnapshot: () async {
+        bool topologyStale = false;
+        if (_activeConsumer() == ConsumerProfile.plugin) {
+          try {
+            final CapturedResult result = await passthrough.capture(<String>[
+              'network',
+              'list',
+              '--json',
+            ]);
+            if (result.exitCode != 0) {
+              topologyStale = true;
+            } else {
+              networks = WizardNetwork.parseList(result.stdout);
+            }
+          } on Exception {
+            topologyStale = true;
+          }
+        }
+        return _monitorSnapshot(
+          sampler,
+          flags,
+          networks: networks,
+          networkTopologyStale: topologyStale,
+        );
+      },
       suspend: _suspendedFlow,
       quickAction: _monitorQuickAction,
       instanceAction: _monitorInstanceAction,
@@ -1095,6 +1127,8 @@ class InteractiveWizard {
         await Ui.pause();
       case WorkspaceModalAction.templates:
         await _createFromTemplate();
+      case WorkspaceModalAction.networks:
+        await _networkMenu();
       case WorkspaceModalAction.buildTuning:
         await _buildAndTuningMenu();
       case WorkspaceModalAction.pullBuilds:
@@ -1263,6 +1297,7 @@ class InteractiveWizard {
       case WorkspaceModalAction.buildTuning:
       case WorkspaceModalAction.diagnostics:
       case WorkspaceModalAction.templates:
+      case WorkspaceModalAction.networks:
       case WorkspaceModalAction.pullBuilds:
       case WorkspaceModalAction.wipe:
         Ui.note('That workspace action is Local-only.');
@@ -4187,13 +4222,23 @@ class InteractiveWizard {
   /// tee'd off the same capture the sampler parsed.
   Future<MonitorSnapshot> _monitorSnapshot(
     MetricsSampler sampler,
-    Map<String, InstanceFlags> flags,
-  ) async {
-    final List<String> instances = sampler.instances;
+    Map<String, InstanceFlags> flags, {
+    List<WizardNetwork> networks = const <WizardNetwork>[],
+    bool networkTopologyStale = false,
+  }) async {
+    final MonitorNetworkTree tree = MonitorNetworkTree.project(
+      sampler.instances,
+      <MonitorNetworkGroup>[
+        for (final WizardNetwork network in networks) network.monitorGroup,
+      ],
+    );
+    final List<String> instances = tree.instances;
     return MonitorSnapshot(
       instances: instances,
       captureError: sampler.lastError,
       lastSuccessfulCapture: sampler.lastSuccessfulSweep,
+      networkRows: tree.rows,
+      networkTopologyStale: networkTopologyStale,
       history: <String, List<MetricSample>>{
         for (final String instance in instances)
           instance: sampler.history(instance),
@@ -4201,6 +4246,10 @@ class InteractiveWizard {
       flags: flags,
       consumerName: _activeConsumer().shortName,
       activeInstance: await _activeInstance(),
+      advertisedEndpoints: <String, String>{
+        for (final WizardNetwork network in networks)
+          network.proxy: network.address,
+      },
       view: _monitorView,
     );
   }

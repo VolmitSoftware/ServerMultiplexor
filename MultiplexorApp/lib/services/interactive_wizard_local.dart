@@ -84,7 +84,8 @@ extension _LocalWizard on InteractiveWizard {
           MenuEntry<TemplateSummary>(
             template.name,
             value: template,
-            detail: '${template.type} ${template.minecraft ?? 'version not set'}',
+            detail:
+                '${template.type} ${template.minecraft ?? 'version not set'}',
           ),
       ],
     );
@@ -120,9 +121,10 @@ extension _LocalWizard on InteractiveWizard {
 
   Future<void> _instanceRuntimeSettings(String name) async {
     while (true) {
+      final _InstanceRow? instance = await _loadInstanceRow(name);
       final String action = await menuSelect<String>(
         'Runtime for $name',
-        const <MenuEntry<String>>[
+        <MenuEntry<String>>[
           MenuEntry<String>('Show effective settings', value: 'show'),
           MenuEntry<String>('Check Java compatibility', value: 'check'),
           MenuEntry<String>('Select Java executable', value: 'set-java'),
@@ -130,10 +132,22 @@ extension _LocalWizard on InteractiveWizard {
           MenuEntry<String>('Set JVM preset', value: 'set-preset'),
           MenuEntry<String>('Use consumer defaults', value: 'reset'),
           MenuEntry<String>('Export as template', value: 'template'),
+          if (instance?.isolated == true)
+            MenuEntry<String>('Run bot swarm', value: 'swarm'),
+          if (instance?.isolated == true)
+            MenuEntry<String>('Persistent player sessions', value: 'sessions'),
           MenuEntry<String>('Back to dashboard', value: 'back'),
         ],
       );
       if (action == 'back') return;
+      if (action == 'swarm') {
+        await _runSwarmWizard(name);
+        continue;
+      }
+      if (action == 'sessions') {
+        await _sessionRunsWizard(instance: name);
+        continue;
+      }
       if (action == 'template') {
         final String template = await Ui.input(
           'Template name',

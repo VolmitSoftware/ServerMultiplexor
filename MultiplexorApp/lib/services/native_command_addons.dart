@@ -61,6 +61,12 @@ extension _NativeAddonCommands on NativeCommandService {
     }
     final Map<String, String> metadata = _serverSource(profile, name);
     final String serverType = metadata['type'] ?? 'custom';
+    if (serverType == 'velocity') {
+      throw _NativeCommandException(
+        'Use dropins/velocity and network plugins-sync for Velocity plugins.',
+        2,
+      );
+    }
     final String instancePath = _instanceDir(profile, name);
     final String minecraft =
         inferServerMinecraftVersion(

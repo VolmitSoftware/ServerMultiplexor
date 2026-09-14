@@ -89,6 +89,7 @@ enum WorkspaceModalAction {
   bulkActions,
   diagnostics,
   templates,
+  networks,
 }
 
 /// The id prefix every instance-card button hitbox carries: the id is
@@ -192,6 +193,7 @@ String workspaceModalActionHotkey(WorkspaceModalAction action) =>
       WorkspaceModalAction.files => 'f',
       WorkspaceModalAction.diagnostics => 'd',
       WorkspaceModalAction.templates => 't',
+      WorkspaceModalAction.networks => 'v',
     };
 
 /// The hotkey carried by a modal button id, or null for a non-button id.
@@ -518,11 +520,15 @@ List<List<ButtonSpec>> _instanceRows({
 
 /// The chip rows of the workspace card, top to bottom. Every workspace action
 /// is always available; only WIPE carries the danger tone.
-List<List<ButtonSpec>> _workspaceRows() => <List<ButtonSpec>>[
+List<List<ButtonSpec>> _workspaceRows({
+  required bool networks,
+}) => <List<ButtonSpec>>[
   <ButtonSpec>[
     _workspaceButton(WorkspaceModalAction.diagnostics, 'DIAGNOSTICS'),
     _workspaceButton(WorkspaceModalAction.templates, 'TEMPLATES'),
   ],
+  if (networks)
+    <ButtonSpec>[_workspaceButton(WorkspaceModalAction.networks, 'NETWORKS')],
   <ButtonSpec>[
     _workspaceButton(WorkspaceModalAction.buildTuning, 'BUILD & TUNING'),
     _workspaceButton(WorkspaceModalAction.pullBuilds, 'PULL BUILDS'),
@@ -647,6 +653,7 @@ MonitorFrame overlayModal({
   required bool locked,
   required bool isolated,
   bool remote = false,
+  bool networks = false,
   String? operationBlockReason,
   required MonitorTheme theme,
   String? selectedId,
@@ -678,7 +685,8 @@ MonitorFrame overlayModal({
               isolated: isolated,
               columns: columns,
             ),
-    WorkspaceModal() => remote ? _remoteWorkspaceRows() : _workspaceRows(),
+    WorkspaceModal() =>
+      remote ? _remoteWorkspaceRows() : _workspaceRows(networks: networks),
   };
 
   // Width is derived from the full row set, not the height-truncated one, so

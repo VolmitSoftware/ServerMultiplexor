@@ -18,6 +18,7 @@ const List<String> _stopMarkers = <String>[
   'stopping server',
   'stopping the server',
   'attempting to restart',
+  'shutting down the proxy',
 ];
 
 /// Whether [text] contains the server ready marker. Used both for tail

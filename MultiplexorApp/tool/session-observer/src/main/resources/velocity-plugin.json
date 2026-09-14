@@ -1,0 +1,1 @@
+{"id":"multiplexor-observer","name":"MultiplexorObserver","version":"1.0.0","description":"Local snapshots of proxy sessions and JVM measurements.","main":"dev.multiplexor.observer.VelocityObserver"}

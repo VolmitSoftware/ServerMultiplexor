@@ -11,6 +11,8 @@ import 'package:yaml/yaml.dart';
 
 import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
+import '../models/gameplay_swarm.dart';
+import '../models/gameplay_sessions.dart';
 import '../models/server_minecraft_version.dart';
 import '../utils/async_work_pool.dart';
 import '../utils/delete_path.dart';
@@ -32,6 +34,11 @@ import 'manager_context.dart';
 import 'minimal_log4j_config.dart';
 import 'monitor/metric_sample.dart';
 import 'native_console_terminal.dart';
+import 'network_operation_lock.dart';
+import 'networks/network_definition.dart';
+import 'networks/network_store.dart';
+import 'networks/velocity_download.dart';
+import 'proxy_runtime_control.dart';
 import 'rcon_client.dart';
 import 'recovery_snapshot.dart';
 import 'recovery_runtime.dart';
@@ -46,6 +53,9 @@ part 'native_cli_output.dart';
 part 'native_command_addons.dart';
 part 'native_command_bulk.dart';
 part 'native_command_recovery.dart';
+part 'native_command_network.dart';
+part 'native_command_swarm.dart';
+part 'native_command_sessions.dart';
 
 class NativeCommandService {
   NativeCommandService({
@@ -56,6 +66,8 @@ class NativeCommandService {
     Future<ProcessResult> Function(String, List<String>)? processExecutor,
     Future<int> Function(String)? javaInspector,
     this.contentResolverFactory,
+    this.gameplayHarnessFactory,
+    this.sessionHostLauncher,
   }) : _recoveryRuntimeOverride = recoveryRuntime,
        _processRunner = processRunner,
        _processExecutor = processExecutor,
@@ -63,6 +75,8 @@ class NativeCommandService {
 
   final RecoveryRuntime? _recoveryRuntimeOverride;
   final AddonResolver Function(String)? contentResolverFactory;
+  final GameplayTestService Function(ManagerContext)? gameplayHarnessFactory;
+  final Future<int> Function(List<String>)? sessionHostLauncher;
   final ManagerContext context;
   final ConsumerService consumerService;
   final ProcessRunner _processRunner;
@@ -209,6 +223,38 @@ class NativeCommandService {
   );
 
   Future<int> _dispatch(List<String> args, _NativeIoBuffer io) async {
+    if (args.length > 1 &&
+        args.first == 'gameplay' &&
+        const <String>{'sessions', 'sessions-host'}.contains(args[1])) {
+      return _dispatchUnlocked(args, io);
+    }
+    if (args.isNotEmpty &&
+        (const <String>{
+              'instance',
+              'server',
+              'config',
+              'template',
+              'backup',
+              'addons',
+              'gameplay',
+              'content',
+            }.contains(args.first) ||
+            args.first == 'runtime' &&
+                args.length > 1 &&
+                args[1] == 'settings' ||
+            args.first == 'plugins' &&
+                args.length > 1 &&
+                const <String>{
+                  'sync',
+                  'copy',
+                  'iris-packs-link',
+                }.contains(args[1]))) {
+      return _withNetworkRuntimeStart(() => _dispatchUnlocked(args, io));
+    }
+    return _dispatchUnlocked(args, io);
+  }
+
+  Future<int> _dispatchUnlocked(List<String> args, _NativeIoBuffer io) async {
     if (isCliHelpRequest(args)) {
       return _printHelpForArgs(args, io);
     }
@@ -248,6 +294,8 @@ class NativeCommandService {
         return _dispatchServer(rest, io);
       case 'runtime':
         return _dispatchRuntime(rest, io);
+      case 'network':
+        return _dispatchNetwork(rest, io);
       case 'plugins':
         return _dispatchPlugins(rest, io, mods: false);
       case 'mods':
@@ -415,7 +463,9 @@ class NativeCommandService {
   Future<int> _dispatchGameplay(List<String> args, _NativeIoBuffer io) async {
     final String sub = args.isEmpty ? 'doctor' : args.first;
     final List<String> rest = args.isEmpty ? const <String>[] : args.sublist(1);
-    final GameplayTestService harness = GameplayTestService(context: context);
+    final GameplayTestService harness =
+        gameplayHarnessFactory?.call(context) ??
+        GameplayTestService(context: context);
 
     switch (sub) {
       case 'setup':
@@ -450,9 +500,21 @@ class NativeCommandService {
         return 0;
       case 'run':
         return _dispatchGameplayRun(rest, harness, io);
+      case 'swarm':
+        return _dispatchGameplaySwarm(rest, harness, io);
+      case 'sessions':
+        return _dispatchGameplaySessions(rest, harness, io);
+      case 'sessions-host':
+        return _sessionHost(rest, harness, io);
+      case 'swarm-profiles':
+        return harness.swarmProfiles(
+          json: rest.contains('--json'),
+          write: io.write,
+          error: io.error,
+        );
       default:
         throw _NativeCommandException(
-          'Usage: gameplay <setup|doctor|list|prepare|run> ...',
+          'Usage: gameplay <setup|doctor|list|prepare|run|swarm|swarm-profiles|sessions> ...',
           2,
         );
     }
@@ -497,6 +559,9 @@ class NativeCommandService {
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
+
+    _ensureGameInstance(profile, instance, 'run gameplay on');
+    _ensureNetworkDetached(profile, instance, action: 'run gameplay');
 
     final String auth = (parsed.option('auth') ?? 'offline').toLowerCase();
     if (auth != 'offline' && auth != 'microsoft') {
@@ -686,6 +751,8 @@ class NativeCommandService {
     String instance,
     _NativeIoBuffer io,
   ) async {
+    _ensureGameInstance(profile, instance, 'prepare gameplay on');
+    _ensureNetworkDetached(profile, instance, action: 'prepare gameplay');
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
@@ -790,6 +857,17 @@ class NativeCommandService {
       ConsumerProfile.fabric,
       ConsumerProfile.neoforge,
     ];
+    for (final ConsumerProfile candidate in profiles) {
+      for (final String instance in _instanceNames(candidate)) {
+        if (!_instanceLocked(candidate, instance)) {
+          _ensureNetworkDetached(
+            candidate,
+            instance,
+            action: 'delete all instances',
+          );
+        }
+      }
+    }
     for (final p in profiles) {
       try {
         await _instanceDeleteAll(p, interactive: false, io: io);
@@ -874,6 +952,7 @@ class NativeCommandService {
       );
     }
 
+    _ensureNetworkDetached(profile, name, action: 'change isolation');
     final source = Map<String, String>.from(_serverSource(profile, name));
     if (requested) {
       source['isolated'] = 'true';
@@ -1088,6 +1167,7 @@ class NativeCommandService {
         if (active == null) {
           throw _NativeCommandException('No active instance set', 2);
         }
+        _ensureNetworkDetached(profile, active, action: 'change port');
         _instanceSetServerPort(profile, active, int.parse(one));
         io.write('[OK] Server port for $active set to $one');
         return 0;
@@ -1105,6 +1185,7 @@ class NativeCommandService {
       if (!_looksNumeric(portText)) {
         throw _NativeCommandException('Port must be numeric', 2);
       }
+      _ensureNetworkDetached(profile, instance, action: 'change port');
       _instanceSetServerPort(profile, instance, int.parse(portText));
       io.write('[OK] Server port for $instance set to $portText');
       return 0;
@@ -1558,6 +1639,7 @@ class NativeCommandService {
         );
         io.write('[OK] Java executable: $executable');
         if (instance != null &&
+            !_instanceIsVelocity(profile, instance) &&
             minimumMinecraftJava(_serverSource(profile, instance)['mc']) ==
                 null) {
           io.write(
@@ -2774,6 +2856,10 @@ class NativeCommandService {
     _FlexibleArgs parsed,
     _NativeIoBuffer io,
   ) async {
+    if (_instanceExists(profile, instance)) {
+      _ensureGameInstance(profile, instance, 'apply a template to');
+      _ensureNetworkDetached(profile, instance, action: 'apply a template');
+    }
     final type =
         (template['type']?.toString().trim().toLowerCase() ?? 'purpur');
     if (type != 'custom') {
@@ -5654,6 +5740,7 @@ class NativeCommandService {
     List<File> artifacts,
     _NativeIoBuffer io,
   ) {
+    _ensureGameInstance(profile, instance, 'copy Bukkit or mod drop-ins to');
     if (artifacts.isEmpty) {
       return;
     }
@@ -5830,6 +5917,7 @@ class NativeCommandService {
     bool importJar = false,
     bool isolated = false,
     int? port,
+    String? creationToken,
     _NativeIoBuffer? io,
   }) async {
     if (name.trim().isEmpty) {
@@ -5856,10 +5944,18 @@ class NativeCommandService {
       resolvedJarPath = await _importManagedLaunchJar(profile, resolvedJarPath);
     }
 
-    _instanceCreateBlank(profile, name, isolated: isolated, io: io);
-    if (port != null) _instanceSetServerPort(profile, name, port);
-
     final normalizedType = type.toLowerCase().trim();
+    _instanceCreateBlank(
+      profile,
+      name,
+      isolated: isolated,
+      proxy: normalizedType == 'velocity',
+      creationToken: creationToken,
+      retainCreationOwner:
+          normalizedType == 'velocity' && creationToken != null,
+      io: io,
+    );
+    if (port != null) _instanceSetServerPort(profile, name, port);
     final installerBased =
         (normalizedType == 'forge' || normalizedType == 'neoforge') &&
         (sourceLooksLikeInstaller || _looksLikeInstallerJar(resolvedJarPath));
@@ -5890,7 +5986,9 @@ class NativeCommandService {
         if (isolated) 'isolated': 'true',
       },
     );
-    _instanceApplyStyledMotd(profile, name, force: true);
+    if (normalizedType != 'velocity') {
+      _instanceApplyStyledMotd(profile, name, force: true);
+    }
   }
 
   Future<String> _importManagedLaunchJar(
@@ -6135,6 +6233,16 @@ class NativeCommandService {
     ConsumerProfile profile,
     String? inputInstance,
     _NativeIoBuffer io,
+  ) => profile == ConsumerProfile.plugin
+      ? _withNetworkRuntimeStart(
+          () => _runtimeStartUnlocked(profile, inputInstance, io),
+        )
+      : _runtimeStartUnlocked(profile, inputInstance, io);
+
+  Future<void> _runtimeStartUnlocked(
+    ConsumerProfile profile,
+    String? inputInstance,
+    _NativeIoBuffer io,
   ) async {
     final instance = inputInstance?.trim().isNotEmpty == true
         ? inputInstance!.trim()
@@ -6148,6 +6256,8 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
 
+    _validateNetworkRuntime(profile, instance);
+    final bool proxy = _instanceIsVelocity(profile, instance);
     final String javaExecutable = await _runtimeJavaPreflight(
       profile,
       instance,
@@ -6166,20 +6276,28 @@ class NativeCommandService {
       );
     }
 
-    await _runtimeEnsureDropinsWatcher(profile, instance, io);
+    if (!proxy) await _runtimeEnsureDropinsWatcher(profile, instance, io);
 
     if (await _runtimeRunning(profile, instance)) {
       io.write('[WARN] Already running: $instance');
       return;
     }
 
-    final _DropinSyncReport startupSync = _syncSubscribedDropinsInstance(
-      profile,
-      instance,
-      clean: false,
-      strict: false,
-      preserveLocalChanges: true,
-    );
+    final _DropinSyncReport startupSync = proxy
+        ? _syncVelocityDropinsInstance(
+            profile,
+            instance,
+            clean: false,
+            strict: false,
+            preserveLocalChanges: true,
+          )
+        : _syncSubscribedDropinsInstance(
+            profile,
+            instance,
+            clean: false,
+            strict: false,
+            preserveLocalChanges: true,
+          );
     if (startupSync.copiedJars.isNotEmpty) {
       io.write(
         '[SYNC] Startup copied ${startupSync.copiedJars.length} jar(s) -> $instance',
@@ -6196,7 +6314,7 @@ class NativeCommandService {
         '[WARN] Startup preserved locally modified jar(s) in $instance: ${startupSync.preservedJars.join(', ')}',
       );
       io.error(
-        '[WARN] Run ${_isPluginConsumer(profile) ? 'plugins' : 'mods'} sync $instance to replace them from dropins.',
+        '[WARN] Run ${proxy ? 'network plugins-sync ${_networkMembership(profile, instance)}' : '${_isPluginConsumer(profile) ? 'plugins' : 'mods'} sync $instance'} to replace them from dropins.',
       );
     }
 
@@ -6236,7 +6354,7 @@ class NativeCommandService {
       final settings = _runtimeSettingsLoad(profile, instance: instance);
       final launchWorkingDir = _runtimeLaunchWorkingDir(profile, instance);
       String? log4jPath;
-      if (settings.consoleLogFormat == 'minimal') {
+      if (!proxy && settings.consoleLogFormat == 'minimal') {
         log4jPath = _ensureMinimalLog4jConfig(profile, instance);
       }
       final javaCommandParts = <String>[
@@ -6246,6 +6364,7 @@ class NativeCommandService {
           settings,
           workingDirectory: launchWorkingDir,
           log4jConfigPath: log4jPath,
+          proxy: proxy,
         ),
       ];
 
@@ -6336,6 +6455,7 @@ class NativeCommandService {
     File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
     File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
     File(_runtimeHostOwnerFile(profile, instance)).deleteSyncSafe();
+    File(_runtimeProxyControlFile(profile, instance)).deleteSyncSafe();
 
     final String ownerToken = _newPinSalt();
     final _SelfInvocation invocation = _selfInvocation(
@@ -6406,6 +6526,7 @@ class NativeCommandService {
     final IOSink log = logFile.openWrite(mode: FileMode.append);
     Process? server;
     Timer? ownerHeartbeat;
+    ProxyRuntimeControl? proxyControl;
     try {
       final File tokenFile = File(_runtimeHostTokenFile(profile, instance));
       final File hostPidFile = File(_runtimeHostPidFile(profile, instance));
@@ -6441,7 +6562,8 @@ class NativeCommandService {
         instance,
       );
       String? log4jPath;
-      if (settings.consoleLogFormat == 'minimal') {
+      final bool proxy = _instanceIsVelocity(profile, instance);
+      if (!proxy && settings.consoleLogFormat == 'minimal') {
         log4jPath = _ensureMinimalLog4jConfig(profile, instance);
       }
       server = await Process.start(
@@ -6451,6 +6573,7 @@ class NativeCommandService {
           settings,
           workingDirectory: workingDirectory,
           log4jConfigPath: log4jPath,
+          proxy: proxy,
         ),
         workingDirectory: workingDirectory,
         runInShell: false,
@@ -6458,6 +6581,20 @@ class NativeCommandService {
       File(_runtimeServerPidFile(profile, instance))
         ..createSync(recursive: true)
         ..writeAsStringSync('${server.pid}\n');
+
+      if (proxy) {
+        final Process proxyProcess = server;
+        proxyControl = await ProxyRuntimeControl.start(
+          token: ownerToken,
+          onCommand: (String command) async {
+            proxyProcess.stdin.writeln(command);
+            await proxyProcess.stdin.flush();
+          },
+        );
+        File(_runtimeProxyControlFile(profile, instance))
+          ..createSync(recursive: true)
+          ..writeAsStringSync('${proxyControl.port}\n');
+      }
 
       final Future<void> stdoutDone = server.stdout.forEach(log.add);
       final Future<void> stderrDone = server.stderr.forEach(log.add);
@@ -6472,6 +6609,7 @@ class NativeCommandService {
       rethrow;
     } finally {
       ownerHeartbeat?.cancel();
+      await proxyControl?.close();
       final int? recordedPid = _readPid(
         _runtimeServerPidFile(profile, instance),
       );
@@ -6483,11 +6621,34 @@ class NativeCommandService {
       final File tokenFile = File(_runtimeHostTokenFile(profile, instance));
       if (tokenFile.existsSync() &&
           tokenFile.readAsStringSync().trim() == ownerToken) {
+        File(_runtimeProxyControlFile(profile, instance)).deleteSyncSafe();
         File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
         File(_runtimeHostOwnerFile(profile, instance)).deleteSyncSafe();
         tokenFile.deleteSyncSafe();
       }
     }
+  }
+
+  String _runtimeProxyControlFile(ConsumerProfile profile, String instance) =>
+      p.join(_runtimeDir(profile), '$instance.proxy-control');
+
+  Future<String?> _runtimeProxyCommand(
+    ConsumerProfile profile,
+    String instance,
+    String command,
+  ) async {
+    if (!await _runtimeWindowsHostOwned(profile, instance)) return null;
+    final File endpoint = File(_runtimeProxyControlFile(profile, instance));
+    final File tokenFile = File(_runtimeHostTokenFile(profile, instance));
+    if (!endpoint.existsSync() || !tokenFile.existsSync()) return null;
+    final int? port = int.tryParse(endpoint.readAsStringSync().trim());
+    if (port == null || port < 1 || port > 65535) return null;
+    final bool sent = await ProxyRuntimeControl.send(
+      port: port,
+      token: tokenFile.readAsStringSync().trim(),
+      command: command,
+    );
+    return sent ? '' : null;
   }
 
   Future<void> _runtimeWindowsRestartWorker(
@@ -6913,7 +7074,9 @@ class NativeCommandService {
       targets: targets,
       lateral: lateral,
       sendCommand: (NativeConsoleTarget target, String command) =>
-          _instanceRconCommand(profile, target.name, command),
+          _instanceIsVelocity(profile, target.name)
+          ? _runtimeProxyCommand(profile, target.name, command)
+          : _instanceRconCommand(profile, target.name, command),
     ).run();
   }
 
@@ -7222,6 +7385,7 @@ class NativeCommandService {
       File(_runtimeHostPidFile(profile, instance)).deleteSyncSafe();
       File(_runtimeHostTokenFile(profile, instance)).deleteSyncSafe();
       File(_runtimeHostOwnerFile(profile, instance)).deleteSyncSafe();
+      File(_runtimeProxyControlFile(profile, instance)).deleteSyncSafe();
       File(_runtimeServerPidFile(profile, instance)).deleteSyncSafe();
       File(_runtimeConsolePidFile(profile, instance)).deleteSyncSafe();
       io.write(
@@ -7277,8 +7441,18 @@ class NativeCommandService {
           : runtimeStopTimeout,
       allowForce: !requireGraceful,
       requestStop: () async {
+        final String command = _instanceIsVelocity(profile, instance)
+            ? 'end'
+            : 'stop';
         if (Platform.isWindows) {
           if (pids.isEmpty) return;
+          if (_instanceIsVelocity(profile, instance)) {
+            if (await _runtimeProxyCommand(profile, instance, command) !=
+                null) {
+              return;
+            }
+            throw TimeoutException('Proxy control is unavailable');
+          }
           if (await _instanceSendRconCommand(profile, instance, 'stop')) return;
           // A native host without RCON has no graceful control channel.
           throw TimeoutException('RCON is unavailable');
@@ -7288,10 +7462,18 @@ class NativeCommandService {
             'send-keys',
             '-t',
             tmuxSession,
-            'stop',
-            'Enter',
+            '-l',
+            command,
           ]);
-          if (result.exitCode == 0) return;
+          if (result.exitCode == 0) {
+            final ProcessResult submitted = await _runProcess('tmux', <String>[
+              'send-keys',
+              '-t',
+              tmuxSession,
+              'Enter',
+            ]);
+            if (submitted.exitCode == 0) return;
+          }
         }
         for (final int pid in pids) {
           Process.killPid(pid, ProcessSignal.sigterm);
@@ -8011,6 +8193,13 @@ class NativeCommandService {
     }
 
     overlay(_runtimeSettingsValues(File(_runtimeSettingsFile(profile))));
+    if (instance != null && _instanceIsVelocity(profile, instance)) {
+      overlay(const <String, String>{
+        'HEAP_SIZE': '1G',
+        'JVM_PROFILE': 'vanilla',
+        'CONSOLE_LOG_FORMAT': 'default',
+      });
+    }
     if (instance != null) {
       overlay(
         _runtimeSettingsValues(
@@ -8106,6 +8295,19 @@ class NativeCommandService {
     );
     final String executable = settings.javaExecutable;
     final int major = await _javaInspector(executable);
+    if (instance != null && _instanceIsVelocity(profile, instance)) {
+      final String version =
+          _serverSource(profile, instance)['velocity_version'] ?? '';
+      final int required = version.startsWith('3.') ? 21 : 25;
+      if (major < required) {
+        throw _NativeCommandException(
+          'Velocity ${version.isEmpty ? '(unversioned jar)' : version} requires Java $required or newer; '
+          '"$executable" is Java $major. Use runtime settings set-java <executable> --instance $instance.',
+          2,
+        );
+      }
+      return executable;
+    }
     final String? version =
         minecraft ??
         (instance == null ? null : _serverSource(profile, instance)['mc']);
@@ -8185,6 +8387,7 @@ class NativeCommandService {
     _RuntimeSettingsData settings, {
     String? workingDirectory,
     String? log4jConfigPath,
+    bool proxy = false,
   }) {
     final heap = settings.heap;
     final jvmArgsRaw = settings.jvmArgs;
@@ -8247,12 +8450,12 @@ class NativeCommandService {
     return <String>[
       '-Xms$heap',
       '-Xmx$heap',
-      '--add-modules=jdk.incubator.vector',
+      if (!proxy) '--add-modules=jdk.incubator.vector',
       ...extraJvm,
       ...flags,
       '-jar',
       launch.path,
-      '--nogui',
+      if (!proxy) '--nogui',
     ];
   }
 
@@ -8401,6 +8604,13 @@ class NativeCommandService {
         !await _runtimePortInUse(profile, instance, current)) {
       return;
     }
+    if ((_serverSource(profile, instance)['network'] ?? '').isNotEmpty ||
+        _instanceIsVelocity(profile, instance)) {
+      throw _NativeCommandException(
+        'Port $current is already in use for $instance. Network ports are fixed; stop the conflicting process or change the network configuration.',
+        2,
+      );
+    }
     int port = 25565;
     while (port <= 65535) {
       if (!_reservedRuntimePorts.contains(port) &&
@@ -8422,6 +8632,18 @@ class NativeCommandService {
     String instance,
     int port,
   ) async {
+    for (final NetworkDefinition network in _networkStore.list()) {
+      if (network.port == port &&
+          (profile != ConsumerProfile.plugin || network.proxy != instance)) {
+        return true;
+      }
+      for (final NetworkMember member in network.members) {
+        if (member.port == port &&
+            (member.consumer != profile || member.instance != instance)) {
+          return true;
+        }
+      }
+    }
     for (final candidateProfile in ConsumerProfile.values) {
       for (final other in _instanceNames(candidateProfile)) {
         if (candidateProfile == profile && other == instance) {
@@ -8552,9 +8774,14 @@ class NativeCommandService {
       return true;
     } on SocketException catch (error) {
       return address.type == InternetAddressType.IPv6 &&
-          const <int>{47, 49, 97, 99, 10047, 10049}.contains(
-            error.osError?.errorCode,
-          );
+          const <int>{
+            47,
+            49,
+            97,
+            99,
+            10047,
+            10049,
+          }.contains(error.osError?.errorCode);
     }
   }
 
@@ -8587,6 +8814,7 @@ class NativeCommandService {
   }
 
   void _configLinkInstance(ConsumerProfile profile, String instance) {
+    if (_instanceIsVelocity(profile, instance)) return;
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
@@ -8624,6 +8852,7 @@ class NativeCommandService {
   }
 
   void _irisPacksLinkInstance(ConsumerProfile profile, String instance) {
+    if (_instanceIsVelocity(profile, instance)) return;
     if (!_isPluginConsumer(profile)) {
       return;
     }
@@ -8710,14 +8939,15 @@ class NativeCommandService {
       );
     }
 
-    final String source = _dropinsSource(
-      sourceProfile,
-      mods: sourceKind == 'mods',
-    );
+    final String source = sourceKind == 'velocity'
+        ? p.join(_consumerRoot(sourceProfile), 'dropins', 'velocity')
+        : _dropinsSource(sourceProfile, mods: sourceKind == 'mods');
     final sourceDir = Directory(source);
     sourceDir.createSync(recursive: true);
 
-    final String targetSubdir = sourceKind;
+    final String targetSubdir = sourceKind == 'velocity'
+        ? 'plugins'
+        : sourceKind;
     final targetDir = Directory(
       p.join(_instanceDir(targetProfile, instance), targetSubdir),
     );
@@ -9111,6 +9341,11 @@ class NativeCommandService {
     ConsumerProfile profile,
     String instance,
   ) {
+    if (_instanceIsVelocity(profile, instance)) {
+      return _instanceIsolated(profile, instance)
+          ? const <String>[]
+          : const <String>['velocity'];
+    }
     if (_instanceIsolated(profile, instance)) {
       return const <String>[];
     }
@@ -9218,6 +9453,30 @@ class NativeCommandService {
     return subscribers;
   }
 
+  bool _instanceIsVelocity(ConsumerProfile profile, String instance) =>
+      _instanceSourceType(profile, instance) == 'velocity';
+
+  _DropinSyncReport _syncVelocityDropinsInstance(
+    ConsumerProfile profile,
+    String instance, {
+    required bool clean,
+    required bool strict,
+    required bool preserveLocalChanges,
+  }) {
+    if (!_instanceIsVelocity(profile, instance)) {
+      throw _NativeCommandException('Not a Velocity proxy: $instance', 2);
+    }
+    return _syncDropinSourceToInstance(
+      targetProfile: profile,
+      instance: instance,
+      sourceProfile: profile,
+      sourceKind: 'velocity',
+      clean: clean,
+      strict: strict,
+      preserveLocalChanges: preserveLocalChanges,
+    );
+  }
+
   String _instanceSourceType(ConsumerProfile profile, String instance) {
     final source = _serverSource(profile, instance);
     return source['type']?.trim().toLowerCase() ?? 'custom';
@@ -9312,6 +9571,7 @@ class NativeCommandService {
     String instance, {
     required bool force,
   }) {
+    if (_instanceIsVelocity(profile, instance)) return;
     if (!_instanceExists(profile, instance)) {
       throw _NativeCommandException('Instance not found: $instance', 2);
     }
@@ -9529,7 +9789,9 @@ class NativeCommandService {
     String instance, {
     _NativeIoBuffer? io,
   }) {
-    if (!_isPluginConsumer(profile) || !_instanceExists(profile, instance)) {
+    if (!_isPluginConsumer(profile) ||
+        !_instanceExists(profile, instance) ||
+        _instanceIsVelocity(profile, instance)) {
       return;
     }
 
@@ -9592,6 +9854,7 @@ class NativeCommandService {
   }
 
   void _instanceEnsureRestartScript(ConsumerProfile profile, String instance) {
+    if (_instanceIsVelocity(profile, instance)) return;
     final instanceDir = _instanceDir(profile, instance);
     final instanceDirectory = Directory(instanceDir);
     if (!instanceDirectory.existsSync()) {
@@ -9735,6 +9998,8 @@ class NativeCommandService {
   void _instanceCreateBlank(
     ConsumerProfile profile,
     String name, {
+    bool proxy = false,
+    bool retainCreationOwner = false,
     bool isolated = false,
     String? creationToken,
     _NativeIoBuffer? io,
@@ -9790,6 +10055,24 @@ class NativeCommandService {
           : 'mods';
       Directory(p.join(dir.path, dropinSubdir)).createSync();
       Directory(p.join(dir.path, 'logs')).createSync();
+
+      if (proxy) {
+        _writeServerSource(
+          dir.path,
+          fields: <String, String>{
+            'type': 'velocity',
+            if (isolated) 'isolated': 'true',
+          },
+        );
+        File(
+          p.join(dir.path, 'velocity.toml'),
+        ).writeAsStringSync('bind = "127.0.0.1:25565"\n');
+        Directory(
+          p.join(_consumerRoot(profile), 'dropins', 'velocity'),
+        ).createSync(recursive: true);
+        if (!retainCreationOwner) owner.deleteSync();
+        return;
+      }
 
       final File properties = File(p.join(dir.path, 'server.properties'));
       properties.writeAsStringSync('server-port=25565\n');
@@ -9850,6 +10133,8 @@ class NativeCommandService {
     String target, {
     _NativeIoBuffer? io,
   }) {
+    _ensureNetworkDetached(profile, source, action: 'clone');
+    _ensureGameInstance(profile, source, 'clone');
     if (!_instanceExists(profile, source)) {
       throw _NativeCommandException('Source instance not found: $source', 2);
     }
@@ -9877,6 +10162,7 @@ class NativeCommandService {
     String name, {
     _NativeIoBuffer? io,
   }) async {
+    _ensureNetworkDetached(profile, name, action: 'delete');
     final instancePath = _instanceDir(profile, name);
     final existingType = FileSystemEntity.typeSync(
       instancePath,
@@ -9897,6 +10183,7 @@ class NativeCommandService {
     File(_runtimeHostPidFile(profile, name)).deleteSyncSafe();
     File(_runtimeHostTokenFile(profile, name)).deleteSyncSafe();
     File(_runtimeHostOwnerFile(profile, name)).deleteSyncSafe();
+    File(_runtimeProxyControlFile(profile, name)).deleteSyncSafe();
     File(_runtimeRestartTokenFile(profile, name)).deleteSyncSafe();
 
     final active = _currentInstance(profile);
@@ -9925,6 +10212,16 @@ class NativeCommandService {
     final names =
         entries.map((entry) => p.basename(entry.path)).toList(growable: false)
           ..sort();
+
+    for (final String instance in names) {
+      if (!_instanceLocked(profile, instance)) {
+        _ensureNetworkDetached(
+          profile,
+          instance,
+          action: 'delete all instances',
+        );
+      }
+    }
 
     if (interactive) {
       stdout.write('Type DELETE to remove ALL server instances: ');
@@ -9961,6 +10258,8 @@ class NativeCommandService {
     String name,
     _NativeIoBuffer io,
   ) async {
+    _ensureNetworkDetached(profile, name, action: 'reset');
+    _ensureGameInstance(profile, name, 'reset');
     if (!_instanceExists(profile, name)) {
       throw _NativeCommandException('Instance not found: $name', 2);
     }
@@ -10181,6 +10480,9 @@ class NativeCommandService {
   }
 
   int _instanceGetServerPort(ConsumerProfile profile, String instance) {
+    if (_instanceIsVelocity(profile, instance)) {
+      return _velocityBind(profile, instance).port;
+    }
     _ensureLocalServerProperties(profile, instance);
     final file = File(_instanceServerProperties(profile, instance));
     for (final raw in file.readAsLinesSync()) {
@@ -10198,6 +10500,9 @@ class NativeCommandService {
   }
 
   String _instanceGetServerIp(ConsumerProfile profile, String instance) {
+    if (_instanceIsVelocity(profile, instance)) {
+      return _velocityBind(profile, instance).host;
+    }
     _ensureLocalServerProperties(profile, instance);
     final file = File(_instanceServerProperties(profile, instance));
     for (final raw in file.readAsLinesSync()) {
@@ -10239,6 +10544,7 @@ class NativeCommandService {
     String instance,
     Map<String, String> values,
   ) {
+    _ensureGameInstance(profile, instance, 'set server properties');
     _ensureLocalServerProperties(profile, instance);
     final File file = File(_instanceServerProperties(profile, instance));
     final List<String> lines = file.readAsLinesSync();
@@ -10271,6 +10577,7 @@ class NativeCommandService {
   /// gameplay commands without tmux. Paper-family instances also use it for
   /// dashboard TPS. A user-set rcon.port / rcon.password is preserved.
   void _ensureRconConfigured(ConsumerProfile profile, String instance) {
+    if (_instanceIsVelocity(profile, instance)) return;
     if (!_isPluginConsumer(profile) && !Platform.isWindows) {
       return;
     }
@@ -10358,6 +10665,7 @@ class NativeCommandService {
     String instance,
     String command,
   ) async {
+    if (_instanceIsVelocity(profile, instance)) return null;
     final String? portRaw = _instanceGetProperty(
       profile,
       instance,
@@ -10399,7 +10707,7 @@ class NativeCommandService {
     ConsumerProfile profile,
     String instance,
   ) async {
-    if (!_isPluginConsumer(profile)) {
+    if (!_isPluginConsumer(profile) || _instanceIsVelocity(profile, instance)) {
       return null;
     }
     final portRaw = _instanceGetProperty(profile, instance, 'rcon.port');
@@ -10515,8 +10823,12 @@ class NativeCommandService {
           locked: sample.locked,
           isolated: sample.isolated,
           port: sample.port,
-          players: ping?.online,
-          maxPlayers: ping?.max,
+          players: _instanceIsVelocity(profile, sample.name)
+              ? null
+              : ping?.online,
+          maxPlayers: _instanceIsVelocity(profile, sample.name)
+              ? null
+              : ping?.max,
           version: ping?.versionName,
           tps: sample.tps,
           uptimeSeconds: sample.uptime?.inSeconds,
@@ -10595,6 +10907,23 @@ class NativeCommandService {
       throw _NativeCommandException('Port must be between 1 and 65535', 2);
     }
 
+    if (_instanceIsVelocity(profile, instance)) {
+      final ({String host, int port}) bind = _velocityBind(profile, instance);
+      final File config = File(
+        p.join(_instanceDir(profile, instance), 'velocity.toml'),
+      );
+      final String host = bind.host.contains(':')
+          ? '[${bind.host}]'
+          : bind.host;
+      config.writeAsStringSync(
+        config.readAsStringSync().replaceFirst(
+          RegExp(r'''^\s*bind\s*=\s*["'][^"']+["'].*$''', multiLine: true),
+          'bind = "$host:$port"',
+        ),
+      );
+      return;
+    }
+
     _ensureLocalServerProperties(profile, instance);
 
     final file = File(_instanceServerProperties(profile, instance));
@@ -10618,7 +10947,48 @@ class NativeCommandService {
     file.writeAsStringSync('${next.join('\n')}\n');
   }
 
+  void _ensureGameInstance(
+    ConsumerProfile profile,
+    String instance,
+    String action,
+  ) {
+    if (_instanceIsVelocity(profile, instance)) {
+      throw _NativeCommandException(
+        'Cannot $action a Velocity proxy. Use network commands.',
+        2,
+      );
+    }
+  }
+
+  ({String host, int port}) _velocityBind(
+    ConsumerProfile profile,
+    String instance,
+  ) {
+    final File config = File(
+      p.join(_instanceDir(profile, instance), 'velocity.toml'),
+    );
+    final RegExpMatch? match = config.existsSync()
+        ? RegExp(
+            r'''^\s*bind\s*=\s*["']([^"']+)["']\s*(?:#.*)?$''',
+            multiLine: true,
+          ).firstMatch(config.readAsStringSync())
+        : null;
+    final Uri? uri = match == null ? null : Uri.tryParse('tcp://${match[1]}');
+    if (uri == null ||
+        !uri.hasPort ||
+        uri.port < 1 ||
+        uri.port > 65535 ||
+        uri.host.isEmpty) {
+      throw _NativeCommandException(
+        'Invalid or missing Velocity bind for $instance',
+        2,
+      );
+    }
+    return (host: uri.host, port: uri.port);
+  }
+
   void _ensureLocalServerProperties(ConsumerProfile profile, String instance) {
+    _ensureGameInstance(profile, instance, 'use server properties for');
     final path = _instanceServerProperties(profile, instance);
 
     if (_isLink(path)) {

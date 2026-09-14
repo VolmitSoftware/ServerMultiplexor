@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "Four hour outdoor movement workload",
+  "bounds": { "min": [-256, -48, -256], "max": [256, 256, 256] },
+  "roles": [
+    { "name": "explorer", "weight": 3, "activities": { "explore": 8, "patrol": 3, "chat": 1, "idle": 2 } },
+    { "name": "local", "weight": 2, "activities": { "explore": 2, "patrol": 8, "chat": 1, "idle": 2 } }
+  ],
+  "goals": { "patrol": 250, "explore": 250, "chat": 30 },
+  "completion": "duration",
+  "pacing": { "minMs": 750, "maxMs": 4000 },
+  "failurePolicy": { "maxConsecutive": 12, "maxTotal": 2000 },
+  "schedule": [
+    { "atSeconds": 0, "activeBots": 4 },
+    { "atSeconds": 300, "activeBots": 8 },
+    { "atSeconds": 900, "activeBots": 16 },
+    { "atSeconds": 10800, "activeBots": 8 }
+  ],
+  "reportIntervalSeconds": 30,
+  "stallTimeoutSeconds": 180
+}

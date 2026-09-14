@@ -37,6 +37,13 @@ class TermIo {
   bool _rawMode = false;
   bool _mouseEnabled = false;
   StreamSubscription<ProcessSignal>? _sigintSub;
+  int _signalExitDeferrals = 0;
+
+  void deferSignalExit() => _signalExitDeferrals++;
+
+  void resumeSignalExit() {
+    if (_signalExitDeferrals > 0) _signalExitDeferrals--;
+  }
 
   /// True while the app is drawing on the alternate screen buffer. Set by
   /// whoever wrote `\x1B[?1049h` so [restoreTerminal] — and therefore the
@@ -293,6 +300,7 @@ class TermIo {
   /// is handled by the UI instead).
   void installSignalRestore() {
     _sigintSub ??= ProcessSignal.sigint.watch().listen((ProcessSignal _) {
+      if (_signalExitDeferrals > 0) return;
       restoreTerminal();
       stdout.writeln();
       exit(130);

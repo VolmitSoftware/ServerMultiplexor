@@ -79,6 +79,7 @@ sweep.yaml
 **/build/
 **/coverage/
 **/node_modules/
+**/.gradle/
 
 # Local manager/runtime state
 .manager-state/
@@ -99,7 +100,7 @@ plugins/
 
 # Local binaries/tools
 BuildTools.jar
-multiplexor
+/multiplexor
 multiplexor.exe
 multiplexor.building.*
 multiplexor.exe.building.*

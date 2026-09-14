@@ -224,6 +224,7 @@ void main() {
         WorkspaceModalAction.bulkActions,
         WorkspaceModalAction.diagnostics,
         WorkspaceModalAction.templates,
+        WorkspaceModalAction.networks,
       ]);
     });
 

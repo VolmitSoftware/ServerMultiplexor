@@ -21,6 +21,7 @@ import '../runtime_state.dart';
 import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
 import 'monitor_hitbox.dart';
+import 'monitor_network_tree.dart';
 
 /// Columns before the name: checkbox, focus selector, status, and spacing.
 const int _tablePrefix = 8;
@@ -120,6 +121,18 @@ List<_SelectedMetadataLine> _selectedMetadataLines({
   required int inner,
 }) {
   final List<_SelectedMetadataLine> lines = <_SelectedMetadataLine>[];
+  final MonitorNetworkRow? network = snapshot.networkRows[instance];
+  if (network != null) {
+    lines.addAll(
+      _wrappedMetadata(
+        'NETWORK',
+        network.isProxy
+            ? '${network.network} · Velocity · port ${network.port}'
+            : '${network.network} · via ${network.proxy} · ${network.alias}:${network.port}',
+        inner,
+      ),
+    );
+  }
   final String? reason = snapshot.operationBlockReasonFor(instance);
   if (reason != null) {
     lines.addAll(_wrappedMetadata('BLOCKED:', reason, inner, blocked: true));
@@ -415,12 +428,13 @@ List<String> renderKpiStrip({
 }
 
 /// One column of the fleet table.
-enum _TableColumn { name, state, players, tps, trend, mem, cpu, up }
+enum _TableColumn { name, port, state, players, tps, trend, mem, cpu, up }
 
 /// The column headers, and which columns right-align (the numeric readings,
 /// so their units line up down the table).
 const Map<_TableColumn, String> _tableHeaders = <_TableColumn, String>{
   _TableColumn.name: 'NAME',
+  _TableColumn.port: 'PORT',
   _TableColumn.state: 'STATE',
   _TableColumn.players: 'PLAYERS',
   _TableColumn.tps: 'TPS',
@@ -430,6 +444,7 @@ const Map<_TableColumn, String> _tableHeaders = <_TableColumn, String>{
   _TableColumn.up: 'UP',
 };
 const Set<_TableColumn> _rightAligned = <_TableColumn>{
+  _TableColumn.port,
   _TableColumn.players,
   _TableColumn.tps,
   _TableColumn.mem,
@@ -452,10 +467,12 @@ const List<_TableColumn> _tableDropOrder = <_TableColumn>[
 /// whole in [_tableDropOrder] until the row fits, with a wide terminal's
 /// slack going to the trend sparkline (up to [_maxTrendCells]).
 ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) _planTable(
-  int inner,
-) {
+  int inner, {
+  bool networkTree = false,
+}) {
   final Map<_TableColumn, int> widths = <_TableColumn, int>{
-    _TableColumn.name: _colNameWidth,
+    _TableColumn.name: networkTree ? 28 : _colNameWidth,
+    _TableColumn.port: 5,
     _TableColumn.state: _colStateWidth,
     _TableColumn.players: _colPlayersWidth,
     _TableColumn.tps: _colTpsWidth,
@@ -465,6 +482,7 @@ const List<_TableColumn> _tableDropOrder = <_TableColumn>[
     _TableColumn.up: _colUpWidth,
   };
   final List<_TableColumn> columns = _TableColumn.values.toList();
+  if (!networkTree) columns.remove(_TableColumn.port);
 
   int needed() {
     int total = _tablePrefix + _tableGap * (columns.length - 1);
@@ -523,7 +541,7 @@ MonitorPanelRender renderServerList({
       .where(checkedInstances.contains)
       .length;
   final ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan =
-      _planTable(inner);
+      _planTable(inner, networkTree: snapshot.networkRows.isNotEmpty);
 
   // The header row comes out of the content budget first: a table whose
   // columns nothing names is a guessing game.
@@ -618,6 +636,7 @@ MonitorPanelRender renderServerList({
       _serverTableRow(
         plan: plan,
         instance: snapshot.displayNameFor(instance),
+        network: snapshot.networkRows[instance],
         latest: snapshot.latestFor(instance),
         history: snapshot.historyFor(instance),
         selected: index == selectedIndex,
@@ -640,7 +659,11 @@ MonitorPanelRender renderServerList({
 
   return MonitorPanelRender(
     rows: renderPanel(
-      title: checkedCount == 0 ? 'SERVERS' : 'SERVERS · $checkedCount SELECTED',
+      title: <String>[
+        'SERVERS',
+        if (checkedCount > 0) '$checkedCount SELECTED',
+        if (snapshot.networkTopologyStale) 'NETWORKS STALE',
+      ].join(' · '),
       badge: '${rollup.up}/${rollup.total} UP',
       content: content,
       width: width,
@@ -684,6 +707,7 @@ String _tableHeaderRow({
 String _serverTableRow({
   required ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan,
   required String instance,
+  required MonitorNetworkRow? network,
   required MetricSample? latest,
   required List<MetricSample> history,
   required bool selected,
@@ -723,7 +747,38 @@ String _serverTableRow({
         final String tone = selected || active
             ? theme.textStrong
             : (live ? theme.text : theme.faint);
-        row.write(theme.paint(_fitCell(instance, cellWidth), tone));
+        final String label;
+        if (network == null) {
+          label = instance;
+        } else if (network.isProxy) {
+          label = 'Velocity / ${network.network}';
+        } else {
+          final String branch = theme.glyphs.isAscii
+              ? (network.lastChild ? '`- ' : '|- ')
+              : (network.lastChild ? '└─ ' : '├─ ');
+          final String alias = network.alias == instance
+              ? ''
+              : ' (${network.alias})';
+          label = '$branch$instance$alias';
+        }
+        final String activeMark = active && network != null ? ' *' : '';
+        row.write(
+          theme.paint(
+            '${_fitCell(label, cellWidth - activeMark.length)}$activeMark',
+            tone,
+          ),
+        );
+      case _TableColumn.port:
+        row.write(
+          theme.paint(
+            _fitCell(
+              '${network?.port ?? latest?.port ?? dash}',
+              cellWidth,
+              right: true,
+            ),
+            theme.text,
+          ),
+        );
       case _TableColumn.state:
         final String tone = live ? theme.statusTone(state) : theme.faint;
         row.write(

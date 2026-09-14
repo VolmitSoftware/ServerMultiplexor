@@ -25,6 +25,7 @@ import 'monitor_hitbox.dart';
 import 'monitor_keymap.dart';
 import 'monitor_modal.dart';
 import 'monitor_model.dart';
+import 'monitor_network_tree.dart';
 import 'monitor_selection.dart';
 
 /// How long each iteration waits for input. Together with [_yieldWindow] this
@@ -590,6 +591,7 @@ class MonitorScreen {
       locked: flags.locked,
       isolated: flags.isolated,
       remote: _snapshot.view == MonitorView.remote,
+      networks: _snapshot.consumerName == 'plugin',
       operationBlockReason: instance.isEmpty
           ? null
           : _snapshot.operationBlockReasonFor(instance),
@@ -701,6 +703,11 @@ class MonitorScreen {
     try {
       await sampler.sweep();
       final MonitorSnapshot next = await loadSnapshot();
+      _selectedIndex = reconcileMonitorFocus(
+        previous: _snapshot.instances,
+        next: next.instances,
+        selectedIndex: _selectedIndex,
+      );
       _snapshot = next;
       _dataTime = _latestDataTime(_dataTime);
       _clampSelection();

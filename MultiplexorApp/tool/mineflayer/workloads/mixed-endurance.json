@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "name": "Eight hour mixed player workload",
+  "roles": [
+    { "name": "miner", "weight": 3, "activities": { "patrol": 4, "explore": 2, "mine": 8, "build": 3, "redstone": 1, "farm": 1, "craft": 2, "storage": 3, "chat": 1, "idle": 2 } },
+    { "name": "builder", "weight": 3, "activities": { "patrol": 4, "explore": 2, "mine": 3, "build": 8, "redstone": 2, "farm": 1, "craft": 3, "storage": 3, "chat": 1, "idle": 2 } },
+    { "name": "mechanic", "weight": 2, "activities": { "patrol": 4, "explore": 1, "mine": 1, "build": 2, "redstone": 8, "farm": 4, "craft": 2, "storage": 3, "chat": 1, "idle": 2 } }
+  ],
+  "goals": { "patrol": 500, "mine": 500, "build": 500, "redstone": 500, "farm": 100, "craft": 100, "storage": 100, "chat": 30 },
+  "completion": "duration",
+  "pacing": { "minMs": 350, "maxMs": 2500 },
+  "failurePolicy": { "maxConsecutive": 8, "maxTotal": 1000 },
+  "schedule": [
+    { "atSeconds": 0, "activeBots": 4 },
+    { "atSeconds": 300, "activeBots": 16 },
+    { "atSeconds": 1800, "activeBots": 32 },
+    { "atSeconds": 7200, "activeBots": 16 },
+    { "atSeconds": 14400, "activeBots": 32 },
+    { "atSeconds": 21600, "activeBots": 8 }
+  ],
+  "reportIntervalSeconds": 30,
+  "stallTimeoutSeconds": 180,
+  "messages": ["{bot}: checking supplies for the next {activity} job.", "{bot}: {completed} jobs done as {role}.", "{bot}: working nearby; leave the shared stations clear."]
+}
