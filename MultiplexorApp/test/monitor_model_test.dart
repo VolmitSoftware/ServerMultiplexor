@@ -3,6 +3,7 @@ import 'package:multiplexor/services/monitor/monitor_detail_model.dart';
 import 'package:multiplexor/services/monitor/monitor_frame_util.dart';
 import 'package:multiplexor/services/monitor/monitor_hitbox.dart';
 import 'package:multiplexor/services/monitor/monitor_landing.dart';
+import 'package:multiplexor/services/monitor/monitor_modal.dart';
 import 'package:multiplexor/services/monitor/monitor_model.dart';
 import 'package:multiplexor/services/runtime_state.dart';
 import 'package:multiplexor/utils/terminal/ansi.dart';
@@ -1176,6 +1177,85 @@ void main() {
       );
     });
 
+    test('reserves both header actions at narrow and wide sizes', () {
+      for (final int columns in <int>[80, 132]) {
+        for (final MonitorView view in MonitorView.values) {
+          final MonitorFrame frame = frameOf(
+            snapshot: MonitorSnapshot(
+              instances: const <String>[],
+              history: const <String, List<MetricSample>>{},
+              consumerName: 'W WORKSPACES TAB LOCAL ${'provider-' * 20}',
+              view: view,
+            ),
+            columns: columns,
+          );
+          final String row = Ansi.strip(frame.rows.first);
+          final MonitorHitbox workspace = frame.hitboxes.singleWhere(
+            (MonitorHitbox hit) => hit.id == workspaceHeaderHitId,
+          );
+          final MonitorHitbox switchView = frame.hitboxes.singleWhere(
+            (MonitorHitbox hit) => hit.id == viewSwitchHitId,
+          );
+          expect(row.length, columns);
+          expect(
+            row.substring(workspace.colStart, workspace.colEnd),
+            'W WORKSPACES',
+          );
+          expect(workspace.colStart, row.lastIndexOf('W WORKSPACES'));
+          expect(workspace.colEnd, lessThan(switchView.colStart));
+          expect(
+            row.substring(switchView.colStart, switchView.colEnd),
+            'TAB ${view == MonitorView.local ? 'REMOTE' : 'LOCAL'}',
+          );
+          for (int col = workspace.colStart; col < workspace.colEnd; col++) {
+            expect(
+              hitTest(frame.hitboxes, row: 0, col: col),
+              workspaceHeaderHitId,
+            );
+          }
+          expect(
+            hitTest(frame.hitboxes, row: 0, col: workspace.colEnd),
+            isNot(workspaceHeaderHitId),
+          );
+        }
+      }
+    });
+
+    test('workspace and instance modals shield both header actions', () {
+      final MonitorFrame base = frameOf();
+      for (final MonitorModalState modal in <MonitorModalState>[
+        const WorkspaceModal(),
+        const InstanceModal('alpha'),
+      ]) {
+        final MonitorFrame overlay = overlayModal(
+          base: base,
+          modal: modal,
+          latest: null,
+          locked: false,
+          isolated: false,
+          theme: plain,
+          columns: 80,
+          lines: 24,
+        );
+        for (final String id in <String>[
+          workspaceHeaderHitId,
+          viewSwitchHitId,
+        ]) {
+          final MonitorHitbox original = base.hitboxes.singleWhere(
+            (MonitorHitbox hit) => hit.id == id,
+          );
+          expect(
+            hitTest(overlay.hitboxes, row: 0, col: original.colStart),
+            modalScrimHitId,
+          );
+          expect(
+            overlay.hitboxes.any((MonitorHitbox hit) => hit.id == id),
+            isFalse,
+          );
+        }
+      }
+    });
+
     test('gives the view tab hover and press feedback without moving it', () {
       final MonitorTheme color = MonitorTheme.detect(
         env: <String, String>{'COLORTERM': 'truecolor'},
@@ -1206,6 +1286,36 @@ void main() {
       expect(Ansi.strip(pressed), Ansi.strip(normal));
       expect(hovered, contains('${color.bold}${color.accent}TAB REMOTE'));
       expect(pressed, contains('${color.bold}${color.textStrong}TAB REMOTE'));
+    });
+
+    test('workspace header feedback stays within its own label', () {
+      final MonitorTheme color = MonitorTheme.detect(
+        env: <String, String>{'COLORTERM': 'truecolor'},
+        isTty: true,
+      );
+      String header({String? hoveredId, String? pressedId}) =>
+          buildMonitorFrame(
+            snapshot: twoServers(),
+            selectedIndex: 0,
+            frame: 0,
+            columns: 80,
+            lines: 24,
+            theme: color,
+            range: range,
+            now: now,
+            clockNow: now,
+            hoveredId: hoveredId,
+            pressedId: pressedId,
+          ).rows.first;
+      final String normal = header();
+      final String hovered = header(hoveredId: workspaceHeaderHitId);
+      final String pressed = header(pressedId: workspaceHeaderHitId);
+      expect(Ansi.strip(hovered), Ansi.strip(normal));
+      expect(Ansi.strip(pressed), Ansi.strip(normal));
+      expect(hovered, contains('${color.bold}${color.accent}W WORKSPACES'));
+      expect(pressed, contains('${color.bold}${color.textStrong}W WORKSPACES'));
+      expect(hovered, contains('${color.faint}TAB REMOTE'));
+      expect(pressed, contains('${color.faint}TAB REMOTE'));
     });
 
     test('swaps in the start chip when the selection is stopped', () {

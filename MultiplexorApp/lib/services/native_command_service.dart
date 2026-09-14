@@ -26,6 +26,7 @@ import 'addons/addon_resolver.dart';
 import 'content/content_store.dart';
 import '../utils/terminal/term_io.dart';
 import 'consumer_service.dart';
+import 'build_process.dart';
 import 'dropin_sync_policy.dart';
 import 'gameplay_test_service.dart';
 import 'instance_bulk.dart';
@@ -47,6 +48,7 @@ import '../models/template_summary.dart';
 import 'runtime_state.dart';
 import 'runtime_stop.dart';
 import 'server_ping.dart';
+import 'template_catalog.dart';
 
 part 'native_command_help.dart';
 part 'native_cli_output.dart';
@@ -56,6 +58,7 @@ part 'native_command_recovery.dart';
 part 'native_command_network.dart';
 part 'native_command_swarm.dart';
 part 'native_command_sessions.dart';
+part 'native_command_templates.dart';
 
 class NativeCommandService {
   NativeCommandService({
@@ -115,21 +118,44 @@ class NativeCommandService {
   }
 
   List<TemplateSummary> listTemplates() {
+    final List<TemplateSummary> templates = <TemplateSummary>[
+      if (_activeConsumer == ConsumerProfile.plugin)
+        ...bundledTemplates.map((BundledTemplate item) => item.summary),
+    ];
     final Directory directory = Directory(_templatesDir());
-    if (!directory.existsSync()) return const <TemplateSummary>[];
-    final List<TemplateSummary> templates = <TemplateSummary>[];
-    for (final File file
-        in directory.listSync(followLinks: false).whereType<File>()) {
-      if (!file.path.endsWith('.yaml')) continue;
-      final String name = p.basenameWithoutExtension(file.path);
-      final Map<String, dynamic> template = _loadTemplate(name);
-      templates.add(
-        TemplateSummary(
-          name: name,
-          type: template['type']?.toString() ?? 'purpur',
-          minecraft: template['mc']?.toString(),
-        ),
-      );
+    if (directory.existsSync()) {
+      for (final File file
+          in directory.listSync(followLinks: false).whereType<File>()) {
+        if (!file.path.endsWith('.yaml')) continue;
+        final String name = p.basenameWithoutExtension(file.path);
+        _ensureWritableTemplateName(name);
+        final Map<String, dynamic> template = _loadTemplate(name);
+        final bool network = template['kind'] == 'network';
+        if (network && _activeConsumer != ConsumerProfile.plugin) continue;
+        final Map<String, dynamic> backends = _mapValue(template['backends']);
+        final List<String> types = network
+            ? backends.values
+                  .map(
+                    (Object? value) =>
+                        _mapValue(value)['type']?.toString() ?? 'purpur',
+                  )
+                  .toSet()
+                  .toList()
+            : <String>[template['type']?.toString() ?? 'purpur'];
+        templates.add(
+          TemplateSummary(
+            name: name,
+            type: network ? 'velocity' : types.first,
+            minecraft: network && backends.isNotEmpty
+                ? _mapValue(backends.values.first)['mc']?.toString()
+                : template['mc']?.toString(),
+            kind: network ? 'network' : 'server',
+            description: template['description']?.toString() ?? '',
+            buildTypes: types,
+            backendCount: backends.length,
+          ),
+        );
+      }
     }
     templates.sort(
       (TemplateSummary a, TemplateSummary b) => a.name.compareTo(b.name),
@@ -223,6 +249,9 @@ class NativeCommandService {
   );
 
   Future<int> _dispatch(List<String> args, _NativeIoBuffer io) async {
+    if (args.length > 1 && args[0] == 'template' && args[1] == 'apply') {
+      return _withNetworkOperation(() => _dispatchUnlocked(args, io));
+    }
     if (args.length > 1 &&
         args.first == 'gameplay' &&
         const <String>{'sessions', 'sessions-host'}.contains(args[1])) {
@@ -1194,7 +1223,11 @@ class NativeCommandService {
     throw _NativeCommandException('Usage: instance port [instance] [port]', 2);
   }
 
-  Future<int> _dispatchServer(List<String> args, _NativeIoBuffer io) async {
+  Future<int> _dispatchServer(
+    List<String> args,
+    _NativeIoBuffer io, {
+    String? creationToken,
+  }) async {
     if (args.isEmpty) {
       throw _NativeCommandException(
         'Usage: server <create|create-many> ...',
@@ -1264,6 +1297,8 @@ class NativeCommandService {
         jarPath: jar,
         minecraft: options['mc'],
         importJar: true,
+        creationToken: creationToken,
+        retainCreationOwner: creationToken != null,
         isolated: isolated,
         io: io,
       );
@@ -1315,6 +1350,8 @@ class NativeCommandService {
       type: type,
       jarPath: jarPath,
       minecraft: requestedMc ?? (autoBuild ? mc : null),
+      creationToken: creationToken,
+      retainCreationOwner: creationToken != null,
       isolated: isolated,
       io: io,
     );
@@ -2317,25 +2354,10 @@ class NativeCommandService {
 
     switch (sub) {
       case 'list':
-        final dir = Directory(_templatesDir());
-        if (!dir.existsSync()) {
-          io.write('(none)');
-          return 0;
-        }
-        final names =
-            dir
-                .listSync()
-                .whereType<File>()
-                .where((file) => file.path.endsWith('.yaml'))
-                .map((file) => p.basenameWithoutExtension(file.path))
-                .toList(growable: false)
-              ..sort();
-        if (names.isEmpty) {
-          io.write('(none)');
-        } else {
-          for (final name in names) {
-            io.write(name);
-          }
+        final List<TemplateSummary> templates = listTemplates();
+        if (templates.isEmpty) io.write('(none)');
+        for (final TemplateSummary template in templates) {
+          io.write(template.name);
         }
         return 0;
       case 'init':
@@ -2353,6 +2375,7 @@ class NativeCommandService {
           parsed.positionals.first,
           label: 'template',
         );
+        _ensureWritableTemplateName(name);
         final path = _templatePath(name);
         if (File(path).existsSync()) {
           throw _NativeCommandException('Template already exists: $name', 2);
@@ -2373,18 +2396,24 @@ class NativeCommandService {
         io.write('[INFO] $path');
         return 0;
       case 'show':
-        final name = _requireTemplateName(rest, 'Usage: template show <name>');
-        final file = File(_templatePath(name));
-        if (!file.existsSync()) {
-          throw _NativeCommandException('Template not found: $name', 2);
+        final String name = _requireTemplateName(
+          rest,
+          'Usage: template show <name>',
+        );
+        final BundledTemplate? bundled = _bundledTemplate(name);
+        if (bundled != null) {
+          io.write(_yamlFormatMap(bundled.toMap(), 0));
+        } else {
+          _loadTemplate(name);
+          io.write(File(_templatePath(name)).readAsStringSync().trimRight());
         }
-        io.write(file.readAsStringSync().trimRight());
         return 0;
       case 'delete':
         final name = _requireTemplateName(
           rest,
           'Usage: template delete <name>',
         );
+        _ensureWritableTemplateName(name);
         final file = File(_templatePath(name));
         if (!file.existsSync()) {
           throw _NativeCommandException('Template not found: $name', 2);
@@ -2401,6 +2430,7 @@ class NativeCommandService {
         }
         final instance = rest[0];
         final name = _validateSimpleName(rest[1], label: 'template');
+        _ensureWritableTemplateName(name);
         if (!_instanceExists(profile, instance)) {
           throw _NativeCommandException('Instance not found: $instance', 2);
         }
@@ -2413,7 +2443,7 @@ class NativeCommandService {
       case 'apply':
         final parsed = _parseFlexibleArgs(
           rest,
-          booleanFlags: const <String>{'auto-build', 'sync'},
+          booleanFlags: const <String>{'auto-build', 'sync', 'isolated'},
         );
         if (parsed.positionals.length != 2) {
           throw _NativeCommandException(
@@ -2427,7 +2457,14 @@ class NativeCommandService {
         );
         final instance = parsed.positionals[1];
         final template = _loadTemplate(name);
-        await _templateApply(profile, name, template, instance, parsed, io);
+        await _applyTemplateTransaction(
+          profile,
+          name,
+          template,
+          instance,
+          parsed,
+          io,
+        );
         io.write('[OK] Template applied: $name -> $instance');
         return 0;
       default:
@@ -2711,6 +2748,8 @@ class NativeCommandService {
   }
 
   Map<String, dynamic> _loadTemplate(String name) {
+    final BundledTemplate? bundled = _bundledTemplate(name);
+    if (bundled != null) return Map<String, dynamic>.from(bundled.toMap());
     final file = File(_templatePath(name));
     if (!file.existsSync()) {
       throw _NativeCommandException('Template not found: $name', 2);
@@ -2854,8 +2893,9 @@ class NativeCommandService {
     Map<String, dynamic> template,
     String instance,
     _FlexibleArgs parsed,
-    _NativeIoBuffer io,
-  ) async {
+    _NativeIoBuffer io, {
+    String? creationToken,
+  }) async {
     if (_instanceExists(profile, instance)) {
       _ensureGameInstance(profile, instance, 'apply a template to');
       _ensureNetworkDetached(profile, instance, action: 'apply a template');
@@ -2915,7 +2955,7 @@ class NativeCommandService {
       createArgs.add('--auto-build');
     }
 
-    await _dispatchServer(createArgs, io);
+    await _dispatchServer(createArgs, io, creationToken: creationToken);
     if (runtimeKeys.isNotEmpty) {
       _runtimeSettingsSave(
         profile,
@@ -2934,6 +2974,12 @@ class NativeCommandService {
     final dropins = _mapValue(template['dropins']);
     final cleanDropins = _truthy(dropins['clean']);
     if (parsed.flag('sync') || cleanDropins) {
+      if (_instanceIsolated(profile, instance)) {
+        io.write(
+          '[INFO] $instance is isolated; shared drop-in sync was skipped.',
+        );
+        return;
+      }
       final report = _pluginsSyncInstance(
         profile,
         instance,
@@ -4419,6 +4465,11 @@ class NativeCommandService {
       return output;
     }
 
+    final String java = await _runtimeJavaPreflight(
+      profile,
+      null,
+      minecraft: mc,
+    );
     final buildToolsUrl =
         Platform.environment['SPIGOT_BUILDTOOLS_URL']?.trim().isNotEmpty == true
         ? Platform.environment['SPIGOT_BUILDTOOLS_URL']!.trim()
@@ -4445,41 +4496,33 @@ class NativeCommandService {
     io.write(
       '[INFO] Running BuildTools for Spigot mc=$mc (this can take a while)',
     );
-    final process = await Process.start(
-      'java',
-      <String>['-jar', buildToolsJar, '--rev', mc, '--compile', 'SPIGOT'],
-      workingDirectory: workDir,
-      runInShell: true,
+    final File log = File(
+      p.join(
+        _consumerRoot(profile),
+        'state',
+        'build-logs',
+        'spigot-$mc-${DateTime.now().millisecondsSinceEpoch}.log',
+      ),
     );
-    final stderrTail = <String>[];
-    void onStderrLine(String line) {
-      stderrTail.add(line);
-      if (stderrTail.length > 40) {
-        stderrTail.removeAt(0);
-      }
-      if (io.stream) {
-        stdout.writeln('  $line');
-      }
-    }
-
-    final stdoutDone = process.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .forEach((line) {
-          if (io.stream) {
-            stdout.writeln('  $line');
-          }
-        });
-    final stderrDone = process.stderr
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .forEach(onStderrLine);
-    final exitCode = await process.exitCode;
-    await stdoutDone;
-    await stderrDone;
-    if (exitCode != 0) {
+    io.write('[INFO] Build log: ${log.path}');
+    final BuildProcessResult result = await runBuildProcess(
+      executable: java,
+      arguments: <String>[
+        '-jar',
+        buildToolsJar,
+        '--rev',
+        mc,
+        '--compile',
+        'SPIGOT',
+      ],
+      workingDirectory: workDir,
+      logFile: log,
+      onLine: io.stream ? (String line) => stdout.writeln('  $line') : null,
+    );
+    if (result.exitCode != 0) {
       throw _NativeCommandException(
-        'BuildTools failed for mc=$mc: ${stderrTail.join('\n')}',
+        'BuildTools failed for mc=$mc (exit ${result.exitCode}).\n'
+        '${result.outputTail.join('\n')}\nBuild log: ${log.path}',
         1,
       );
     }
@@ -5918,6 +5961,7 @@ class NativeCommandService {
     bool isolated = false,
     int? port,
     String? creationToken,
+    bool retainCreationOwner = false,
     _NativeIoBuffer? io,
   }) async {
     if (name.trim().isEmpty) {
@@ -5952,6 +5996,7 @@ class NativeCommandService {
       proxy: normalizedType == 'velocity',
       creationToken: creationToken,
       retainCreationOwner:
+          retainCreationOwner ||
           normalizedType == 'velocity' && creationToken != null,
       io: io,
     );
@@ -10096,7 +10141,7 @@ class NativeCommandService {
           fields: const <String, String>{'isolated': 'true'},
         );
       }
-      owner.deleteSync();
+      if (!retainCreationOwner) owner.deleteSync();
     } catch (_) {
       _deleteOwnedPartialInstance(instancePath, ownerToken);
       rethrow;

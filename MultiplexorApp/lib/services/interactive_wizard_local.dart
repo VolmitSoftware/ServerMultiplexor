@@ -77,33 +77,108 @@ extension _LocalWizard on InteractiveWizard {
       await Ui.pause();
       return;
     }
-    final TemplateSummary template = await menuSelect<TemplateSummary>(
-      'Create from template',
-      <MenuEntry<TemplateSummary>>[
+    while (true) {
+      final String
+      selected = await menuSelect<String>('Templates', <MenuEntry<String>>[
         for (final TemplateSummary template in templates)
-          MenuEntry<TemplateSummary>(
+          MenuEntry<String>(
             template.name,
-            value: template,
-            detail:
-                '${template.type} ${template.minecraft ?? 'version not set'}',
+            value: template.name,
+            detail: template.description.isNotEmpty
+                ? template.description
+                : '${template.type} ${template.minecraft ?? 'version not set'}',
           ),
-      ],
-    );
+        const MenuEntry<String>('Back to dashboard', value: ''),
+      ]);
+      if (selected.isEmpty) return;
+      final TemplateSummary template = templates.firstWhere(
+        (TemplateSummary candidate) => candidate.name == selected,
+      );
+      if (await _useTemplate(template)) return;
+    }
+  }
+
+  Future<bool> _useTemplate(TemplateSummary template) async {
+    final bool network = template.kind == 'network';
+    while (true) {
+      Ui.keyValue('Template', template.name);
+      Ui.keyValue(
+        'Source',
+        template.bundled ? 'Bundled example' : 'Saved YAML',
+      );
+      if (template.description.isNotEmpty) Ui.note(template.description);
+      Ui.keyValue(
+        'Creates',
+        network
+            ? '${template.backendCount} backend servers and a Velocity proxy'
+            : 'One ${template.type} server',
+      );
+      if (template.minecraft != null) {
+        Ui.keyValue('Minecraft', template.minecraft!);
+      }
+      Ui.note('Created servers stay stopped until you start them.');
+      final String action =
+          await menuSelect<String>(template.name, <MenuEntry<String>>[
+            MenuEntry<String>(
+              network
+                  ? 'Create network from template'
+                  : 'Create server from template',
+              value: 'create',
+            ),
+            const MenuEntry<String>('Inspect template YAML', value: 'show'),
+            const MenuEntry<String>('Back to templates', value: 'back'),
+          ]);
+      if (action == 'back') return false;
+      if (action == 'create') break;
+      await _shellRun(<String>['template', 'show', template.name]);
+      await Ui.pause();
+    }
     final String name = await Ui.input(
-      'New instance name',
-      validator: _isValidInstanceName,
-      validationMessage: 'Use letters, numbers, ., _, or - with no spaces.',
+      network ? 'New network name' : 'New instance name',
+      validator: network
+          ? (String value) =>
+                value.length <= 55 && NetworkDefinition.validName(value)
+          : _isValidInstanceName,
+      validationMessage: network
+          ? 'Use 1–55 letters, numbers, _, or -, beginning with a letter or number.'
+          : 'Use letters, numbers, ., _, or - with no spaces.',
     );
-    final List<BuildCacheEntry> cached = template.type == 'custom'
-        ? const <BuildCacheEntry>[]
-        : await _cachedBuilds(template.type);
-    final bool download =
-        template.type != 'custom' &&
-        (template.minecraft == null ||
-            BuildCachePolicy.shouldRefresh(
-              type: template.type,
-              cachedAge: newestCachedAge(cached, version: template.minecraft),
-            ));
+    final List<String> buildTypes =
+        (template.buildTypes.isNotEmpty
+                ? template.buildTypes
+                : <String>[template.type])
+            .where((String type) => type != 'custom')
+            .toList(growable: false);
+    bool hasCachedBuilds = buildTypes.isNotEmpty;
+    for (final String type in buildTypes) {
+      final List<BuildCacheEntry> cached = await _cachedBuilds(type);
+      hasCachedBuilds =
+          hasCachedBuilds &&
+          newestCachedAge(cached, version: template.minecraft) != null;
+    }
+    final bool download;
+    if (hasCachedBuilds) {
+      download = await menuSelect<bool>('Server jars', const <MenuEntry<bool>>[
+        MenuEntry<bool>('Use cached builds', value: false),
+        MenuEntry<bool>('Download fresh builds', value: true),
+      ]);
+    } else {
+      download = buildTypes.isNotEmpty;
+    }
+    Ui.keyValue(network ? 'Network' : 'Instance', name);
+    Ui.keyValue(
+      'Builds',
+      download ? 'Download required builds' : 'Use existing jars',
+    );
+    if (network) {
+      Ui.note('Velocity is resolved separately during network creation.');
+    }
+    if (!await Ui.confirm(
+      'Create $name from ${template.name}?',
+      defaultValue: false,
+    )) {
+      return true;
+    }
     final int code = await _shellRun(<String>[
       'template',
       'apply',
@@ -113,10 +188,14 @@ extension _LocalWizard on InteractiveWizard {
     ]);
     if (code == 0) {
       Ui.success(
-        '$name created and stopped. Review its runtime and addons before starting.',
+        network
+            ? '$name created and stopped. Open NETWORKS to start it.'
+            : '$name created and stopped. Review its runtime and addons before starting.',
       );
     }
     await Ui.pause();
+    if (code == 0 && network) await _networkActions(name);
+    return true;
   }
 
   Future<void> _instanceRuntimeSettings(String name) async {

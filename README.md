@@ -73,7 +73,7 @@ Mouse support needs a terminal that reports SGR mouse events, which every curren
 | `g`, `G` | Open all running Local consoles: a native terminal grid on Windows, a tmux grid on macOS/Linux. |
 | `n` | Create a new instance. Mohist creation offers a persistent Mods/Plugins source checklist; other isolated servers offer per-artifact one-time copies. |
 | `b` | With checked rows, open actions for those exact servers. Otherwise open Remote bulk actions or Local Build & tuning. |
-| `w` | Open the workspace card — the keyboard twin of `[ MORE ]` on the workspace bar. Landing view only. |
+| `w` | Open the workspace card, also available through **WORKSPACES** beside the top Local/Remote control or `[ MORE ]` on the workspace bar. Landing view only. |
 | `c` | Switch consumer profile (rebuilds the dashboard against the new one). |
 | `r` | Cycle the chart window: `15m` → `1h` → `6h` → `24h` → `7d`. |
 | `q`, `ctrl-c` | Quit. |
@@ -84,7 +84,7 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
-Local instance cards include **BACKUPS** for creating, verifying, and restoring snapshots, and **RUNTIME** for per-instance Java, heap, presets, compatibility checks, and template export. The workspace card includes **DIAGNOSTICS** and **TEMPLATES**. New offers saved templates when available; templates apply runtime settings only to the new instance.
+Local instance cards include **BACKUPS** for creating, verifying, and restoring snapshots, and **RUNTIME** for per-instance Java, heap, presets, compatibility checks, and template export. **WORKSPACES** in the top bar opens the workspace card without changing the selected Local/Remote view. The Local card includes **DIAGNOSTICS**, **TEMPLATES**, and, for the plugin consumer, **NETWORKS**. **TEMPLATES** and **New → Use an example or saved template** offer bundled examples alongside saved templates. Each entry describes what it creates and lets you inspect its YAML. Choose cached or fresh server builds, review the setup, and create it. New servers stay stopped; templates apply runtime settings only to their new instances.
 
 An isolated Local instance's **RUNTIME → Run bot swarm** action selects idle, wander, redstone, workshop, mixed, stress, or a custom JSON recipe. Choose the bot count, duration, seed, activity radius, placement, origin, and scripted chat. Stress also offers a JSON workload, coordinate bounds, activity goals, and duration or goal completion. The wizard shows persistent arena changes before starting. A stopped target is prepared for offline loopback access, started for the run, and stopped afterward; an already running target stays running.
 
@@ -120,7 +120,7 @@ The workspace card (`[ MORE ]` on the workspace bar) holds the actions that are 
 
 When upstream version metadata is unavailable, the picker offers known cached versions, manual entry, and Retry. Cached choices remain usable without a refresh, and no fallback is labeled latest.
 
-Version refresh is automatic — the wizard never asks "refresh from upstream?". Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Creates and updates reuse a cached build when it is under 24 hours old and silently fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception: an existing BuildTools jar is always reused no matter its age, since rebuilds take many minutes — force one with `build spigot --force`.
+Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Ordinary creates and updates reuse a cached build when it is under 24 hours old and fetch a fresh one otherwise (or when nothing is cached). Template creation lets you choose cached or fresh builds when matching jars are available. Spigot is the exception to age-based refresh: an existing BuildTools jar is reused no matter its age, since rebuilds take many minutes. Force one with `build spigot --force`.
 
 Pull latest builds refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line.
 
@@ -569,12 +569,24 @@ Updates and restores allow up to 60 seconds for a clean shutdown. If the server 
 
 | Command | What it does |
 |---------|--------------|
-| `template list` | List templates under `.multiplexor/templates/`. |
+| `template list` | List bundled examples and saved templates under `.multiplexor/templates/`. |
 | `template init <name> [--type <type>] [--mc <v>] [--heap <size>] [--preset <name>] [--isolated]` | Write a starter YAML template. |
-| `template show <name>` | Print the YAML template. |
-| `template apply <template> <instance> [--auto-build] [--sync] [--isolated]` | Create an instance from a template, apply server.properties overrides, apply per-instance runtime overrides, and optionally sync dropins. |
+| `template show <name>` | Print the complete YAML of a bundled or saved template. |
+| `template apply <template> <name> [--auto-build] [--sync] [--isolated]` | Create a stopped server, or use the target name as the prefix for a network template. Apply server.properties and per-instance runtime overrides; optionally sync dropins. Network templates create their backends and Velocity routing together. |
 | `template export <instance> <template>` | Create a template from an existing instance's source metadata, runtime settings, isolation flag, and `server.properties`. |
-| `template delete <name>` | Delete a template file. |
+| `template delete <name>` | Delete a saved template file. Bundled examples cannot be deleted or overwritten. |
+
+Bundled examples target Minecraft **1.21.11**. This is an explicit example version, not a claim about the latest release.
+
+| Example | Creates |
+|---------|---------|
+| `paper-dev` | A Paper server for plugin development. |
+| `purpur-survival` | A Purpur survival server. |
+| `bot-settlement` | An isolated, offline, loopback server with flat terrain for the settlement session profiles. The session run creates the settlement fixtures. |
+| `velocity-lobby-survival` | A Velocity proxy and two backends with stable `lobby` and `survival` routing aliases. |
+| `velocity-bot-lab` | An isolated, offline, loopback Velocity network ready for the bundled Velocity settlement session profile. |
+
+Network templates belong to the plugin consumer. Applying one as `demo` creates the network `demo`, proxy `demo-proxy`, and backends `demo-lobby` and `demo-survival`. Everything remains stopped. Open **WORKSPACES → NETWORKS → demo → Start network** when ready. The bot lab uses loopback access; the ordinary Velocity example authenticates players. To customize an example, save `template show` output under a different name in `.multiplexor/templates/` and edit that YAML.
 
 ### addons — per-instance plugin and mod checklists
 
@@ -676,7 +688,7 @@ Install, update, and remove stage file and lockfile changes before commit. A fai
 
 **Build caches keep one jar per Minecraft version.** Every successful build deletes the older builds of that same version, so upstream build-number churn stops accumulating. Two things are never pruned: a jar an instance still launches from (instances stay pinned to whatever they were created with until you update them), and the newest jar of every *other* Minecraft version — switching back to an older version still hits the cache instead of re-downloading or, for spigot, recompiling.
 
-BuildTools work directories are roughly 700 MB of decompiled sources each and are only needed while a spigot compile runs. A successful compile removes its own; `build prune` clears any left behind by an interrupted one.
+BuildTools uses the Java executable selected in consumer runtime settings and checks its compatibility before compiling. Its combined output is saved under the consumer's `state/build-logs/`; failures include the exit code, relevant output from both streams, and the log path. BuildTools work directories are roughly 700 MB of decompiled sources each and are only needed while a spigot compile runs. A successful compile removes its own; `build prune` clears any left behind by an interrupted one.
 
 ### repos — sync upstream version metadata
 
@@ -834,6 +846,17 @@ multiplexor update auto on
 # Apply a reusable server blueprint
 ./start.sh template init purpur-dev --type purpur --heap 6G --preset aikar
 ./start.sh template apply purpur-dev dev-lobby --auto-build --sync
+
+# Create a complete Velocity example, then start it
+./start.sh --consumer plugin template apply velocity-lobby-survival demo --auto-build
+./start.sh --consumer plugin network start demo
+
+# Create a stopped, isolated network for the bot session profiles
+./start.sh --consumer plugin template apply velocity-bot-lab bot-lab --auto-build
+
+# Save an editable copy of an example under a new template name
+mkdir -p .multiplexor/templates
+./start.sh template show bot-settlement > .multiplexor/templates/my-bot-world.yaml
 
 # Install managed content from Modrinth, then sync it everywhere
 ./start.sh content search luckperms

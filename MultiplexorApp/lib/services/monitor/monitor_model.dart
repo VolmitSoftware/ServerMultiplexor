@@ -238,7 +238,7 @@ MonitorFrame buildMonitorFrame({
     ...renderKpiStrip(rollup: rollup, columns: columns, theme: theme),
   ];
   final List<MonitorHitbox> hitboxes = <MonitorHitbox>[
-    if (_headerViewSwitchHitbox(header) case final MonitorHitbox hitbox) hitbox,
+    ..._headerActionHitboxes(header, snapshot.view),
   ];
 
   if (hasInstances) {
@@ -518,10 +518,16 @@ List<String> _headerPanel({
       : hoveredId == viewSwitchHitId
       ? '${theme.bold}${theme.accent}'
       : theme.faint;
+  const String workspaceLabel = 'W WORKSPACES';
+  final String workspaceTone = pressedId == workspaceHeaderHitId
+      ? '${theme.bold}${theme.textStrong}'
+      : hoveredId == workspaceHeaderHitId
+      ? '${theme.bold}${theme.accent}'
+      : theme.faint;
   final String spinner = monitorSpinner(theme, frame);
   final int badgeBudget = columns - 8 - 'MULTIPLEXOR'.length;
   final int fixedBadgeWidth = Ansi.visibleLength(
-    '$spinner  · $switchLabel · $clock',
+    '$spinner  · $workspaceLabel · $switchLabel · $clock',
   );
   final int providerBudget = badgeBudget - fixedBadgeWidth;
   final String provider = Ansi.clipVisible(
@@ -532,7 +538,7 @@ List<String> _headerPanel({
       '$spinner '
       '$provider · ';
   final String badgeSuffix = ' · $clock';
-  final String badge = '$badgePrefix$switchLabel$badgeSuffix';
+  final String badge = '$badgePrefix$workspaceLabel · $switchLabel$badgeSuffix';
 
   return renderPanel(
     // The wordmark is the one title the panel does not style itself: the
@@ -544,6 +550,8 @@ List<String> _headerPanel({
     badge: badge,
     styledBadge:
         '${theme.paint(badgePrefix, theme.faint)}'
+        '${theme.paint(workspaceLabel, workspaceTone)}'
+        '${theme.paint(' · ', theme.faint)}'
         '${theme.paint(switchLabel, switchTone)}'
         '${theme.paint(badgeSuffix, theme.faint)}',
     content: <String>[
@@ -557,23 +565,32 @@ List<String> _headerPanel({
   );
 }
 
-/// Locates the view-switch label after the panel has laid out its right-hand
-/// badge. The provider name is clipped above to reserve this space, but the
-/// lookup still refuses to create an invisible hitbox if layout ever changes.
-MonitorHitbox? _headerViewSwitchHitbox(List<String> header) {
+/// Provider text gives up space before either action. Locate the final label
+/// so a provider name containing the same words cannot steal its hitbox.
+List<MonitorHitbox> _headerActionHitboxes(
+  List<String> header,
+  MonitorView view,
+) {
   if (header.isEmpty) {
-    return null;
+    return const <MonitorHitbox>[];
   }
   final String row = Ansi.strip(header.first);
-  final Match? match = RegExp(r'TAB (?:REMOTE|LOCAL)').firstMatch(row);
-  if (match == null) {
-    return null;
+  final List<MonitorHitbox> hitboxes = <MonitorHitbox>[];
+  for (final (String id, String label) in <(String, String)>[
+    (workspaceHeaderHitId, 'W WORKSPACES'),
+    (viewSwitchHitId, 'TAB ${view == MonitorView.local ? 'REMOTE' : 'LOCAL'}'),
+  ]) {
+    final int start = row.lastIndexOf(label);
+    if (start < 0) continue;
+    hitboxes.add(
+      MonitorHitbox(
+        id: id,
+        kind: MonitorHitKind.button,
+        row: 0,
+        colStart: start,
+        colEnd: start + label.length,
+      ),
+    );
   }
-  return MonitorHitbox(
-    id: viewSwitchHitId,
-    kind: MonitorHitKind.button,
-    row: 0,
-    colStart: match.start,
-    colEnd: match.end,
-  );
+  return hitboxes;
 }

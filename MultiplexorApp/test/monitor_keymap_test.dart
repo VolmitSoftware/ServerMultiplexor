@@ -89,7 +89,7 @@ void main() {
       },
     );
 
-    test('maps w to the workspace card, the keyboard twin of [ MORE ]', () {
+    test('maps w to the workspace card behind the WORKSPACES header', () {
       expect(monitorActionForEvent(typed('w')), MonitorAction.workspaceCard);
     });
 

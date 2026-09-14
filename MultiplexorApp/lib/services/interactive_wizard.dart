@@ -4415,7 +4415,10 @@ class InteractiveWizard {
       final String choice =
           await menuSelect<String>('New instance', const <MenuEntry<String>>[
             MenuEntry<String>('Choose platform and version', value: 'platform'),
-            MenuEntry<String>('Use a saved template', value: 'template'),
+            MenuEntry<String>(
+              'Use an example or saved template',
+              value: 'template',
+            ),
           ]);
       if (choice == 'template') {
         await _createFromTemplate();

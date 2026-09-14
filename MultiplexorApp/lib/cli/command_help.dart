@@ -189,7 +189,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'list',
     'init <name> [--type <type>] [--mc <version>] [--heap <size>] [--preset <name>] [--isolated]',
     'show <name>',
-    'apply <template> <instance> [--auto-build] [--sync] [--isolated]',
+    'apply <template> <name> [--auto-build] [--sync] [--isolated]',
     'export <instance> <template>',
     'delete <name>',
   ]),

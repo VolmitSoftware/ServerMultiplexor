@@ -36,6 +36,9 @@ const String rangeHitId = 'range';
 /// providers through the same route as the Tab key.
 const String viewSwitchHitId = 'view:switch';
 
+/// Opens the current provider's workspace card without switching views.
+const String workspaceHeaderHitId = 'workspace:open';
+
 /// The selection action bar's button ids: what the chips over the selected
 /// server do. `monitor_model.dart` builds the chips from these and
 /// `monitor_screen.dart` dispatches on them, so — like [serverHitPrefix] —
@@ -67,6 +70,7 @@ const String wsMoreHitId = 'ws:more';
 /// draws.
 const List<String> monitorBarHitIds = <String>[
   viewSwitchHitId,
+  workspaceHeaderHitId,
   actStartHitId,
   actStopHitId,
   actRestartHitId,

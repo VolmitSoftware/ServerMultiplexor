@@ -396,8 +396,12 @@ extension _NativeNetworkCommands on NativeCommandService {
   Future<int> _networkCreate(
     String name,
     _FlexibleArgs parsed,
-    _NativeIoBuffer io,
-  ) async {
+    _NativeIoBuffer io, {
+    Map<String, String> aliases = const <String, String>{},
+    String? instanceCreationToken,
+    bool retainCreationOwner = false,
+    void Function(String instance)? configureProxy,
+  }) async {
     if (parsed.option('proxy') != null &&
         parsed.option('proxy') != 'velocity') {
       throw _NativeCommandException('Only --proxy velocity is supported.', 2);
@@ -434,13 +438,27 @@ extension _NativeNetworkCommands on NativeCommandService {
       _validateSimpleName(instance, label: 'instance');
       await _networkValidateBackend(instance, offline: offline);
     }
+    final Set<String> routes = names
+        .map((String instance) => aliases[instance] ?? instance)
+        .toSet();
+    if (routes.length != names.length ||
+        routes.any(
+          (String alias) =>
+              !NetworkDefinition.validName(alias) ||
+              alias.toLowerCase() == 'try',
+        )) {
+      throw _NativeCommandException(
+        'Backend aliases must be unique valid route names.',
+        2,
+      );
+    }
     final String defaultServer = parsed.option('default') ?? '';
     final List<String> fallback = _networkCsv(
       parsed.option('fallback') ?? '',
       allowNone: true,
     );
-    if (!names.contains(defaultServer) ||
-        fallback.any((String alias) => !names.contains(alias))) {
+    if (!routes.contains(defaultServer) ||
+        fallback.any((String alias) => !routes.contains(alias))) {
       throw _NativeCommandException(
         'The entry server and fallback aliases must be listed in --members.',
         2,
@@ -460,7 +478,7 @@ extension _NativeNetworkCommands on NativeCommandService {
         NetworkMember(
           consumer: ConsumerProfile.plugin,
           instance: instance,
-          alias: instance,
+          alias: aliases[instance] ?? instance,
           port: backendPort,
         ),
       );
@@ -504,7 +522,7 @@ extension _NativeNetworkCommands on NativeCommandService {
     final Directory directory = Directory(
       _instanceDir(ConsumerProfile.plugin, proxy),
     );
-    final String creationToken = _newPinSalt();
+    final String creationToken = instanceCreationToken ?? _newPinSalt();
     try {
       await _serverCreateFromJar(
         ConsumerProfile.plugin,
@@ -521,11 +539,13 @@ extension _NativeNetworkCommands on NativeCommandService {
       );
       if (version != null) source['velocity_version'] = version;
       _writeServerSource(directory.path, fields: source);
+      configureProxy?.call(proxy);
       _networkStore.create(network);
       final File owner = File(
         p.join(directory.path, NativeCommandService._instanceCreationOwnerFile),
       );
-      if (owner.existsSync() &&
+      if (!retainCreationOwner &&
+          owner.existsSync() &&
           owner.readAsStringSync().trim() == creationToken) {
         owner.deleteSync();
       }
@@ -593,11 +613,17 @@ extension _NativeNetworkCommands on NativeCommandService {
       ConsumerProfile.plugin,
       instance,
     );
+    final Map<int, List<String>> configuredOwners = configuredInstancePorts();
+    final bool currentOwnedOnlyByTarget =
+        (configuredOwners[current] ?? const <String>[]).every(
+          (String owner) => owner == 'plugin/$instance',
+        );
     if (!assigned.contains(current) &&
+        currentOwnedOnlyByTarget &&
         !await _runtimeSocketPortInUse(current)) {
       return current;
     }
-    final Set<int> configured = configuredInstancePorts().keys.toSet();
+    final Set<int> configured = configuredOwners.keys.toSet();
     for (int port = 25566; port <= 65535; port++) {
       if (!assigned.contains(port) &&
           !configured.contains(port) &&

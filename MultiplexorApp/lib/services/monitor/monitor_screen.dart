@@ -997,6 +997,7 @@ class MonitorScreen {
         return _runQuickAction(MonitorAction.consolesGrid);
       case wsConnectHitId:
         return _runWorkspaceAction(WorkspaceModalAction.connect);
+      case workspaceHeaderHitId:
       case wsMoreHitId:
         _modal = const WorkspaceModal();
         _modalSelectedId = null;
@@ -1212,10 +1213,7 @@ class MonitorScreen {
         if (!_detailMode && !_selection.isEmpty) return _runBulkAction(null);
         return _runWorkspaceAction(monitorBuildShortcutAction(_snapshot.view));
       case MonitorAction.workspaceCard:
-        // The keyboard twin of `[ MORE ]` on the workspace bar — and, like
-        // that chip, a landing-view affordance. The detail view draws no
-        // workspace bar, so `w` there would raise a card over a frame that
-        // offers no way to reach it by mouse.
+        // The detail view has neither workspace control.
         if (!_detailMode) {
           _modal = const WorkspaceModal();
           _modalSelectedId = null;
