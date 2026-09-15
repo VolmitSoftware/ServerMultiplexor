@@ -1,114 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:multiplexor/services/rcon_client.dart';
 import 'package:test/test.dart';
 
-List<int> _int32LE(int v) => <int>[
-  v & 0xFF,
-  (v >> 8) & 0xFF,
-  (v >> 16) & 0xFF,
-  (v >> 24) & 0xFF,
-];
-
-List<int> _packet(int id, int type, String body) {
-  final bytes = ascii.encode(body);
-  final length = 4 + 4 + bytes.length + 2;
-  return <int>[
-    ..._int32LE(length),
-    ..._int32LE(id),
-    ..._int32LE(type),
-    ...bytes,
-    0,
-    0,
-  ];
-}
-
-int _readInt32LE(List<int> b, int o) {
-  final v = b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24);
-  return v >= 0x80000000 ? v - 0x100000000 : v;
-}
-
-/// A minimal fake Source RCON server: authenticates against [password] and
-/// answers any command with [response]. Mirrors real Paper by sending an empty
-/// RESPONSE_VALUE before the AUTH_RESPONSE. Tracks how many client connections
-/// it has accepted so tests can assert on connection reuse, and can drop the
-/// live client to simulate a server restart.
-class _FakeRcon {
-  _FakeRcon(this._server, this._password, this._response) {
-    _server.listen(_handle);
-  }
-
-  final ServerSocket _server;
-  final String _password;
-  final String _response;
-  final List<Socket> _clients = <Socket>[];
-
-  int acceptCount = 0;
-
-  int get port => _server.port;
-
-  /// Connections the server still holds open. Drops to zero once a client
-  /// closes its side, which is how a test observes the pool's teardown.
-  int get liveClientCount => _clients.length;
-
-  void _handle(Socket socket) {
-    acceptCount++;
-    _clients.add(socket);
-    final buffer = <int>[];
-    socket.listen(
-      (data) {
-        buffer.addAll(data);
-        while (buffer.length >= 4) {
-          final len = _readInt32LE(buffer, 0);
-          if (buffer.length - 4 < len) {
-            break;
-          }
-          final id = _readInt32LE(buffer, 4);
-          final type = _readInt32LE(buffer, 8);
-          final body = ascii.decode(
-            buffer.sublist(12, 4 + len - 2),
-            allowInvalid: true,
-          );
-          buffer.removeRange(0, 4 + len);
-          if (type == 3) {
-            final ok = body == _password;
-            socket.add(_packet(id, 0, '')); // empty value precedes auth
-            socket.add(_packet(ok ? id : -1, 2, ''));
-          } else if (type == 2) {
-            socket.add(_packet(id, 0, _response));
-          }
-        }
-      },
-      onError: (_) {},
-      onDone: () => _clients.remove(socket),
-    );
-  }
-
-  /// Simulates the server closing its side (e.g. a restart) so the pool has to
-  /// re-establish the connection on the next command.
-  Future<void> dropClients() async {
-    final clients = List<Socket>.from(_clients);
-    _clients.clear();
-    for (final socket in clients) {
-      socket.destroy();
-    }
-  }
-
-  Future<void> close() async {
-    await dropClients();
-    await _server.close();
-  }
-}
-
-Future<_FakeRcon> _startFakeRcon({
-  required String password,
-  required String response,
-}) async {
-  final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-  return _FakeRcon(server, password, response);
-}
+import 'support/fake_rcon.dart';
 
 /// Polls [condition] until it holds, rather than guessing at how long the
 /// loopback needs to deliver a FIN.
@@ -154,8 +50,64 @@ void main() {
   });
 
   group('RconConnectionPool', () {
+    test('runs command side effects before returning the response', () async {
+      final Set<String> operators = <String>{};
+      final FakeRcon server = await FakeRcon.start(
+        password: 'secret',
+        onCommand: (String command) {
+          operators.add(command.substring('op '.length));
+          return 'Granted operator';
+        },
+      );
+      addTearDown(server.close);
+      final RconConnectionPool pool = RconConnectionPool();
+      addTearDown(pool.disposeAll);
+
+      final String? response = await pool.command(
+        '127.0.0.1',
+        server.port,
+        'secret',
+        'op controller',
+      );
+
+      expect(response, 'Granted operator');
+      expect(operators, <String>{'controller'});
+    });
+
+    test('returns null when a command handler drops the connection', () async {
+      final List<String> commands = <String>[];
+      final FakeRcon server = await FakeRcon.start(
+        password: 'secret',
+        response: 'must not replace a failed command',
+        onCommand: (String command) {
+          commands.add(command);
+          return command == 'deop controller' ? null : 'ready';
+        },
+      );
+      addTearDown(server.close);
+      final RconConnectionPool pool = RconConnectionPool();
+      addTearDown(pool.disposeAll);
+
+      expect(
+        await pool.command(
+          '127.0.0.1',
+          server.port,
+          'secret',
+          'deop controller',
+        ),
+        isNull,
+      );
+      expect(server.liveClientCount, 0);
+      expect(
+        await pool.command('127.0.0.1', server.port, 'secret', 'list'),
+        'ready',
+      );
+      expect(commands, <String>['deop controller', 'list']);
+      expect(server.acceptCount, 2);
+    });
+
     test('authenticates and returns the command output', () async {
-      final server = await _startFakeRcon(
+      final FakeRcon server = await FakeRcon.start(
         password: 'secret',
         response: 'TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0',
       );
@@ -169,7 +121,7 @@ void main() {
     });
 
     test('reuses a single connection across sequential commands', () async {
-      final server = await _startFakeRcon(
+      final FakeRcon server = await FakeRcon.start(
         password: 'secret',
         response: 'TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0',
       );
@@ -192,7 +144,7 @@ void main() {
     });
 
     test('reconnects after the server drops the connection', () async {
-      final server = await _startFakeRcon(
+      final FakeRcon server = await FakeRcon.start(
         password: 'secret',
         response: 'TPS from last 1m, 5m, 15m: 19.5, 19.5, 19.5',
       );
@@ -229,7 +181,10 @@ void main() {
     });
 
     test('returns null on a bad password', () async {
-      final server = await _startFakeRcon(password: 'secret', response: 'x');
+      final FakeRcon server = await FakeRcon.start(
+        password: 'secret',
+        response: 'x',
+      );
       addTearDown(server.close);
       final pool = RconConnectionPool();
       addTearDown(pool.disposeAll);
@@ -267,7 +222,7 @@ void main() {
     test(
       'disposeAll closes the pooled connection and clears the pool',
       () async {
-        final server = await _startFakeRcon(
+        final FakeRcon server = await FakeRcon.start(
           password: 'secret',
           response: 'TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0',
         );
@@ -301,7 +256,7 @@ void main() {
     );
 
     test('disposeAll is idempotent', () async {
-      final server = await _startFakeRcon(
+      final FakeRcon server = await FakeRcon.start(
         password: 'secret',
         response: 'TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0',
       );

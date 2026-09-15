@@ -532,7 +532,7 @@ void main(List<String> args) {
       expect(target['proxy'], 'proxy');
       expect(
         target['observerPath'],
-        endsWith('plugins/MultiplexorObserver/metrics.json'),
+        endsWith(p.join('plugins', 'MultiplexorObserver', 'metrics.json')),
       );
       expect(
         runtime.runningInstances,

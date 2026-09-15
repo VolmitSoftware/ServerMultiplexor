@@ -8,11 +8,14 @@ import 'package:multiplexor/services/consumer_service.dart';
 import 'package:multiplexor/services/gameplay_test_service.dart';
 import 'package:multiplexor/services/manager_context.dart';
 import 'package:multiplexor/services/native_command_service.dart';
+import 'package:multiplexor/services/rcon_client.dart';
 import 'package:multiplexor/services/recovery_runtime.dart';
 import 'package:multiplexor/services/server_ping.dart';
 import 'package:multiplexor/utils/process_runner.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
+
+import 'support/fake_rcon.dart';
 
 void main() {
   late Directory root;
@@ -24,6 +27,8 @@ void main() {
   late File source;
   late List<String> consoleCommands;
   late List<Future<void>> pendingOperatorWrites;
+  late FakeRcon console;
+  late RconConnectionPool tmuxConsole;
   String? failedConsolePrefix;
   String? pendingConsoleCommand;
   Completer<void>? grantGate;
@@ -45,6 +50,26 @@ void main() {
     ops.writeAsStringSync(jsonEncode(entries));
   }
 
+  String? handleConsoleCommand(String command) {
+    consoleCommands.add(command);
+    if (failedConsolePrefix != null &&
+        command.startsWith(failedConsolePrefix!)) {
+      return null;
+    }
+    final bool grant = command.startsWith('op ');
+    final Completer<void>? sent = grant ? grantSent : revokeSent;
+    if (sent != null && !sent.isCompleted) sent.complete();
+    final Completer<void>? gate = grant ? grantGate : revokeGate;
+    if (gate == null) {
+      applyOperatorCommand(command);
+    } else {
+      pendingOperatorWrites.add(
+        gate.future.then((_) => applyOperatorCommand(command)),
+      );
+    }
+    return '';
+  }
+
   Future<CapturedResult> command(
     List<String> options, {
     String mode = 'idle',
@@ -56,7 +81,7 @@ void main() {
     ...options,
   ], stream: false);
 
-  setUp(() {
+  setUp(() async {
     root = Directory.systemTemp.createTempSync('multiplexor-swarm-test-');
     final ManagerContext context = ManagerContext(
       rootDir: root.path,
@@ -87,6 +112,15 @@ void main() {
     revokeGate = null;
     grantSent = null;
     revokeSent = null;
+    console = await FakeRcon.start(
+      password: 'swarm-test',
+      onCommand: handleConsoleCommand,
+    );
+    tmuxConsole = RconConnectionPool();
+    properties.writeAsStringSync(
+      'enable-rcon=true\nrcon.port=${console.port}\nrcon.password=swarm-test\n',
+      mode: FileMode.append,
+    );
     service = NativeCommandService(
       context: context,
       consumerService: consumers,
@@ -96,27 +130,21 @@ void main() {
         if (executable == 'tmux' && arguments.first == 'send-keys') {
           for (final String argument in arguments) {
             if (argument.startsWith('op ') || argument.startsWith('deop ')) {
-              consoleCommands.add(argument);
-              if (failedConsolePrefix != null &&
-                  argument.startsWith(failedConsolePrefix!)) {
-                return ProcessResult(0, 1, '', 'injected console failure');
-              }
               pendingConsoleCommand = argument;
             }
           }
           if (arguments.contains('Enter') && pendingConsoleCommand != null) {
             final String command = pendingConsoleCommand!;
             pendingConsoleCommand = null;
-            final bool grant = command.startsWith('op ');
-            final Completer<void>? sent = grant ? grantSent : revokeSent;
-            if (sent != null && !sent.isCompleted) sent.complete();
-            final Completer<void>? gate = grant ? grantGate : revokeGate;
-            if (gate == null) {
-              applyOperatorCommand(command);
-            } else {
-              pendingOperatorWrites.add(
-                gate.future.then((_) => applyOperatorCommand(command)),
-              );
+            // Exercise the RCON fixture on Unix as well as Windows.
+            final String? response = await tmuxConsole.command(
+              '127.0.0.1',
+              console.port,
+              'swarm-test',
+              command,
+            );
+            if (response == null) {
+              return ProcessResult(0, 1, '', 'injected console failure');
             }
           }
         }
@@ -134,6 +162,8 @@ void main() {
     }
     await Future.wait(pendingOperatorWrites);
     service.disposeRcon();
+    tmuxConsole.disposeAll();
+    await console.close();
     root.deleteSync(recursive: true);
   });
 
@@ -308,6 +338,10 @@ void main() {
     expect(harness.runs.single.controller, isNotNull);
     final String controller = harness.runs.single.controller!;
     expect(consoleCommands, <String>['op $controller', 'deop $controller']);
+    expect(
+      jsonDecode(File(p.join(instancePath, 'ops.json')).readAsStringSync()),
+      isEmpty,
+    );
     expect(runtime.running, isTrue);
   });
 
@@ -390,7 +424,6 @@ void main() {
         await running.timeout(const Duration(seconds: 3));
       }
     },
-    skip: Platform.isWindows ? 'Exercises the tmux command transport' : false,
   );
 
   test('prepares then starts and stops only the runtime it owns', () async {
@@ -445,27 +478,23 @@ void main() {
     },
   );
 
-  test(
-    'controller is revoked after a throwing arena run',
-    () async {
-      harness.onRun = (GameplaySwarmRun _) async {
-        throw StateError('injected swarm failure');
-      };
-      final CapturedResult result = await command(<String>[
-        '--build-arena',
-        '--start',
-        '--stop-after',
-        '--no-viewer',
-      ], mode: 'redstone');
-      expect(result.exitCode, isNot(0));
-      final String controller = harness.runs.single.controller!;
-      expect(controller, matches(RegExp(r'^Sc[0-9a-f]{12}$')));
-      expect(consoleCommands, <String>['op $controller', 'deop $controller']);
-      expect(runtime.events, <String>['start', 'ready', 'stop']);
-      expect(runtime.running, isFalse);
-    },
-    skip: Platform.isWindows ? 'Exercises the tmux command transport' : false,
-  );
+  test('controller is revoked after a throwing arena run', () async {
+    harness.onRun = (GameplaySwarmRun _) async {
+      throw StateError('injected swarm failure');
+    };
+    final CapturedResult result = await command(<String>[
+      '--build-arena',
+      '--start',
+      '--stop-after',
+      '--no-viewer',
+    ], mode: 'redstone');
+    expect(result.exitCode, isNot(0));
+    final String controller = harness.runs.single.controller!;
+    expect(controller, matches(RegExp(r'^Sc[0-9a-f]{12}$')));
+    expect(consoleCommands, <String>['op $controller', 'deop $controller']);
+    expect(runtime.events, <String>['start', 'ready', 'stop']);
+    expect(runtime.running, isFalse);
+  });
 
   test('rejects worker names that already have operator privileges', () async {
     File(p.join(instancePath, 'ops.json')).writeAsStringSync(
@@ -487,27 +516,23 @@ void main() {
     expect(consoleCommands, isEmpty);
   });
 
-  test(
-    'deop failure is reported and still stops the owned runtime',
-    () async {
-      failedConsolePrefix = 'deop ';
-      final CapturedResult result = await command(<String>[
-        '--build-arena',
-        '--start',
-        '--stop-after',
-        '--no-viewer',
-      ], mode: 'redstone');
-      expect(result.exitCode, isNot(0));
-      expect(result.stderr.toLowerCase(), contains('revoke'));
-      expect(
-        consoleCommands.where((String value) => value.startsWith('deop ')),
-        hasLength(1),
-      );
-      expect(runtime.running, isFalse);
-      expect(runtime.events.last, 'stop');
-    },
-    skip: Platform.isWindows ? 'Exercises the tmux command transport' : false,
-  );
+  test('deop failure is reported and still stops the owned runtime', () async {
+    failedConsolePrefix = 'deop ';
+    final CapturedResult result = await command(<String>[
+      '--build-arena',
+      '--start',
+      '--stop-after',
+      '--no-viewer',
+    ], mode: 'redstone');
+    expect(result.exitCode, isNot(0));
+    expect(result.stderr.toLowerCase(), contains('revoke'));
+    expect(
+      consoleCommands.where((String value) => value.startsWith('deop ')),
+      hasLength(1),
+    );
+    expect(runtime.running, isFalse);
+    expect(runtime.events.last, 'stop');
+  });
 
   test(
     'failed operator grant still attempts revocation exactly once',
@@ -527,7 +552,6 @@ void main() {
       expect(runtime.running, isFalse);
       expect(runtime.events.last, 'stop');
     },
-    skip: Platform.isWindows ? 'Exercises the tmux command transport' : false,
   );
 
   test(
@@ -561,7 +585,6 @@ void main() {
       expect(consoleCommands, <String>['op ${harness.runs.single.controller}']);
       expect(runtime.events, <String>['ready']);
     },
-    skip: Platform.isWindows ? 'Exercises the tmux command transport' : false,
   );
 
   test(
