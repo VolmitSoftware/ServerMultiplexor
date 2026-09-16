@@ -178,6 +178,7 @@ jobs:
           $fakeJavaSource = Join-Path $fakeTools "fake_java.dart"
           @'
           import 'dart:async';
+          import 'dart:convert';
           import 'dart:io';
           Future<void> main(List<String> args) async {
             if (args.contains('-version')) {
@@ -191,6 +192,21 @@ jobs:
               return;
             }
             stdout.writeln('fake java started');
+            if (Directory.current.path.toLowerCase().endsWith('ci-network-proxy')) {
+              File('.ci-java-args.tmp')
+                ..writeAsStringSync(jsonEncode(args))
+                ..renameSync('.ci-java-args.json');
+              await for (final String command in stdin
+                  .transform(utf8.decoder)
+                  .transform(const LineSplitter())
+                  .timeout(const Duration(seconds: 60))) {
+                if (command == 'end') {
+                  File('.ci-proxy-ended').writeAsStringSync('end');
+                  return;
+                }
+              }
+              throw StateError('Proxy input closed before end');
+            }
             final File restartMarker = File('.ci-restart-triggered');
             if (Directory.current.path.toLowerCase().endsWith('ci-purpur') &&
                 !restartMarker.existsSync()) {
@@ -311,6 +327,67 @@ jobs:
           Invoke-ServerLifecycle -Consumer forge -Type forge -Name ci-forge -Jar $installerPath
           Invoke-ServerLifecycle -Consumer fabric -Type fabric -Name ci-fabric -Jar $jarPath
           Invoke-ServerLifecycle -Consumer neoforge -Type neoforge -Name ci-neoforge -Jar $installerPath
+
+          & $outputPath --root $smokeRoot --consumer plugin server create ci-velocity-backend --type paper --jar $jarPath --mc 1.21.11 --isolated
+          if ($LASTEXITCODE -ne 0) { throw "Windows Velocity backend create failed" }
+          $portProbe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $portProbe.Start()
+          $proxyPort = $portProbe.LocalEndpoint.Port
+          $portProbe.Stop()
+          & $outputPath --root $smokeRoot --consumer plugin network create ci-network --members ci-velocity-backend --default ci-velocity-backend --jar $jarPath --proxy-version 3.4.0 --offline --port $proxyPort
+          if ($LASTEXITCODE -ne 0) { throw "Windows Velocity network create failed" }
+          $proxyRoot = Join-Path $smokeRoot "consumers\plugin-consumers\instances\ci-network-proxy"
+          try {
+            & $outputPath --root $smokeRoot --consumer plugin runtime start ci-network-proxy --no-console
+            if ($LASTEXITCODE -ne 0) { throw "Windows Velocity runtime start failed" }
+            $proxyStatus = (& $outputPath --root $smokeRoot --consumer plugin runtime status ci-network-proxy) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $proxyStatus -notmatch "Runtime running") {
+              throw "Windows Velocity runtime status failed: $proxyStatus"
+            }
+            $argumentsPath = Join-Path $proxyRoot ".ci-java-args.json"
+            $argumentsDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            while (-not (Test-Path -LiteralPath $argumentsPath)) {
+              if ([DateTime]::UtcNow -ge $argumentsDeadline) {
+                throw "Windows Velocity did not record its Java arguments"
+              }
+              Start-Sleep -Milliseconds 100
+            }
+            $proxyArguments = @(Get-Content -Raw -LiteralPath $argumentsPath | ConvertFrom-Json)
+            if ($proxyArguments.Count -ne 5 -or $proxyArguments[0] -ne "-Xms1G" -or
+                $proxyArguments[1] -ne "-Xmx1G" -or $proxyArguments[2] -ne "-Dfile.encoding=UTF-8" -or
+                $proxyArguments[3] -ne "-jar") {
+              throw "Windows Velocity Java arguments were incorrect: $($proxyArguments -join ' ')"
+            }
+            $proxyJarPath = if ([System.IO.Path]::IsPathRooted($proxyArguments[4])) {
+              $proxyArguments[4]
+            } else {
+              Join-Path $proxyRoot $proxyArguments[4]
+            }
+            if (-not (Test-Path -LiteralPath $proxyJarPath -PathType Leaf)) {
+              throw "Windows Velocity Java target does not exist: $proxyJarPath"
+            }
+            foreach ($gameFile in @("server.properties", "eula.txt", "ops.json", "multiplexor-restart.sh", "multiplexor-restart.cmd", ".multiplexor-log4j2.xml", "plugins\iris")) {
+              if (Test-Path -LiteralPath (Join-Path $proxyRoot $gameFile)) {
+                throw "Windows Velocity unexpectedly created $gameFile"
+              }
+            }
+          } finally {
+            & $outputPath --root $smokeRoot --consumer plugin runtime stop ci-network-proxy
+            if ($LASTEXITCODE -ne 0) { throw "Windows Velocity runtime stop failed" }
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $proxyRoot ".ci-proxy-ended"))) {
+            throw "Windows Velocity did not receive the graceful end command"
+          }
+          $proxyStopped = (& $outputPath --root $smokeRoot --consumer plugin runtime status ci-network-proxy) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $proxyStopped -notmatch "Runtime stopped") {
+            throw "Windows Velocity stopped status failed: $proxyStopped"
+          }
+          & $outputPath --root $smokeRoot --consumer plugin network delete ci-network --confirm ci-network
+          if ($LASTEXITCODE -ne 0) { throw "Windows Velocity network cleanup failed" }
+          foreach ($instanceName in @("ci-network-proxy", "ci-velocity-backend")) {
+            & $outputPath --root $smokeRoot --consumer plugin instance delete $instanceName
+            if ($LASTEXITCODE -ne 0) { throw "Windows Velocity instance cleanup failed: $instanceName" }
+          }
 
           if (-not (Test-Path -LiteralPath $sharedSentinel)) {
             throw "Windows junction deletion traversed the shared Iris target"

@@ -320,38 +320,39 @@ void main() {
     },
   );
 
-  test('proxy launch excludes game flags and setup files', () async {
-    await createNetwork();
-    final CapturedResult started = await run(<String>[
-      'runtime',
-      'start',
-      'dev-proxy',
-    ]);
-    expect(started.exitCode, 1);
-    final List<String> launch = tmuxCalls.lastWhere(
-      (List<String> args) => args.first == 'new-session',
-    );
-    final String command = launch.last;
-    expect(command, contains('-Xmx1G'));
-    expect(command, isNot(contains('--nogui')));
-    expect(command, isNot(contains('jdk.incubator.vector')));
-    expect(command, isNot(contains('log4j.configurationFile')));
-    expect(
-      tmuxCalls
+  test(
+    'tmux proxy launch excludes game flags and setup files',
+    () async {
+      await createNetwork();
+      final CapturedResult started = await run(<String>[
+        'runtime',
+        'start',
+        'dev-proxy',
+      ]);
+      expect(started.exitCode, 1);
+      final List<List<String>> launches = tmuxCalls
           .where((List<String> args) => args.first == 'new-session')
-          .length,
-      1,
-    );
-    final Directory created = Directory(p.join(proxy.parent.path, 'dev-proxy'));
-    expect(
-      File(p.join(created.path, 'server.properties')).existsSync(),
-      isFalse,
-    );
-    expect(
-      File(p.join(created.path, 'multiplexor-restart.sh')).existsSync(),
-      isFalse,
-    );
-  });
+          .toList(growable: false);
+      expect(launches, hasLength(1));
+      final String command = launches.single.last;
+      expect(command, contains('-Xmx1G'));
+      expect(command, isNot(contains('--nogui')));
+      expect(command, isNot(contains('jdk.incubator.vector')));
+      expect(command, isNot(contains('log4j.configurationFile')));
+      final Directory created = Directory(
+        p.join(proxy.parent.path, 'dev-proxy'),
+      );
+      expect(
+        File(p.join(created.path, 'server.properties')).existsSync(),
+        isFalse,
+      );
+      expect(
+        File(p.join(created.path, 'multiplexor-restart.sh')).existsSync(),
+        isFalse,
+      );
+    },
+    skip: Platform.isWindows ? 'tmux runtime applies to macOS/Linux' : false,
+  );
 
   test(
     'standalone startup preserves stopped network port reservations',

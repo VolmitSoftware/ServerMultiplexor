@@ -1382,6 +1382,9 @@ void main() {
         );
 
         bool completed = false;
+        // Backup preparation can exceed the old 200 ms polling budget on CI.
+        remote.onSnapshot = (int _) =>
+            Future<void>.delayed(const Duration(milliseconds: 600));
         final Future<PterodactylTransferResult> push = service
             .push(
               localInstanceName: 'local',
@@ -1390,12 +1393,15 @@ void main() {
               expectedPlanToken: plan.confirmationToken,
             )
             .whenComplete(() => completed = true);
-        await _waitFor(() => remote.applyCount == 1);
-        expect(completed, isFalse);
-        expect(remote.startCount, 0);
-
-        remote.applyGate!.complete();
-        final PterodactylTransferResult result = await push;
+        late PterodactylTransferResult result;
+        try {
+          await _waitForApply(remote, push);
+          expect(completed, isFalse);
+          expect(remote.startCount, 0);
+        } finally {
+          remote.applyGate!.complete();
+          result = await push;
+        }
         expect(result.remoteRestarted, isTrue);
         expect(remote.startCount, 1);
       },
@@ -1598,21 +1604,22 @@ void main() {
         serverIdentifier: 'abc123',
         expectedPlanToken: plan.confirmationToken,
       );
-      await _waitFor(() => remote.applyCount == 1);
-
-      await expectLater(
-        service.push(
-          localInstanceName: 'local',
-          profileId: 'panel',
-          serverIdentifier: 'abc123',
-          expectedPlanToken: plan.confirmationToken,
-        ),
-        throwsA(isA<StateError>()),
-      );
-      expect(remote.applyCount, 1);
-
-      remote.applyGate!.complete();
-      await first;
+      try {
+        await _waitForApply(remote, first);
+        await expectLater(
+          service.push(
+            localInstanceName: 'local',
+            profileId: 'panel',
+            serverIdentifier: 'abc123',
+            expectedPlanToken: plan.confirmationToken,
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(remote.applyCount, 1);
+      } finally {
+        remote.applyGate!.complete();
+        await first;
+      }
     });
 
     test('Remote state change after snapshot aborts before apply', () async {
@@ -1874,13 +1881,13 @@ String _latestRecoveryStatus(String temporaryPath) {
   return _json(manifests.single.path)['status']! as String;
 }
 
-Future<void> _waitFor(bool Function() condition) async {
-  for (int attempt = 0; attempt < 200; attempt++) {
-    if (condition()) return;
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-  }
-  fail('Timed out waiting for asynchronous transfer state.');
-}
+Future<void> _waitForApply(
+  _FakeRemoteGateway remote,
+  Future<PterodactylTransferResult> transfer,
+) => Future.any<void>(<Future<void>>[
+  remote.applyStarted.future,
+  transfer.then<void>((_) => fail('Transfer completed before apply started.')),
+]).timeout(const Duration(seconds: 10));
 
 PterodactylTransferRemoteTarget _target({
   String uuid = 'uuid-abc123',
@@ -2000,6 +2007,7 @@ final class _FakeRemoteGateway implements PterodactylTransferRemoteGateway {
   void Function(int count)? onResolveTarget;
   Future<void> Function(int count)? onSnapshot;
   Completer<void>? applyGate;
+  final Completer<void> applyStarted = Completer<void>();
   bool failApplyAfterMutation = false;
   bool corruptAfterApply = false;
   bool failRollbackVerification = false;
@@ -2085,6 +2093,7 @@ final class _FakeBackendSession implements PterodactylTransferBackendSession {
   }) async {
     _requireOpen();
     remote.applyCount++;
+    if (!remote.applyStarted.isCompleted) remote.applyStarted.complete();
     final Completer<void>? gate = remote.applyGate;
     if (gate != null) await gate.future;
     await _copyManifest(
