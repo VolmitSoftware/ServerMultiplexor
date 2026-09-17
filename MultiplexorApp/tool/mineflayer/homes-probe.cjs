@@ -1,0 +1,23 @@
+const mineflayer = require('mineflayer');
+const bot = mineflayer.createBot({ host: '127.0.0.1', port: 25565, username: 'HomeProbe', auth: 'offline' });
+const msgs = [];
+let done = false;
+const finish = (c) => { if (done) return; done = true; try { bot.quit(); } catch (e) {} setTimeout(() => process.exit(c), 400); };
+bot.on('message', (m) => { const s = m.toString().trim(); if (s) msgs.push(s); });
+const run = (cmd, wait) => new Promise(r => { console.log('>> ' + cmd); bot.chat(cmd); setTimeout(r, wait); });
+bot.once('spawn', async () => {
+  console.log('SPAWNED at ' + JSON.stringify(bot.entity.position).slice(0,60));
+  await new Promise(r => setTimeout(r, 4000));
+  msgs.length = 0;
+  await run('/sethome probehome', 2500);
+  await run('/homelist', 2500);
+  await run('/home probehome', 3000);
+  await run('/setspawn', 2500);
+  await run('/spawn', 3000);
+  console.log('--- SERVER RESPONSES ---');
+  for (const m of msgs.slice(0, 20)) console.log('  ' + m);
+  finish(0);
+});
+bot.on('error', (e) => { console.log('ERROR: ' + e.message); finish(1); });
+bot.on('kicked', (r) => { console.log('KICKED: ' + JSON.stringify(r).slice(0,150)); finish(1); });
+setTimeout(() => { console.log('TIMEOUT'); for (const m of msgs.slice(0,20)) console.log('  ' + m); finish(1); }, 70000);
