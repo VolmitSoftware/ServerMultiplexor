@@ -1,0 +1,16 @@
+const mineflayer = require('mineflayer');
+const bot = mineflayer.createBot({ host: '127.0.0.1', port: 25565, username: 'AegyronProbe', auth: 'offline' });
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const bail = (m, c) => { console.log(m); try { bot.quit(); } catch (e) {} setTimeout(() => process.exit(c), 500); };
+bot.on('kicked', r => bail('KICKED', 1)); bot.on('error', e => bail('ERROR ' + e.message, 1));
+bot.on('message', m => { const t = m.toString().trim(); if (t && t.length < 200) console.log('   < ' + t); });
+let ran = false;
+bot.on('spawn', async () => { if (ran) return; ran = true; await wait(6000);
+  console.log('[client tab list] entries=' + Object.keys(bot.players).length);
+  for (const p of Object.values(bot.players)) {
+    console.log('   entry: ' + p.username + '  displayName=' + (p.displayName ? p.displayName.toString().slice(0, 60) : 'none'));
+  }
+  console.log('[cmd] /vev tab tablist AegyronProbe'); bot.chat('/vev tab tablist AegyronProbe'); await wait(3000);
+  console.log('[cmd] /vev placeholders servers'); bot.chat('/vev placeholders servers'); await wait(3000);
+  bail('[done]', 0); });
+setTimeout(() => bail('TIMEOUT', 1), 70000);
