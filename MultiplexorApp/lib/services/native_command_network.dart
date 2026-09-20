@@ -77,6 +77,27 @@ extension _NativeNetworkCommands on NativeCommandService {
     }
   }
 
+  Future<void> _networkDetachForDeletion(
+    ConsumerProfile profile,
+    String instance,
+    _NativeIoBuffer io,
+  ) async {
+    final String? name = _networkMembership(profile, instance);
+    if (name == null) return;
+    final NetworkDefinition network = _networkStore.load(name);
+    await _networkStop(network, io);
+    if (network.proxy == instance) {
+      _networkStore.delete(name);
+    } else {
+      final NetworkMember member = network.members.firstWhere(
+        (NetworkMember member) =>
+            member.consumer == profile && member.instance == instance,
+      );
+      _networkStore.removeMember(name, member.alias);
+    }
+    io.write('[OK] Removed $instance from network $name.');
+  }
+
   void _validateNetworkRuntime(ConsumerProfile profile, String instance) {
     final String? name = _networkMembership(profile, instance);
     if (name == null) {
@@ -214,7 +235,6 @@ extension _NativeNetworkCommands on NativeCommandService {
           );
           io.write('[OK] Added $instance to $name at 127.0.0.1:$port');
         case 'remove':
-          await _networkRequireStopped(network);
           final String alias = parsed.positionals[1];
           if (!network.members.any(
             (NetworkMember member) => member.alias == alias,
@@ -224,21 +244,8 @@ extension _NativeNetworkCommands on NativeCommandService {
               2,
             );
           }
-          if (network.defaultServer == alias ||
-              network.fallbackServers.contains(alias)) {
-            throw _NativeCommandException(
-              'Update the entry server and fallback order before removing $alias.',
-              2,
-            );
-          }
-          _networkStore.update(
-            _networkCopy(
-              network,
-              members: network.members
-                  .where((NetworkMember member) => member.alias != alias)
-                  .toList(),
-            ),
-          );
+          await _networkStop(network, io);
+          _networkStore.removeMember(name, alias);
           io.write('[OK] Detached $alias and restored its network settings.');
         case 'configure':
           await _networkRequireStopped(network);
@@ -273,7 +280,7 @@ extension _NativeNetworkCommands on NativeCommandService {
               2,
             );
           }
-          await _networkRequireStopped(network);
+          await _networkStop(network, io);
           _networkStore.delete(name);
           io.write(
             '[OK] Removed network $name and restored backend settings. Instance files were kept.',

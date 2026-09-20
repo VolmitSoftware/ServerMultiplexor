@@ -71,14 +71,6 @@ class WizardNetwork {
     ],
   );
 
-  List<WizardNetworkMember> get removableMembers => members
-      .where(
-        (WizardNetworkMember member) =>
-            member.alias != defaultServer &&
-            !fallbackServers.contains(member.alias),
-      )
-      .toList(growable: false);
-
   static List<WizardNetwork> parseList(String source) {
     final Object? decoded = jsonDecode(source);
     if (decoded is! List<Object?>) {
@@ -213,14 +205,10 @@ class WizardNetworkStatus {
     if (proxyRunning) 'console',
     'status',
     'check',
+    'remove',
+    'delete',
     if (proxyStopped) 'plugins-sync',
-    if (allStopped) ...<String>[
-      'repair',
-      'add',
-      if (network.removableMembers.isNotEmpty) 'remove',
-      'configure',
-      'delete',
-    ],
+    if (allStopped) ...<String>['repair', 'add', 'configure'],
     'back',
   ];
 }
@@ -520,7 +508,7 @@ extension _NetworkWizard on InteractiveWizard {
         case 'add':
           await _networkAdd(name);
         case 'remove':
-          await _networkRemove(status.network);
+          if (await _networkRemove(status.network)) return;
         case 'configure':
           await _networkConfigure(status.network);
         case 'delete':
@@ -586,11 +574,11 @@ extension _NetworkWizard on InteractiveWizard {
     await Ui.pause();
   }
 
-  Future<void> _networkRemove(WizardNetwork network) async {
+  Future<bool> _networkRemove(WizardNetwork network) async {
     final String alias = await menuSelect<String>(
       'Remove backend from ${network.name}',
       <MenuEntry<String>>[
-        for (final WizardNetworkMember member in network.removableMembers)
+        for (final WizardNetworkMember member in network.members)
           MenuEntry<String>(
             member.alias,
             value: member.alias,
@@ -602,10 +590,16 @@ extension _NetworkWizard on InteractiveWizard {
       'Restore $alias to standalone settings?',
       defaultValue: false,
     )) {
-      return;
+      return false;
     }
-    await _shellRun(<String>['network', 'remove', network.name, alias]);
+    final int code = await _shellRun(<String>[
+      'network',
+      'remove',
+      network.name,
+      alias,
+    ]);
     await Ui.pause();
+    return code == 0 && network.members.length == 1;
   }
 
   Future<void> _networkConfigure(WizardNetwork network) async {

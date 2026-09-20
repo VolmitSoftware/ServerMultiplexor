@@ -68,7 +68,45 @@ class NetworkStore {
   void repair(String name) =>
       _locked(() => _update(_record(name).definition, repair: true));
 
-  void _update(NetworkDefinition definition, {bool repair = false}) {
+  void removeMember(String name, String alias) => _locked(() {
+    final NetworkDefinition previous = _record(name).definition;
+    final List<NetworkMember> members = previous.members
+        .where((NetworkMember member) => member.alias != alias)
+        .toList();
+    if (members.length == previous.members.length) {
+      throw StateError('No backend alias $alias in $name.');
+    }
+    if (members.isEmpty) {
+      _delete(name);
+      return;
+    }
+    final List<String> routes = previous.connectionOrder
+        .where((String route) => route != alias)
+        .toList();
+    final String defaultServer = routes.isEmpty
+        ? members.first.alias
+        : routes.first;
+    _update(
+      NetworkDefinition(
+        name: previous.name,
+        proxy: previous.proxy,
+        bind: previous.bind,
+        port: previous.port,
+        onlineMode: previous.onlineMode,
+        defaultServer: defaultServer,
+        fallbackServers: routes.skip(1).toList(),
+        members: members,
+      ),
+      repair: true,
+      pruneRoutes: true,
+    );
+  });
+
+  void _update(
+    NetworkDefinition definition, {
+    bool repair = false,
+    bool pruneRoutes = false,
+  }) {
     _checkDefinition(definition);
     final _NetworkRecord previous = _record(definition.name);
     if (previous.definition.proxy != definition.proxy) {
@@ -91,25 +129,30 @@ class NetworkStore {
     for (final NetworkMember member in definition.members) {
       _attach(record, member, secret, changes);
     }
-    _configureProxy(definition, secret, changes);
+    _configureProxy(definition, secret, changes, pruneRoutes: pruneRoutes);
     changes[_recordPath(definition.name)] = _encode(record.toJson());
     _transaction(changes, <NetworkDefinition>[previous.definition, definition]);
   }
 
-  void delete(String name) => _locked(() {
+  void delete(String name) => _locked(() => _delete(name));
+
+  void _delete(String name) {
     final _NetworkRecord record = _record(name);
-    _requireValid(record.definition);
     final Map<String, String?> changes = <String, String?>{};
     for (final NetworkMember member in record.definition.members) {
       _detach(record, member, changes);
     }
-    final String sourcePath = _proxyPath(record.definition, '.server-source');
-    final NetworkConfigDocument source = _document(sourcePath);
-    source.remove('network');
-    changes[sourcePath] = source.render();
+    if (Directory(
+      instancePath(ConsumerProfile.plugin, record.definition.proxy),
+    ).existsSync()) {
+      final String sourcePath = _proxyPath(record.definition, '.server-source');
+      final NetworkConfigDocument source = _document(sourcePath);
+      source.remove('network');
+      changes[sourcePath] = source.render();
+    }
     changes[_recordPath(name)] = null;
     _transaction(changes, <NetworkDefinition>[record.definition]);
-  });
+  }
 
   List<String> validateConfiguration(NetworkDefinition definition) =>
       _locked(() => _validateConfiguration(definition));
@@ -392,6 +435,12 @@ class NetworkStore {
         'Original backend settings are missing: ${member.instance}.',
       );
     }
+    if (!Directory(
+      instancePath(member.consumer, member.instance),
+    ).existsSync()) {
+      record.originals.remove(member.identity);
+      return;
+    }
     for (final MapEntry<Object?, Object?> config in saved.entries) {
       final String relative = config.key as String;
       if (!_backendValues(
@@ -423,8 +472,9 @@ class NetworkStore {
   void _configureProxy(
     NetworkDefinition definition,
     String secret,
-    Map<String, String?> changes,
-  ) {
+    Map<String, String?> changes, {
+    bool pruneRoutes = false,
+  }) {
     final String configPath = _proxyPath(definition, 'velocity.toml');
     final NetworkConfigDocument config = _document(configPath);
     if (!config.contains('config-version')) config.set('config-version', '2.8');
@@ -436,6 +486,28 @@ class NetworkStore {
     }
     if (!config.contains('forced-hosts')) {
       config.set('forced-hosts', <String, Object?>{});
+    }
+    if (pruneRoutes) {
+      final Object? forcedHosts = config.value('forced-hosts');
+      if (forcedHosts is Map) {
+        final Set<String> aliases = definition.members
+            .map((NetworkMember member) => member.alias)
+            .toSet();
+        final Map<String, Object?> retained = <String, Object?>{};
+        for (final MapEntry<Object?, Object?> entry in forcedHosts.entries) {
+          final Object? value = entry.value;
+          if (value is String && aliases.contains(value)) {
+            retained[entry.key as String] = value;
+          } else if (value is List) {
+            final List<String> routes = value
+                .whereType<String>()
+                .where(aliases.contains)
+                .toList();
+            if (routes.isNotEmpty) retained[entry.key as String] = routes;
+          }
+        }
+        config.set('forced-hosts', retained);
+      }
     }
     for (final MapEntry<String, Object?> entry in _proxyValues(
       definition,

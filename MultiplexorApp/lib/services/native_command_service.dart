@@ -831,24 +831,19 @@ class NativeCommandService {
       ConsumerProfile.fabric,
       ConsumerProfile.neoforge,
     ];
-    for (final ConsumerProfile candidate in profiles) {
-      for (final String instance in _instanceNames(candidate)) {
-        if (!_instanceLocked(candidate, instance)) {
-          _ensureNetworkDetached(
-            candidate,
-            instance,
-            action: 'delete all instances',
-          );
-        }
-      }
-    }
+    bool failed = false;
     for (final p in profiles) {
       try {
         await _instanceDeleteAll(p, interactive: false, io: io);
         io.write('[OK] Deleted all instances in ${p.shortName}');
       } catch (e) {
+        failed = true;
         io.error('[WARN] Failed wiping ${p.shortName}: $e');
       }
+    }
+    if (failed) {
+      io.error('[ERROR] Wipe incomplete; some instances could not be deleted.');
+      return 1;
     }
     io.write('[OK] Wipe complete across all consumers');
     return 0;
@@ -9686,8 +9681,7 @@ class NativeCommandService {
     ConsumerProfile profile,
     String name, {
     _NativeIoBuffer? io,
-  }) async {
-    _ensureNetworkDetached(profile, name, action: 'delete');
+  }) => _withNetworkOperation(() async {
     final instancePath = _instanceDir(profile, name);
     final existingType = FileSystemEntity.typeSync(
       instancePath,
@@ -9697,6 +9691,12 @@ class NativeCommandService {
       throw _NativeCommandException('Instance not found: $name', 2);
     }
     _ensureUnlocked(profile, name, action: 'deleted');
+
+    await _networkDetachForDeletion(
+      profile,
+      name,
+      io ?? _NativeIoBuffer(stream: false),
+    );
 
     if (await _runtimeRunning(profile, name)) {
       await _runtimeStop(profile, name, io ?? _NativeIoBuffer(stream: false));
@@ -9717,38 +9717,22 @@ class NativeCommandService {
       _deletePathEntity(_activeInstanceLink(profile), recursive: false);
       _deletePathEntity(_rootActiveInstanceLink(), recursive: false);
     }
-  }
+  });
 
   Future<void> _instanceDeleteAll(
     ConsumerProfile profile, {
     required bool interactive,
     _NativeIoBuffer? io,
-  }) async {
+  }) => _withNetworkOperation(() async {
     final entriesDir = Directory(_instancesDir(profile));
-    if (!entriesDir.existsSync()) {
-      return;
-    }
-    final entries = entriesDir
-        .listSync(recursive: false, followLinks: false)
-        .toList(growable: false);
-    if (entries.isEmpty) {
-      return;
-    }
+    final List<FileSystemEntity> entries = entriesDir.existsSync()
+        ? entriesDir.listSync(recursive: false, followLinks: false)
+        : <FileSystemEntity>[];
     final names =
         entries.map((entry) => p.basename(entry.path)).toList(growable: false)
           ..sort();
 
-    for (final String instance in names) {
-      if (!_instanceLocked(profile, instance)) {
-        _ensureNetworkDetached(
-          profile,
-          instance,
-          action: 'delete all instances',
-        );
-      }
-    }
-
-    if (interactive) {
+    if (interactive && names.isNotEmpty) {
       stdout.write('Type DELETE to remove ALL server instances: ');
       final answer = stdin.readLineSync()?.trim() ?? '';
       if (answer != 'DELETE') {
@@ -9756,18 +9740,37 @@ class NativeCommandService {
       }
     }
 
+    if (profile == ConsumerProfile.plugin) {
+      final Set<String> deleting = names
+          .where((String name) => !_instanceLocked(profile, name))
+          .toSet();
+      for (final NetworkDefinition network in _networkStore.list()) {
+        if (deleting.contains(network.proxy) ||
+            !_instanceExists(profile, network.proxy) ||
+            network.members.every(
+              (NetworkMember member) =>
+                  deleting.contains(member.instance) ||
+                  !_instanceExists(member.consumer, member.instance),
+            )) {
+          await _networkStop(network, io ?? _NativeIoBuffer(stream: false));
+          _networkStore.delete(network.name);
+        }
+      }
+    }
+
+    if (entries.isEmpty) return;
     final active = _currentInstance(profile);
     var activeDeleted = false;
-    await boundedMap<String, void>(names, (String instance) async {
+    for (final String instance in names) {
       if (_instanceLocked(profile, instance)) {
         stdout.writeln('[SKIP] $instance is locked; left untouched');
-        return;
+        continue;
       }
       await _instanceDelete(profile, instance, io: io);
       if (instance == active) {
         activeDeleted = true;
       }
-    });
+    }
 
     // Only clear the active markers if the instance they point at was actually
     // removed; a surviving locked instance keeps its active status.
@@ -9776,7 +9779,7 @@ class NativeCommandService {
       _deletePathEntity(_activeInstanceLink(profile), recursive: false);
       _deletePathEntity(_rootActiveInstanceLink(), recursive: false);
     }
-  }
+  });
 
   Future<void> _instanceReset(
     ConsumerProfile profile,

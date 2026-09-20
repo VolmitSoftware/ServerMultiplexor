@@ -476,35 +476,32 @@ void main() {
     },
   );
 
-  test(
-    'delete-all checks network membership before deleting other instances',
-    () async {
-      await createNetwork();
+  test('delete-all removes networks and standalone instances', () async {
+    await createNetwork();
+    expect(
+      (await run(<String>[
+        'instance',
+        'create',
+        'aaa-kept',
+        '--isolated',
+      ])).exitCode,
+      0,
+    );
+    for (final List<String> command in <List<String>>[
+      <String>['instance', 'delete-all', '--force'],
+      <String>['instance', 'delete-all', '--everywhere', '--force'],
+    ]) {
+      final CapturedResult deleted = await run(command);
+      expect(deleted.exitCode, 0, reason: deleted.stderr);
+      expect((await run(<String>['network', 'list'])).stdout.trim(), '(none)');
       expect(
-        (await run(<String>[
-          'instance',
-          'create',
-          'aaa-kept',
-          '--isolated',
-        ])).exitCode,
-        0,
+        Directory(p.join(proxy.parent.path, 'aaa-kept')).existsSync(),
+        isFalse,
       );
-      for (final List<String> command in <List<String>>[
-        <String>['instance', 'delete-all', '--force'],
-        <String>['instance', 'delete-all', '--everywhere', '--force'],
-      ]) {
-        final CapturedResult deleted = await run(command);
-        expect(deleted.exitCode, 2, reason: deleted.stderr);
-        expect(deleted.stderr, contains('belongs to network'));
-        expect(
-          Directory(p.join(proxy.parent.path, 'aaa-kept')).existsSync(),
-          isTrue,
-        );
-        expect(
-          Directory(p.join(proxy.parent.path, 'backend')).existsSync(),
-          isTrue,
-        );
-      }
-    },
-  );
+      expect(
+        Directory(p.join(proxy.parent.path, 'backend')).existsSync(),
+        isFalse,
+      );
+    }
+  });
 }

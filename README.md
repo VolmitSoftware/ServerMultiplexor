@@ -92,7 +92,7 @@ An isolated Local instance's **RUNTIME → Run bot swarm** action selects idle, 
 
 Velocity networks appear as trees in the Local dashboard. A `Velocity / <network>` parent shows the proxy port, followed by `├─` and `└─` backend rows with their ports. Each row keeps its own state and metrics. Select a parent or child to open its instance actions. The selected panel identifies the network and route. An asterisk marks an active network instance. ASCII terminals use `|-` and `` `- `` branches. Standalone servers keep their ordinary rows. Keyboard focus and checked instances stay attached to their instance identities when the tree changes.
 
-The Local plugin workspace card also includes **NETWORKS** (`v` while the card is open). Create a Velocity network from a checklist of compatible stopped servers, choose its entry server, port, and local or LAN access, then download Velocity or select a local jar. A network menu shows its join address, state, and connected player count from the proxy, with start, stop, restart, proxy console, status, and configuration checks. An unavailable player count is shown separately from zero players. Stop the whole network to add or remove backends, edit the entry server and fallback order, change the proxy bind/port, repair configuration, or delete the network. Velocity plugin sync only requires the proxy to be stopped. Deleting restores backend settings and retains server and proxy files.
+The Local plugin workspace card also includes **NETWORKS** (`v` while the card is open). Create a Velocity network from a checklist of compatible stopped servers, choose its entry server, port, and local or LAN access, then download Velocity or select a local jar. A network menu shows its join address, state, and connected player count from the proxy, with start, stop, restart, proxy console, status, and configuration checks. An unavailable player count is shown separately from zero players. Backend removal and network deletion stop the network automatically. Any backend can be removed, including the entry server or a fallback; routing updates automatically. Stop the whole network to add backends, edit routing, change the proxy bind/port, or repair configuration. Velocity plugin sync only requires the proxy to be stopped. Deleting the network restores backend settings and retains server and proxy files.
 
 **UPDATE** prepares a candidate, backs up the instance, starts an isolated loopback staging copy, and promotes the exact tested artifact after a Minecraft status response. Jar and Forge/NeoForge installer updates use this flow. Custom servers accept a replacement jar and an explicit Minecraft version. Promotion checks the original server too, restores the prior running/stopped state, and rolls back on startup failure. Status checks do not prove plugin loading or gameplay behavior.
 
@@ -252,9 +252,9 @@ For CI/non-macOS sessions, set both an origin-bound key and its companion origin
 | `instance port [instance] [port]` | Read or set `server-port` in `server.properties`. |
 | `instance motd-style [name\|--all]` | Apply the styled MOTD template (alias: `motd-style`). |
 | `instance reset <name>` | Wipe worlds/config/plugins/mods/logs back to baseline. Keeps the launch artifacts and the isolated flag, and re-applies the styled MOTD for the server type. Refused while the instance is locked. |
-| `instance delete <name>` | Delete the instance entirely (kills any running process first). Refused while the instance is locked. |
-| `instance delete-all [--force]` | Delete every instance in the active profile. Asks for `DELETE` confirmation unless `--force`. Locked instances are skipped and left untouched. |
-| `instance delete-all --everywhere [--force]` | Wipe every instance across plugin/forge/fabric/neoforge in one call. Asks for a double y/N confirmation unless `--force`. Locked instances are skipped. |
+| `instance delete <name>` | Delete the instance entirely (stops running processes first), automatically removing network membership and updating routes. Deleting a proxy or the last backend also removes its network definition. Refused while the instance is locked. |
+| `instance delete-all [--force]` | Delete every instance in the active profile and clean up its networks automatically. Asks for `DELETE` confirmation unless `--force`. Locked instances are skipped and left untouched. |
+| `instance delete-all --everywhere [--force]` | Wipe every instance across plugin/forge/fabric/neoforge and clean up networks in one call. Asks for a double y/N confirmation unless `--force`. Locked instances are skipped. |
 
 ### server — first-time jar wiring
 
@@ -281,7 +281,7 @@ Creation requires stopped backend instances. It creates a proxy instance named `
 | `network recover` | Restore the original files after an interrupted configuration operation. All affected instances must be stopped. |
 | `network create <name> --members <a,b> --default <alias> [--proxy velocity] [--port <port>] [--bind <127.0.0.1\|0.0.0.0>] [--fallback <a,b>] [--jar <path>] [--proxy-version <version>] [--offline]` | Create the proxy and configure modern forwarding for the selected backends. Initial routing aliases match instance names. |
 | `network add <name> <instance> [--alias <alias>] [--port <port>]` | Add a stopped compatible backend, with an optional routing alias and fixed backend port. |
-| `network remove <name> <alias>` | Detach a backend and restore its saved network settings. Remove its entry/fallback references first. |
+| `network remove <name> <alias>` | Stop the network, detach any backend, restore its saved settings, and update routing references. Removing the last backend deletes the network definition. Instance files are retained. |
 | `network configure <name> [--default <alias>] [--fallback <a,b>] [--port <port>] [--bind <127.0.0.1\|0.0.0.0>]` | Change entry/fallback routing and proxy listening settings. Use `--fallback none` to clear fallback servers. |
 | `network start <name> [--timeout <seconds>]` | Validate configuration, start stopped backends, wait for readiness, then start the proxy. Already running members remain running. |
 | `network stop <name>` | Stop the proxy before stopping its backends. |
@@ -291,9 +291,9 @@ Creation requires stopped backend instances. It creates a proxy instance named `
 | `network repair <name>` | Reapply managed network settings after configuration drift. Requires stopped members and an intact forwarding secret; preserves unrelated keys and original backend snapshots. |
 | `network console <name>` | Open the proxy console. |
 | `network plugins-sync <name>` | Copy Velocity plugin jars from `consumers/plugin-consumers/dropins/velocity/` into this stopped proxy. Backends may remain running. |
-| `network delete <name> --confirm <name>` | Restore backend network settings and delete the network definition. Retain backend worlds and proxy files; remove unwanted instances separately. |
+| `network delete <name> --confirm <name>` | Stop the network, restore backend network settings, and delete its definition, including when managed configuration has drifted. Retain backend worlds and proxy files. |
 
-Membership, routing, and configuration repair require the whole network to be stopped. Plugin sync requires only the proxy to be stopped. Network ports stay fixed; startup reports a conflict instead of silently changing a route. Managed members cannot be reset, cloned, deleted, restored, or updated independently until detached. Ordinary runtime controls and logs remain available for each process. Velocity plugins use their own dropin source; Bukkit plugin dropins are never copied into the proxy. Proxy TPS and player counts are omitted from the fleet aggregate to avoid counting the same players twice.
+Adding members, editing routing, and configuration repair require the whole network to be stopped. Backend removal, instance deletion, and network deletion stop it automatically. Removing an entry server selects the first surviving fallback, or the first remaining backend; removed aliases are pruned from fallback and forced-host routes. Deleting a proxy or the last backend dissolves the network and retains other instance files. Bulk deletion and workspace wipes perform this cleanup automatically. Plugin sync requires only the proxy to be stopped. Network ports stay fixed; startup reports a conflict instead of silently changing a route. Managed members cannot be reset, cloned, restored, or updated independently until detached. Ordinary runtime controls and logs remain available for each process. Velocity plugins use their own dropin source; Bukkit plugin dropins are never copied into the proxy. Proxy TPS and player counts are omitted from the fleet aggregate to avoid counting the same players twice.
 
 An interrupted configuration operation blocks further network commands until `network recover` restores its original files. The wizard offers recovery and retry when it cannot load networks. Backups containing active network forwarding metadata cannot be restored independently, even after detaching the instance; use a backup made before joining or after leaving a network.
 
@@ -740,7 +740,7 @@ For proxy sessions, create isolated `lobby` and `survival` backends and use `net
 ./start.sh --consumer plugin network stop dev
 ```
 
-To allow LAN players, stop the network and run `./start.sh --consumer plugin network configure dev --bind 0.0.0.0`. To return its servers to standalone use, stop it and run `./start.sh --consumer plugin network delete dev --confirm dev`. Their saved backend connection settings are restored.
+To allow LAN players, stop the network and run `./start.sh --consumer plugin network configure dev --bind 0.0.0.0`. To return its servers to standalone use, run `./start.sh --consumer plugin network delete dev --confirm dev`. This stops the network and restores saved backend connection settings. To delete a server and its files, run `./start.sh --consumer plugin instance delete lobby`; its network membership and routes update automatically. `./start.sh instance delete-all --everywhere` wipes servers and cleans up their networks in one call, skipping PIN-locked instances.
 
 **Pull, test locally, then push file changes**
 

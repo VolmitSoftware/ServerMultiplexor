@@ -105,6 +105,63 @@ void main() {
 
   tearDown(() => root.deleteSync(recursive: true));
 
+  test('remove repairs entry fallback and forced-host routes together', () {
+    write('gateway', 'velocity.toml', '''
+[forced-hosts]
+"lobby.example" = "lobby"
+"both.example" = ["lobby", "survival"]
+"survival.example" = "survival"
+''');
+    store.create(definition(fallbacks: <String>['survival']));
+    store.removeMember('dev', 'lobby');
+    final NetworkDefinition remaining = store.load('dev');
+    expect(remaining.defaultServer, 'survival');
+    expect(remaining.fallbackServers, isEmpty);
+    expect(remaining.members.single.instance, 'survival');
+    expect(store.validateConfiguration(remaining), isEmpty);
+    final NetworkConfigDocument proxy = NetworkConfigDocument(
+      NetworkConfigFormat.toml,
+      file('gateway', 'velocity.toml').readAsStringSync(),
+    );
+    expect(proxy.value('forced-hosts'), <String, Object?>{
+      'both.example': <String>['survival'],
+      'survival.example': 'survival',
+    });
+    expect(
+      file('lobby', '.server-source').readAsStringSync(),
+      isNot(contains('network=')),
+    );
+    store.removeMember('dev', 'survival');
+    expect(store.list(), isEmpty);
+    expect(
+      file('gateway', '.server-source').readAsStringSync(),
+      isNot(contains('network=')),
+    );
+    expect(
+      file('survival', 'server.properties').readAsStringSync(),
+      contains('online-mode=true'),
+    );
+  });
+
+  test('delete restores settings despite drift and missing proxy secret', () {
+    store.create(definition());
+    file('gateway', 'forwarding.secret').deleteSync();
+    write(
+      'lobby',
+      'server.properties',
+      'server-port=25599\nonline-mode=false\nmotd=Keep me\n',
+    );
+    store.delete('dev');
+    expect(store.list(), isEmpty);
+    final String properties = file(
+      'lobby',
+      'server.properties',
+    ).readAsStringSync();
+    expect(properties, contains('server-port=25565'));
+    expect(properties, contains('online-mode=true'));
+    expect(properties, contains('motd=Keep me'));
+  });
+
   test(
     'network model rejects invalid routes, aliases, consumers and ports',
     () {
@@ -449,7 +506,7 @@ void main() {
       );
       final List<String> errors = store.validateConfiguration(definition());
       expect(errors.join(), contains('server-port'));
-      expect(() => store.delete('dev'), throwsStateError);
+      expect(() => store.update(definition()), throwsStateError);
       expect(
         file('lobby', 'server.properties').readAsStringSync(),
         contains('25599'),
@@ -502,6 +559,7 @@ void main() {
     'update',
     'delete',
     'repair',
+    'remove',
   ]) {
     test('$operation failure rolls every file back', () {
       if (operation != 'create') store.create(definition());
@@ -538,6 +596,8 @@ void main() {
               failing.delete('dev');
             case 'repair':
               failing.repair('dev');
+            case 'remove':
+              failing.removeMember('dev', 'lobby');
           }
         },
         throwsA(

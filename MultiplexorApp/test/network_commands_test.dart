@@ -285,20 +285,10 @@ void main() {
   });
 
   test(
-    'membership edits require stopped network and preserve backend data',
+    'removing a backend stops the network and preserves backend data',
     () async {
       await create();
       runtime.running.add('lobby');
-      expect(
-        (await command(<String>[
-          'network',
-          'remove',
-          'test',
-          'survival',
-        ])).exitCode,
-        2,
-      );
-      runtime.running.clear();
       final File properties = File(
         p.join(instancePath('survival'), 'server.properties'),
       );
@@ -312,6 +302,8 @@ void main() {
         'survival',
       ]);
       expect(removed.exitCode, 0, reason: removed.stderr);
+      expect(runtime.events, <String>['stop:lobby']);
+      expect(runtime.running, isEmpty);
       expect(properties.readAsStringSync(), contains('online-mode=true'));
       expect(properties.readAsStringSync(), contains('view-distance=7'));
       expect(properties.readAsStringSync(), contains('motd=survival'));
@@ -329,22 +321,28 @@ void main() {
     },
   );
 
-  test('linked instance destructive and port operations are refused', () async {
-    await create();
-    for (final List<String> args in <List<String>>[
-      <String>['instance', 'delete', 'lobby'],
-      <String>['instance', 'reset', 'lobby'],
-      <String>['instance', 'clone', 'lobby', 'copy'],
-      <String>['instance', 'port', 'lobby', '25590'],
-      <String>['instance', 'isolated', 'lobby', 'false'],
-      <String>['instance', 'update', 'lobby', '--jar', jar.path],
-      <String>['instance', 'safe-update', 'lobby', '--jar', jar.path],
-    ]) {
-      final CapturedResult result = await command(args);
-      expect(result.exitCode, 2, reason: '${args.join(' ')}: ${result.stderr}');
-      expect(result.stderr, contains('network'));
-    }
-  });
+  test(
+    'linked instance reset and configuration operations are refused',
+    () async {
+      await create();
+      for (final List<String> args in <List<String>>[
+        <String>['instance', 'reset', 'lobby'],
+        <String>['instance', 'clone', 'lobby', 'copy'],
+        <String>['instance', 'port', 'lobby', '25590'],
+        <String>['instance', 'isolated', 'lobby', 'false'],
+        <String>['instance', 'update', 'lobby', '--jar', jar.path],
+        <String>['instance', 'safe-update', 'lobby', '--jar', jar.path],
+      ]) {
+        final CapturedResult result = await command(args);
+        expect(
+          result.exitCode,
+          2,
+          reason: '${args.join(' ')}: ${result.stderr}',
+        );
+        expect(result.stderr, contains('network'));
+      }
+    },
+  );
 
   test(
     'drift is reported and refuses startup before any process starts',
@@ -372,6 +370,327 @@ void main() {
       expect(runtime.events, isEmpty);
     },
   );
+
+  test(
+    'deleting the entry backend promotes its fallback and stops the network',
+    () async {
+      await create();
+      expect(
+        (await command(<String>[
+          'network',
+          'configure',
+          'test',
+          '--fallback',
+          'survival',
+        ])).exitCode,
+        0,
+      );
+      runtime.running.addAll(<String>['lobby', 'survival', 'test-proxy']);
+      final CapturedResult deleted = await command(<String>[
+        'instance',
+        'delete',
+        'lobby',
+      ]);
+      expect(deleted.exitCode, 0, reason: deleted.stderr);
+      expect(Directory(instancePath('lobby')).existsSync(), isFalse);
+      expect(Directory(instancePath('survival')).existsSync(), isTrue);
+      expect(runtime.events, <String>[
+        'stop:test-proxy',
+        'stop:survival',
+        'stop:lobby',
+      ]);
+      expect(runtime.running, isEmpty);
+      final CapturedResult status = await command(<String>[
+        'network',
+        'status',
+        'test',
+        '--json',
+      ]);
+      expect(status.exitCode, 0, reason: status.stderr);
+      final Map<String, Object?> decoded =
+          jsonDecode(status.stdout) as Map<String, Object?>;
+      final Map<String, Object?> network =
+          decoded['network'] as Map<String, Object?>;
+      expect(network['defaultServer'], 'survival');
+      expect(network['fallbackServers'], isEmpty);
+      expect(network['members'], hasLength(1));
+      expect(decoded['issues'], isEmpty);
+    },
+  );
+
+  test('deleting a fallback backend leaves a valid entry route', () async {
+    await create();
+    expect(
+      (await command(<String>[
+        'network',
+        'configure',
+        'test',
+        '--fallback',
+        'survival',
+      ])).exitCode,
+      0,
+    );
+    final CapturedResult deleted = await command(<String>[
+      'instance',
+      'delete',
+      'survival',
+    ]);
+    expect(deleted.exitCode, 0, reason: deleted.stderr);
+    final CapturedResult status = await command(<String>[
+      'network',
+      'status',
+      'test',
+      '--json',
+    ]);
+    final Map<String, Object?> decoded =
+        jsonDecode(status.stdout) as Map<String, Object?>;
+    final Map<String, Object?> network =
+        decoded['network'] as Map<String, Object?>;
+    expect(network['defaultServer'], 'lobby');
+    expect(network['fallbackServers'], isEmpty);
+    expect(decoded['issues'], isEmpty);
+  });
+
+  test(
+    'deleting the final backend dissolves its network and keeps the proxy',
+    () async {
+      await create();
+      for (final String name in <String>['survival', 'lobby']) {
+        final CapturedResult deleted = await command(<String>[
+          'instance',
+          'delete',
+          name,
+        ]);
+        expect(deleted.exitCode, 0, reason: deleted.stderr);
+        expect(Directory(instancePath(name)).existsSync(), isFalse);
+      }
+      expect(
+        jsonDecode(
+          (await command(<String>['network', 'list', '--json'])).stdout,
+        ),
+        isEmpty,
+      );
+      expect(Directory(instancePath('test-proxy')).existsSync(), isTrue);
+      expect(
+        File(
+          p.join(instancePath('test-proxy'), '.server-source'),
+        ).readAsStringSync(),
+        isNot(contains('network=')),
+      );
+    },
+  );
+
+  test(
+    'deleting the proxy dissolves its network and restores surviving backends',
+    () async {
+      await create();
+      final CapturedResult deleted = await command(<String>[
+        'instance',
+        'delete',
+        'test-proxy',
+      ]);
+      expect(deleted.exitCode, 0, reason: deleted.stderr);
+      expect(Directory(instancePath('test-proxy')).existsSync(), isFalse);
+      expect(
+        jsonDecode(
+          (await command(<String>['network', 'list', '--json'])).stdout,
+        ),
+        isEmpty,
+      );
+      for (final String name in <String>['lobby', 'survival']) {
+        expect(
+          File(
+            p.join(instancePath(name), 'server.properties'),
+          ).readAsStringSync(),
+          contains('online-mode=true'),
+        );
+        expect(
+          File(p.join(instancePath(name), '.server-source')).readAsStringSync(),
+          isNot(contains('network=')),
+        );
+      }
+    },
+  );
+
+  for (final bool everywhere in <bool>[false, true]) {
+    test(
+      'delete-all removes network instances${everywhere ? ' across consumers' : ''}',
+      () async {
+        await create();
+        runtime.running.addAll(<String>['lobby', 'survival', 'test-proxy']);
+        final CapturedResult deleted = await command(<String>[
+          'instance',
+          'delete-all',
+          if (everywhere) '--everywhere',
+          '--force',
+        ]);
+        expect(deleted.exitCode, 0, reason: deleted.stderr);
+        for (final String name in <String>[
+          'lobby',
+          'survival',
+          'test-proxy',
+          'extra',
+        ]) {
+          expect(Directory(instancePath(name)).existsSync(), isFalse);
+        }
+        expect(runtime.running, isEmpty);
+        expect(
+          jsonDecode(
+            (await command(<String>['network', 'list', '--json'])).stdout,
+          ),
+          isEmpty,
+        );
+      },
+    );
+  }
+
+  test(
+    'selected bulk deletion removes both network backends without races',
+    () async {
+      await create();
+      final CapturedResult deleted = await command(<String>[
+        'instance',
+        'bulk',
+        'delete',
+        'lobby',
+        'survival',
+        '--confirm',
+        'DELETE lobby,survival',
+        '--concurrency',
+        '8',
+      ]);
+      expect(deleted.exitCode, 0, reason: deleted.stderr);
+      expect(deleted.stdout, contains('2 succeeded, 0 skipped, 0 failed'));
+      expect(Directory(instancePath('lobby')).existsSync(), isFalse);
+      expect(Directory(instancePath('survival')).existsSync(), isFalse);
+      expect(Directory(instancePath('test-proxy')).existsSync(), isTrue);
+      expect(
+        jsonDecode(
+          (await command(<String>['network', 'list', '--json'])).stdout,
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'locked deletion leaves the network and running processes untouched',
+    () async {
+      await create();
+      File(
+        p.join(instancePath('lobby'), '.server-source'),
+      ).writeAsStringSync('locked=true\n', mode: FileMode.append);
+      runtime.running.addAll(<String>['lobby', 'survival', 'test-proxy']);
+      final CapturedResult deleted = await command(<String>[
+        'instance',
+        'delete',
+        'lobby',
+      ]);
+      expect(deleted.exitCode, isNot(0));
+      expect(deleted.stderr, contains('locked'));
+      expect(runtime.events, isEmpty);
+      expect(Directory(instancePath('lobby')).existsSync(), isTrue);
+      expect((await command(<String>['network', 'check', 'test'])).exitCode, 0);
+    },
+  );
+
+  test(
+    'failed network stop leaves deletion target and topology intact',
+    () async {
+      await create();
+      runtime.running.addAll(<String>['lobby', 'survival', 'test-proxy']);
+      runtime.failStop = 'test-proxy';
+      final CapturedResult deleted = await command(<String>[
+        'instance',
+        'delete',
+        'lobby',
+      ]);
+      expect(deleted.exitCode, isNot(0));
+      expect(Directory(instancePath('lobby')).existsSync(), isTrue);
+      expect(runtime.running, <String>{'lobby', 'survival', 'test-proxy'});
+      expect((await command(<String>['network', 'check', 'test'])).exitCode, 0);
+    },
+  );
+
+  test('wipe preserves locked backends while removing the network', () async {
+    await create();
+    File(
+      p.join(instancePath('lobby'), '.server-source'),
+    ).writeAsStringSync('locked=true\n', mode: FileMode.append);
+    expect(
+      (await command(<String>['instance', 'activate', 'lobby'])).exitCode,
+      0,
+    );
+    final CapturedResult deleted = await command(<String>[
+      'instance',
+      'delete-all',
+      '--force',
+    ]);
+    expect(deleted.exitCode, 0, reason: deleted.stderr);
+    expect(Directory(instancePath('lobby')).existsSync(), isTrue);
+    for (final String name in <String>['survival', 'test-proxy', 'extra']) {
+      expect(Directory(instancePath(name)).existsSync(), isFalse);
+    }
+    expect(
+      File(
+        p.join(instancePath('lobby'), 'server.properties'),
+      ).readAsStringSync(),
+      contains('online-mode=true'),
+    );
+    expect(
+      (await command(<String>['instance', 'current'])).stdout.trim(),
+      'lobby',
+    );
+    expect(
+      jsonDecode((await command(<String>['network', 'list', '--json'])).stdout),
+      isEmpty,
+    );
+  });
+
+  test('failed cross-consumer wipe reports failure', () async {
+    await create();
+    runtime.running.add('test-proxy');
+    runtime.failStop = 'test-proxy';
+    final CapturedResult deleted = await command(<String>[
+      'instance',
+      'delete-all',
+      '--everywhere',
+      '--force',
+    ]);
+    expect(deleted.exitCode, isNot(0));
+    expect(deleted.stdout, isNot(contains('[OK] Wipe complete')));
+    expect(Directory(instancePath('lobby')).existsSync(), isTrue);
+    expect((await command(<String>['network', 'check', 'test'])).exitCode, 0);
+  });
+
+  for (final List<String> missing in <List<String>>[
+    <String>['lobby'],
+    <String>['test-proxy'],
+    <String>['lobby', 'survival', 'test-proxy', 'extra'],
+  ]) {
+    test(
+      'wipe removes stale network records with missing ${missing.join(', ')}',
+      () async {
+        await create();
+        for (final String name in missing) {
+          Directory(instancePath(name)).deleteSync(recursive: true);
+        }
+        final CapturedResult deleted = await command(<String>[
+          'instance',
+          'delete-all',
+          '--force',
+        ]);
+        expect(deleted.exitCode, 0, reason: deleted.stderr);
+        expect(Directory(instancePath('extra')).parent.listSync(), isEmpty);
+        expect(
+          jsonDecode(
+            (await command(<String>['network', 'list', '--json'])).stdout,
+          ),
+          isEmpty,
+        );
+      },
+    );
+  }
 
   test('occupied network port fails without reassignment', () async {
     await create();
@@ -480,6 +799,7 @@ void main() {
         ])).exitCode,
         2,
       );
+      runtime.running.addAll(<String>['lobby', 'survival', 'test-proxy']);
       final CapturedResult deleted = await command(<String>[
         'network',
         'delete',
@@ -488,6 +808,7 @@ void main() {
         'test',
       ]);
       expect(deleted.exitCode, 0, reason: deleted.stderr);
+      expect(runtime.running, isEmpty);
       expect(
         jsonDecode(
           (await command(<String>['network', 'list', '--json'])).stdout,
@@ -515,6 +836,7 @@ class _NetworkRuntime implements RecoveryRuntime {
   final Set<String> running = <String>{};
   final List<String> events = <String>[];
   String? failReadiness;
+  String? failStop;
 
   @override
   Future<bool> isRunning(ConsumerProfile profile, String instance) async =>
@@ -529,6 +851,7 @@ class _NetworkRuntime implements RecoveryRuntime {
   @override
   Future<void> stopGracefully(ConsumerProfile profile, String instance) async {
     events.add('stop:$instance');
+    if (instance == failStop) throw StateError('Stop failed: $instance');
     running.remove(instance);
   }
 

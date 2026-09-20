@@ -85,42 +85,51 @@ void main() {
     },
   );
 
-  test('configuration actions require every process to be stopped', () {
-    final WizardNetworkStatus stopped = WizardNetworkStatus.parse(
-      jsonEncode(status()),
-    );
-    expect(
-      stopped.actions,
-      containsAll(<String>[
-        'start',
+  test(
+    'deletion stays available while configuration requires stopped processes',
+    () {
+      final WizardNetworkStatus stopped = WizardNetworkStatus.parse(
+        jsonEncode(status()),
+      );
+      expect(
+        stopped.actions,
+        containsAll(<String>[
+          'start',
+          'add',
+          'remove',
+          'configure',
+          'repair',
+          'plugins-sync',
+          'delete',
+        ]),
+      );
+      expect(stopped.actions, isNot(contains('stop')));
+      final WizardNetworkStatus degraded = WizardNetworkStatus.parse(
+        jsonEncode(status(state: 'degraded', backendState: 'starting')),
+      );
+      expect(degraded.allStopped, isFalse);
+      expect(
+        degraded.actions,
+        containsAll(<String>[
+          'start',
+          'stop',
+          'restart',
+          'status',
+          'check',
+          'remove',
+          'delete',
+        ]),
+      );
+      for (final String action in <String>[
+        'console',
         'add',
-        'remove',
         'configure',
         'repair',
-        'plugins-sync',
-        'delete',
-      ]),
-    );
-    expect(stopped.actions, isNot(contains('stop')));
-    final WizardNetworkStatus degraded = WizardNetworkStatus.parse(
-      jsonEncode(status(state: 'degraded', backendState: 'starting')),
-    );
-    expect(degraded.allStopped, isFalse);
-    expect(
-      degraded.actions,
-      containsAll(<String>['start', 'stop', 'restart', 'status', 'check']),
-    );
-    for (final String action in <String>[
-      'console',
-      'add',
-      'remove',
-      'configure',
-      'repair',
-      'delete',
-    ]) {
-      expect(degraded.actions, isNot(contains(action)));
-    }
-  });
+      ]) {
+        expect(degraded.actions, isNot(contains(action)));
+      }
+    },
+  );
 
   test(
     'network menu shows proxy players and distinguishes zero from unavailable',
@@ -192,23 +201,16 @@ void main() {
     );
     expect(running.actions, isNot(contains('start')));
     expect(running.actions, contains('console'));
+    expect(running.actions, containsAll(<String>['remove', 'delete']));
   });
 
-  test('remove choices exclude both entry and fallback references', () {
-    final WizardNetwork available = WizardNetwork.fromJson(network());
-    expect(
-      available.removableMembers.map(
-        (WizardNetworkMember member) => member.alias,
-      ),
-      <String>['survival'],
-    );
+  test('entry and fallback references leave removal available', () {
     final Map<String, Object?> definition = network()
       ..['fallbackServers'] = <String>['survival'];
-    expect(WizardNetwork.fromJson(definition).removableMembers, isEmpty);
     final Map<String, Object?> snapshot = status()..['network'] = definition;
     expect(
       WizardNetworkStatus.parse(jsonEncode(snapshot)).actions,
-      isNot(contains('remove')),
+      contains('remove'),
     );
   });
 
