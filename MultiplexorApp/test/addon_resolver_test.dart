@@ -71,31 +71,91 @@ void main() {
       });
     }
 
-    test(
-      'EssentialsX falls back to an immutable official CI artifact on 26.2',
-      () async {
-        fixture.json(
-          'api.modrinth.com/v2/project/hXiIvTyT/version',
-          <Object?>[],
-        );
-        essentialsBuild();
-        fixture.bytes(essentialsPath, _jar);
+    for (final String minecraft in <String>['26.2', '26.3']) {
+      test(
+        'EssentialsX falls back to an immutable official CI artifact on $minecraft',
+        () async {
+          fixture.json(
+            'api.modrinth.com/v2/project/hXiIvTyT/version',
+            <Object?>[],
+          );
+          essentialsBuild();
+          fixture.bytes(essentialsPath, _jar);
 
-        await resolveWith((AddonResolver resolver) async {
-          final ResolvedAddon result = await resolver.resolve(
-            AddonCatalog.load(root.path).entries['essentialsx']!,
-            'leaf',
-            '26.2',
+          await resolveWith((AddonResolver resolver) async {
+            final ResolvedAddon result = await resolver.resolve(
+              AddonCatalog.load(root.path).entries['essentialsx']!,
+              'leaf',
+              minecraft,
+            );
+            expect(
+              Uri.parse(result.location).path,
+              '/job/EssentialsX/1827/artifact/jars/$essentialsJar',
+            );
+            expect(result.version, contains('#1827 (development)'));
+            final File target = File(p.join(root.path, 'essentials.jar'));
+            await resolver.download(result, target);
+            expect(target.readAsBytesSync(), _jar);
+          });
+        },
+      );
+    }
+
+    for (final ({String id, String project, String version}) addon
+        in <({String id, String project, String version})>[
+          (id: 'bluemap', project: 'swbUV1cr', version: '5.27-paper'),
+          (id: 'viaversion', project: 'P1OZGk5p', version: '5.12.0'),
+          (id: 'viabackwards', project: 'NpvuJQoq', version: '5.12.0'),
+        ]) {
+      test(
+        '${addon.id} resolves a stable 26.3 Paper release for Leaf',
+        () async {
+          fixture.json(
+            'api.modrinth.com/v2/project/${addon.project}/version',
+            <Map<String, Object?>>[
+              _version(
+                '${addon.version}-snapshot',
+                minecraft: <String>['26.3'],
+                channel: 'beta',
+              ),
+              _version(addon.version, minecraft: <String>['26.3']),
+              _version('old-game-release', minecraft: <String>['26.2']),
+            ],
           );
+          await resolveWith((AddonResolver resolver) async {
+            final ResolvedAddon result = await resolver.resolve(
+              AddonCatalog.load(root.path).entries[addon.id]!,
+              'leaf',
+              '26.3',
+            );
+            expect(result.version, addon.version);
+          });
+          final Uri request = fixture.requests.single;
+          expect(jsonDecode(request.queryParameters['loaders']!), <String>[
+            'paper',
+          ]);
           expect(
-            Uri.parse(result.location).path,
-            '/job/EssentialsX/1827/artifact/jars/$essentialsJar',
+            jsonDecode(request.queryParameters['game_versions']!),
+            <String>['26.3'],
           );
-          expect(result.version, contains('#1827 (development)'));
-          final File target = File(p.join(root.path, 'essentials.jar'));
-          await resolver.download(result, target);
-          expect(target.readAsBytesSync(), _jar);
+        },
+      );
+    }
+
+    test(
+      'ProtocolLib rejects 26.3 without verified upstream support',
+      () async {
+        await resolveWith((AddonResolver resolver) async {
+          await expectLater(
+            resolver.resolve(
+              AddonCatalog.load(root.path).entries['protocollib']!,
+              'paper',
+              '26.3',
+            ),
+            throwsStateError,
+          );
         });
+        expect(fixture.requests, isEmpty);
       },
     );
 

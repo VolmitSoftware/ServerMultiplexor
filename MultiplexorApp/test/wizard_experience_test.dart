@@ -85,7 +85,7 @@ void main() {
   );
 
   test(
-    'unavailable metadata cannot invent a latest version or treat NeoForge loader numbers as Minecraft',
+    'unavailable metadata maps cached NeoForge loaders without inventing a latest version',
     () {
       final BuildVersionCatalog empty = BuildVersionCatalog(
         type: 'paper',
@@ -106,7 +106,7 @@ void main() {
           ),
         ],
       );
-      expect(neoforge.versions, isEmpty);
+      expect(neoforge.versions, <String>['1.21.1']);
       expect(neoforge.latest, isNull);
     },
   );
@@ -180,7 +180,7 @@ void main() {
             .toList();
         final Set<String> expected = modal is InstanceModal
             ? <String>{'im:backups', 'im:settings'}
-            : <String>{'wm:diagnostics', 'wm:templates'};
+            : <String>{'wm:diagnostics', 'wm:createMany'};
         expect(
           buttons.map((MonitorHitbox box) => box.id),
           containsAll(expected),

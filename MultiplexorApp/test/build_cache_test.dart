@@ -187,6 +187,32 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
     test('does not match a different version', () {
       expect(entry.matchesVersion('1.20.4'), isFalse);
     });
+
+    test('NeoForge freshness uses the exact Minecraft version', () {
+      const BuildCacheEntry modern = BuildCacheEntry(
+        type: 'neoforge',
+        jarName: 'neoforge-26.3.0.7-beta-installer.jar',
+        age: Duration(hours: 2),
+      );
+      const BuildCacheEntry patched = BuildCacheEntry(
+        type: 'neoforge',
+        jarName: 'neoforge-26.3.1.1-beta-installer.jar',
+        age: Duration(hours: 1),
+      );
+      const BuildCacheEntry legacy = BuildCacheEntry(
+        type: 'neoforge',
+        jarName: 'neoforge-21.1.234-installer.jar',
+        age: Duration(hours: 3),
+      );
+      expect(modern.matchesVersion('26.3'), isTrue);
+      expect(patched.matchesVersion('26.3'), isFalse);
+      expect(legacy.matchesVersion('1.21.1'), isTrue);
+      expect(legacy.matchesVersion('21.1.234'), isFalse);
+      expect(
+        newestCachedAge(<BuildCacheEntry>[modern, patched], version: '26.3'),
+        const Duration(hours: 2),
+      );
+    });
   });
 
   group('newestCachedAge', () {

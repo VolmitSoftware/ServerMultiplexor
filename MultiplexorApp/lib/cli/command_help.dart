@@ -185,14 +185,6 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'delete [instance] <backup-id> [--instance <name>]',
     'prune [instance] [--keep <n>]',
   ]),
-  CommandHelpGroup('template', <String>[
-    'list',
-    'init <name> [--type <type>] [--mc <version>] [--heap <size>] [--preset <name>] [--isolated]',
-    'show <name>',
-    'apply <template> <name> [--auto-build] [--sync] [--isolated]',
-    'export <instance> <template>',
-    'delete <name>',
-  ]),
   CommandHelpGroup('addons', <String>[
     'catalog [--json]',
     'list [instance] [--mc <version>] [--json]',

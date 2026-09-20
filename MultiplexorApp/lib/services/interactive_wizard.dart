@@ -7,7 +7,6 @@ import 'package:path/path.dart' as p;
 import '../models/build_cache.dart';
 import '../models/build_version_catalog.dart';
 import '../models/backup_summary.dart';
-import '../models/template_summary.dart';
 import '../models/consumer_profile.dart';
 import '../models/gameplay_swarm.dart';
 import '../utils/async_work_pool.dart';
@@ -1125,8 +1124,6 @@ class InteractiveWizard {
       case WorkspaceModalAction.diagnostics:
         await _shellRun(<String>['doctor']);
         await Ui.pause();
-      case WorkspaceModalAction.templates:
-        await _createFromTemplate();
       case WorkspaceModalAction.networks:
         await _networkMenu();
       case WorkspaceModalAction.buildTuning:
@@ -1296,7 +1293,6 @@ class InteractiveWizard {
         await _remoteCreateMany();
       case WorkspaceModalAction.buildTuning:
       case WorkspaceModalAction.diagnostics:
-      case WorkspaceModalAction.templates:
       case WorkspaceModalAction.networks:
       case WorkspaceModalAction.pullBuilds:
       case WorkspaceModalAction.wipe:
@@ -4411,20 +4407,6 @@ class InteractiveWizard {
   // ─── Create flow ─────────────────────────────────────────────────────
 
   Future<void> _createInstance() async {
-    if (passthrough.listTemplates().isNotEmpty) {
-      final String choice =
-          await menuSelect<String>('New instance', const <MenuEntry<String>>[
-            MenuEntry<String>('Choose platform and version', value: 'platform'),
-            MenuEntry<String>(
-              'Use an example or saved template',
-              value: 'template',
-            ),
-          ]);
-      if (choice == 'template') {
-        await _createFromTemplate();
-        return;
-      }
-    }
     final String type = await _pickServerPlatform();
     final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String version = versionChoice.version;

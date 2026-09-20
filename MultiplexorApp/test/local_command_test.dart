@@ -121,7 +121,6 @@ void main() {
       'mods': 'show-source',
       'config': 'localize',
       'backup': 'list',
-      'template': 'list',
       'content': 'list',
       'addons': 'list',
       'gameplay': 'doctor',
@@ -176,9 +175,9 @@ void main() {
       () => parse(<String>['build', 'paper', '1.21.4', '--mc=1.21.5']),
       throwsFormatException,
     );
-    expect(parse(<String>['template', 'init', 'demo', '--mc=1.21.4']), <String>[
-      'template',
-      'init',
+    expect(parse(<String>['server', 'create', 'demo', '--mc=1.21.4']), <String>[
+      'server',
+      'create',
       'demo',
       '--mc',
       '1.21.4',
@@ -187,6 +186,9 @@ void main() {
 
   for (final List<String> malformed in <List<String>>[
     <String>['unknown'],
+    <String>['template'],
+    <String>['template', 'list'],
+    <String>['template', 'apply', 'example', 'demo'],
     <String>['instance', 'typo'],
     <String>['doctor', 'typo'],
     <String>['doctor', '--typo'],

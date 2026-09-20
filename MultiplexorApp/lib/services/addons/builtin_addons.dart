@@ -27,7 +27,7 @@ const List<Map<String, Object?>> builtinAddons = <Map<String, Object?>>[
         'type': 'jenkins',
         'url': 'https://ci.ender.zone/job/EssentialsX/',
         'artifactPattern': r'^EssentialsX-[^/]+\.jar$',
-        'minecraftVersions': <String>['26.2'],
+        'minecraftVersions': <String>['26.2', '26.3'],
         'label': 'development',
       },
     ],

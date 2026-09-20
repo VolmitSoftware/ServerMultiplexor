@@ -223,7 +223,6 @@ void main() {
         WorkspaceModalAction.files,
         WorkspaceModalAction.bulkActions,
         WorkspaceModalAction.diagnostics,
-        WorkspaceModalAction.templates,
         WorkspaceModalAction.networks,
       ]);
     });
@@ -889,10 +888,9 @@ void main() {
   });
 
   group('overlayModal workspace actions', () {
-    test('offers exactly the eight workspace card actions', () {
+    test('offers exactly the seven workspace card actions', () {
       expect(buttonIds(workspaceOverlay()), <String>{
         'wm:diagnostics',
-        'wm:templates',
         'wm:buildTuning',
         'wm:pullBuilds',
         'wm:createMany',
@@ -1093,7 +1091,6 @@ void main() {
       expect(Ansi.visibleLength(frame.rows[12]), 41);
       expect(buttonIds(frame), <String>{
         'wm:diagnostics',
-        'wm:templates',
         'wm:buildTuning',
         'wm:pullBuilds',
         'wm:createMany',

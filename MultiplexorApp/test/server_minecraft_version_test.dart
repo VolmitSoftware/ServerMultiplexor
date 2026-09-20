@@ -7,6 +7,14 @@ import 'package:test/test.dart';
 void main() {
   for (final (String type, String filename, String expected) fixture
       in <(String, String, String)>[
+        ('paper', 'paper-26.3-25.jar', '26.3'),
+        ('purpur', 'purpur-26.3-2637.jar', '26.3'),
+        ('forge', 'forge-26.3-66.0.2-installer.jar', '26.3'),
+        ('fabric', 'fabric-26.3-loader.0.19.5-installer.1.1.1.jar', '26.3'),
+        ('spigot', 'spigot-26.3.jar', '26.3'),
+        ('neoforge', 'neoforge-21.11.35-installer.jar', '1.21.11'),
+        ('neoforge', 'neoforge-26.3.0.7-beta-installer.jar', '26.3'),
+        ('neoforge', 'neoforge-26.3.1.1-beta-installer.jar', '26.3.1'),
         ('leaf', 'leaf-26.2-96.jar', '26.2'),
         ('leaf', 'leaf-26.1.2-73.jar', '26.1.2'),
         ('paper', 'paper-1.21.11-127.jar', '1.21.11'),
@@ -53,7 +61,9 @@ void main() {
   });
 
   for (final (String type, String filename) fixture in <(String, String)>[
-    ('neoforge', 'neoforge-21.11.35-installer.jar'),
+    ('neoforge', 'neoforge-26.3.7-installer.jar'),
+    ('neoforge', 'neoforge-26.3.0.7-beta.jar'),
+    ('neoforge', 'my-neoforge-26.3.0.7-beta-installer.jar'),
     ('custom', 'custom-26.2-96.jar'),
     ('custom', 'paper-1.21.4-123.jar'),
     ('leaf', 'server.jar'),

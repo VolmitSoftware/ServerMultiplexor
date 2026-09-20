@@ -24,7 +24,7 @@ void main() {
       context: context,
       consumerService: consumers,
       processRunner: const _InstallerRunner(),
-      javaInspector: (String executable) async => 21,
+      javaInspector: (String executable) async => 25,
     );
   });
 
@@ -145,6 +145,97 @@ void main() {
       expect(metadata('versions-paper')['mc'], '26.2');
     },
   );
+
+  for (final (
+        ConsumerProfile profile,
+        String type,
+        String minecraft,
+        String exact,
+        String other,
+      )
+      fixture
+      in <(ConsumerProfile, String, String, String, String)>[
+        (
+          ConsumerProfile.plugin,
+          'paper',
+          '26.3',
+          'paper-26.3-25.jar',
+          'paper-26.3.1-30.jar',
+        ),
+        (
+          ConsumerProfile.neoforge,
+          'neoforge',
+          '26.3',
+          'neoforge-26.3.0.7-beta-installer.jar',
+          'neoforge-26.3.1.1-beta-installer.jar',
+        ),
+        (
+          ConsumerProfile.neoforge,
+          'neoforge',
+          '1.21.1',
+          'neoforge-21.1.234-installer.jar',
+          'neoforge-21.11.35-installer.jar',
+        ),
+      ]) {
+    test(
+      '${fixture.$2} cached selection matches ${fixture.$3} exactly',
+      () async {
+        service.setConsumerOverride(fixture.$1);
+        final String cache = p.join(
+          p.relative(consumers.rootFor(fixture.$1), from: root.path),
+          'builds',
+          fixture.$2,
+        );
+        final File exact = jar(p.join(cache, fixture.$4));
+        exact.setLastModifiedSync(DateTime.utc(2026, 1, 1));
+        final File other = jar(p.join(cache, fixture.$5));
+        other.setLastModifiedSync(DateTime.utc(2026, 2, 1));
+        await create(<String>[
+          'create',
+          'exact-version',
+          '--type',
+          fixture.$2,
+          '--mc',
+          fixture.$3,
+          '--isolated',
+        ]);
+        final Map<String, String> state = metadata(
+          'exact-version',
+          profile: fixture.$1,
+        );
+        expect(
+          state['installer'] ?? state['jar'],
+          exact.resolveSymbolicLinksSync(),
+        );
+        expect(state['mc'], fixture.$3);
+
+        final CapturedResult cacheInfo = await service.execute(<String>[
+          'build',
+          'cache-info',
+          fixture.$2,
+          '--mc',
+          fixture.$3,
+        ], stream: false);
+        expect(cacheInfo.exitCode, 0, reason: cacheInfo.stderr);
+        expect(cacheInfo.stdout, contains(fixture.$4));
+        expect(cacheInfo.stdout, isNot(contains(fixture.$5)));
+
+        exact.deleteSync();
+        final CapturedResult absent = await service.execute(<String>[
+          'server',
+          'create',
+          'missing-version',
+          '--type',
+          fixture.$2,
+          '--mc',
+          fixture.$3,
+          '--isolated',
+        ], stream: false);
+        expect(absent.exitCode, 2);
+        expect(absent.stderr, contains('No cached jar'));
+      },
+    );
+  }
 
   test('Forge installer imports preserve inferred MC before hashing', () async {
     service.setConsumerOverride(ConsumerProfile.forge);

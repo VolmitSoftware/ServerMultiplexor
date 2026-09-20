@@ -7,10 +7,10 @@ import 'package:crypto/crypto.dart';
 import 'package:multiplexor/cli/command_help.dart';
 import 'package:multiplexor/cli/local_command.dart';
 import 'package:path/path.dart' as p;
-import 'package:yaml/yaml.dart';
 
 import '../models/build_cache.dart';
 import '../models/consumer_profile.dart';
+import '../models/neoforge_version.dart';
 import '../models/gameplay_swarm.dart';
 import '../models/gameplay_sessions.dart';
 import '../models/server_minecraft_version.dart';
@@ -44,11 +44,9 @@ import 'rcon_client.dart';
 import 'recovery_snapshot.dart';
 import 'recovery_runtime.dart';
 import '../models/backup_summary.dart';
-import '../models/template_summary.dart';
 import 'runtime_state.dart';
 import 'runtime_stop.dart';
 import 'server_ping.dart';
-import 'template_catalog.dart';
 
 part 'native_command_help.dart';
 part 'native_cli_output.dart';
@@ -58,7 +56,6 @@ part 'native_command_recovery.dart';
 part 'native_command_network.dart';
 part 'native_command_swarm.dart';
 part 'native_command_sessions.dart';
-part 'native_command_templates.dart';
 
 class NativeCommandService {
   NativeCommandService({
@@ -115,52 +112,6 @@ class NativeCommandService {
 
   void setConsumerOverride(ConsumerProfile? profile) {
     _consumerOverride = profile;
-  }
-
-  List<TemplateSummary> listTemplates() {
-    final List<TemplateSummary> templates = <TemplateSummary>[
-      if (_activeConsumer == ConsumerProfile.plugin)
-        ...bundledTemplates.map((BundledTemplate item) => item.summary),
-    ];
-    final Directory directory = Directory(_templatesDir());
-    if (directory.existsSync()) {
-      for (final File file
-          in directory.listSync(followLinks: false).whereType<File>()) {
-        if (!file.path.endsWith('.yaml')) continue;
-        final String name = p.basenameWithoutExtension(file.path);
-        _ensureWritableTemplateName(name);
-        final Map<String, dynamic> template = _loadTemplate(name);
-        final bool network = template['kind'] == 'network';
-        if (network && _activeConsumer != ConsumerProfile.plugin) continue;
-        final Map<String, dynamic> backends = _mapValue(template['backends']);
-        final List<String> types = network
-            ? backends.values
-                  .map(
-                    (Object? value) =>
-                        _mapValue(value)['type']?.toString() ?? 'purpur',
-                  )
-                  .toSet()
-                  .toList()
-            : <String>[template['type']?.toString() ?? 'purpur'];
-        templates.add(
-          TemplateSummary(
-            name: name,
-            type: network ? 'velocity' : types.first,
-            minecraft: network && backends.isNotEmpty
-                ? _mapValue(backends.values.first)['mc']?.toString()
-                : template['mc']?.toString(),
-            kind: network ? 'network' : 'server',
-            description: template['description']?.toString() ?? '',
-            buildTypes: types,
-            backendCount: backends.length,
-          ),
-        );
-      }
-    }
-    templates.sort(
-      (TemplateSummary a, TemplateSummary b) => a.name.compareTo(b.name),
-    );
-    return templates;
   }
 
   Map<int, List<String>> configuredInstancePorts() {
@@ -249,9 +200,6 @@ class NativeCommandService {
   );
 
   Future<int> _dispatch(List<String> args, _NativeIoBuffer io) async {
-    if (args.length > 1 && args[0] == 'template' && args[1] == 'apply') {
-      return _withNetworkOperation(() => _dispatchUnlocked(args, io));
-    }
     if (args.length > 1 &&
         args.first == 'gameplay' &&
         const <String>{'sessions', 'sessions-host'}.contains(args[1])) {
@@ -262,7 +210,6 @@ class NativeCommandService {
               'instance',
               'server',
               'config',
-              'template',
               'backup',
               'addons',
               'gameplay',
@@ -307,8 +254,6 @@ class NativeCommandService {
         return _dispatchDoctor(rest, io);
       case 'backup':
         return _dispatchBackup(rest, io);
-      case 'template':
-        return _dispatchTemplate(rest, io);
       case 'content':
         return _dispatchContent(rest, io);
       case 'addons':
@@ -2347,134 +2292,6 @@ class NativeCommandService {
     return checks.any((check) => check.level == 'FAIL') ? 1 : 0;
   }
 
-  Future<int> _dispatchTemplate(List<String> args, _NativeIoBuffer io) async {
-    final sub = args.isEmpty ? 'list' : args.first;
-    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
-    final profile = _activeConsumer;
-
-    switch (sub) {
-      case 'list':
-        final List<TemplateSummary> templates = listTemplates();
-        if (templates.isEmpty) io.write('(none)');
-        for (final TemplateSummary template in templates) {
-          io.write(template.name);
-        }
-        return 0;
-      case 'init':
-        final parsed = _parseFlexibleArgs(
-          rest,
-          booleanFlags: const <String>{'isolated'},
-        );
-        if (parsed.positionals.length != 1) {
-          throw _NativeCommandException(
-            'Usage: template init <name> [--type <type>] [--mc <version>] [--heap <size>] [--preset <name>] [--isolated]',
-            2,
-          );
-        }
-        final name = _validateSimpleName(
-          parsed.positionals.first,
-          label: 'template',
-        );
-        _ensureWritableTemplateName(name);
-        final path = _templatePath(name);
-        if (File(path).existsSync()) {
-          throw _NativeCommandException('Template already exists: $name', 2);
-        }
-        final template = <String, dynamic>{
-          'name': name,
-          'type': parsed.option('type') ?? 'purpur',
-          if (parsed.option('mc') != null) 'mc': parsed.option('mc'),
-          if (parsed.option('heap') != null) 'heap': parsed.option('heap'),
-          if (parsed.option('preset') != null)
-            'jvm_preset': parsed.option('preset'),
-          'isolated': parsed.flag('isolated'),
-          'server_properties': <String, String>{'server-port': '25565'},
-          'dropins': <String, dynamic>{'clean': false},
-        };
-        _writeYamlMap(File(path), template);
-        io.write('[OK] Template created: $name');
-        io.write('[INFO] $path');
-        return 0;
-      case 'show':
-        final String name = _requireTemplateName(
-          rest,
-          'Usage: template show <name>',
-        );
-        final BundledTemplate? bundled = _bundledTemplate(name);
-        if (bundled != null) {
-          io.write(_yamlFormatMap(bundled.toMap(), 0));
-        } else {
-          _loadTemplate(name);
-          io.write(File(_templatePath(name)).readAsStringSync().trimRight());
-        }
-        return 0;
-      case 'delete':
-        final name = _requireTemplateName(
-          rest,
-          'Usage: template delete <name>',
-        );
-        _ensureWritableTemplateName(name);
-        final file = File(_templatePath(name));
-        if (!file.existsSync()) {
-          throw _NativeCommandException('Template not found: $name', 2);
-        }
-        file.deleteSync();
-        io.write('[OK] Template deleted: $name');
-        return 0;
-      case 'export':
-        if (rest.length != 2) {
-          throw _NativeCommandException(
-            'Usage: template export <instance> <template-name>',
-            2,
-          );
-        }
-        final instance = rest[0];
-        final name = _validateSimpleName(rest[1], label: 'template');
-        _ensureWritableTemplateName(name);
-        if (!_instanceExists(profile, instance)) {
-          throw _NativeCommandException('Instance not found: $instance', 2);
-        }
-        final template = _templateFromInstance(profile, instance, name);
-        final path = _templatePath(name);
-        _writeYamlMap(File(path), template);
-        io.write('[OK] Exported template: $name');
-        io.write('[INFO] $path');
-        return 0;
-      case 'apply':
-        final parsed = _parseFlexibleArgs(
-          rest,
-          booleanFlags: const <String>{'auto-build', 'sync', 'isolated'},
-        );
-        if (parsed.positionals.length != 2) {
-          throw _NativeCommandException(
-            'Usage: template apply <template-name> <instance> [--auto-build] [--sync]',
-            2,
-          );
-        }
-        final name = _validateSimpleName(
-          parsed.positionals[0],
-          label: 'template',
-        );
-        final instance = parsed.positionals[1];
-        final template = _loadTemplate(name);
-        await _applyTemplateTransaction(
-          profile,
-          name,
-          template,
-          instance,
-          parsed,
-          io,
-        );
-        io.write('[OK] Template applied: $name -> $instance');
-        return 0;
-      default:
-        throw _NativeCommandException(
-          'Usage: template <list|init|show|apply|export|delete> ...',
-          2,
-        );
-    }
-  }
-
   Future<int> _dispatchContent(List<String> args, _NativeIoBuffer io) async {
     final sub = args.isEmpty ? 'list' : args.first;
     final rest = args.isEmpty ? const <String>[] : args.sublist(1);
@@ -2730,324 +2547,6 @@ class NativeCommandService {
       await Future<void>.delayed(const Duration(seconds: 1));
     }
     return null;
-  }
-
-  String _templatesDir() {
-    return p.join(context.rootDir, '.multiplexor', 'templates');
-  }
-
-  String _templatePath(String name) {
-    return p.join(_templatesDir(), '$name.yaml');
-  }
-
-  String _requireTemplateName(List<String> args, String usage) {
-    if (args.length != 1) {
-      throw _NativeCommandException(usage, 2);
-    }
-    return _validateSimpleName(args.first, label: 'template');
-  }
-
-  Map<String, dynamic> _loadTemplate(String name) {
-    final BundledTemplate? bundled = _bundledTemplate(name);
-    if (bundled != null) return Map<String, dynamic>.from(bundled.toMap());
-    final file = File(_templatePath(name));
-    if (!file.existsSync()) {
-      throw _NativeCommandException('Template not found: $name', 2);
-    }
-    final parsed = _yamlToDart(loadYaml(file.readAsStringSync()));
-    if (parsed is! Map) {
-      throw _NativeCommandException('Template must be a YAML map: $name', 2);
-    }
-    return Map<String, dynamic>.from(parsed);
-  }
-
-  dynamic _yamlToDart(dynamic value) {
-    if (value is YamlMap) {
-      return <String, dynamic>{
-        for (final entry in value.entries)
-          entry.key.toString(): _yamlToDart(entry.value),
-      };
-    }
-    if (value is YamlList) {
-      return value.map(_yamlToDart).toList(growable: false);
-    }
-    return value;
-  }
-
-  void _writeYamlMap(File file, Map<String, dynamic> map) {
-    file.parent.createSync(recursive: true);
-    file.writeAsStringSync('${_yamlFormatMap(map, 0)}\n');
-  }
-
-  String _yamlFormatMap(Map<String, dynamic> map, int indent) {
-    if (map.isEmpty) {
-      return '${''.padLeft(indent)}{}';
-    }
-    final lines = <String>[];
-    final spaces = ''.padLeft(indent);
-    for (final entry in map.entries) {
-      final key = _yamlKey(entry.key);
-      final value = entry.value;
-      if (_yamlIsScalar(value)) {
-        lines.add('$spaces$key: ${_yamlScalar(value)}');
-      } else {
-        lines.add('$spaces$key:');
-        lines.add(_yamlFormat(value, indent + 2));
-      }
-    }
-    return lines.join('\n');
-  }
-
-  String _yamlFormat(dynamic value, int indent) {
-    final spaces = ''.padLeft(indent);
-    if (value is Map) {
-      return _yamlFormatMap(Map<String, dynamic>.from(value), indent);
-    }
-    if (value is List) {
-      if (value.isEmpty) {
-        return '$spaces[]';
-      }
-      final lines = <String>[];
-      for (final item in value) {
-        if (_yamlIsScalar(item)) {
-          lines.add('$spaces- ${_yamlScalar(item)}');
-        } else {
-          lines.add('$spaces-');
-          lines.add(_yamlFormat(item, indent + 2));
-        }
-      }
-      return lines.join('\n');
-    }
-    return '$spaces${_yamlScalar(value)}';
-  }
-
-  bool _yamlIsScalar(dynamic value) {
-    return value == null || value is String || value is num || value is bool;
-  }
-
-  String _yamlScalar(dynamic value) {
-    if (value == null) {
-      return 'null';
-    }
-    if (value is bool || value is num) {
-      return value.toString();
-    }
-    final text = value.toString();
-    if (RegExp(r'^[A-Za-z0-9._/@:+-]+$').hasMatch(text) &&
-        text != 'null' &&
-        text != 'true' &&
-        text != 'false') {
-      return text;
-    }
-    return jsonEncode(text);
-  }
-
-  String _yamlKey(String key) {
-    return RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(key) ? key : jsonEncode(key);
-  }
-
-  Map<String, dynamic> _templateFromInstance(
-    ConsumerProfile profile,
-    String instance,
-    String name,
-  ) {
-    final source = _serverSource(profile, instance);
-    final settings = _runtimeSettingsLoad(profile, instance: instance);
-    final jar = source['jar'] ?? source['installer'];
-    return <String, dynamic>{
-      'name': name,
-      'type': source['type'] ?? 'custom',
-      if (source['mc'] != null) 'mc': source['mc'],
-      if (jar != null && (source['type'] ?? '') == 'custom') 'jar': jar,
-      'heap': settings.heap,
-      'jvm_preset': settings.profile,
-      'isolated': _instanceIsolated(profile, instance),
-      'server_properties': _readServerPropertiesMap(profile, instance),
-      'dropins': <String, dynamic>{'clean': false},
-    };
-  }
-
-  Map<String, String> _readServerPropertiesMap(
-    ConsumerProfile profile,
-    String instance,
-  ) {
-    final file = File(_instanceServerProperties(profile, instance));
-    if (!file.existsSync()) {
-      return const <String, String>{};
-    }
-    final out = <String, String>{};
-    for (final raw in file.readAsLinesSync()) {
-      final line = raw.trim();
-      if (line.isEmpty || line.startsWith('#') || !line.contains('=')) {
-        continue;
-      }
-      final idx = line.indexOf('=');
-      out[line.substring(0, idx)] = line.substring(idx + 1);
-    }
-    return out;
-  }
-
-  Future<void> _templateApply(
-    ConsumerProfile profile,
-    String templateName,
-    Map<String, dynamic> template,
-    String instance,
-    _FlexibleArgs parsed,
-    _NativeIoBuffer io, {
-    String? creationToken,
-  }) async {
-    if (_instanceExists(profile, instance)) {
-      _ensureGameInstance(profile, instance, 'apply a template to');
-      _ensureNetworkDetached(profile, instance, action: 'apply a template');
-    }
-    final type =
-        (template['type']?.toString().trim().toLowerCase() ?? 'purpur');
-    if (type != 'custom') {
-      final expected = _consumerForServerType(type);
-      if (expected != profile) {
-        throw _NativeCommandException(
-          'Template $templateName targets $type. Switch consumer first: consumer use ${expected.shortName}',
-          2,
-        );
-      }
-    }
-
-    final settings = _runtimeSettingsLoad(profile, includeEnvironment: false);
-    var nextSettings = settings;
-    final Set<String> runtimeKeys = <String>{};
-    final heap = template['heap']?.toString().trim();
-    if (heap != null && heap.isNotEmpty) {
-      if (!_runtimeHeapLooksValid(heap)) {
-        throw _NativeCommandException('Invalid template heap value: $heap', 2);
-      }
-      nextSettings = nextSettings.copyWith(heap: heap.toUpperCase());
-      runtimeKeys.add('HEAP_SIZE');
-    }
-    final preset = template['jvm_preset']?.toString().trim().toLowerCase();
-    if (preset != null && preset.isNotEmpty) {
-      final args = _runtimeSettingsPresets[preset];
-      if (args == null) {
-        throw _NativeCommandException(
-          'Unknown template JVM preset: $preset',
-          2,
-        );
-      }
-      nextSettings = nextSettings.copyWith(profile: preset, jvmArgs: args);
-      runtimeKeys.addAll(<String>{'JVM_PROFILE', 'JVM_ARGS'});
-    }
-
-    final createArgs = <String>['create', instance, '--type', type];
-    void addOption(String key, String cliName) {
-      final value = template[key]?.toString().trim();
-      if (value != null && value.isNotEmpty) {
-        createArgs.addAll(<String>['--$cliName', value]);
-      }
-    }
-
-    addOption('mc', 'mc');
-    addOption('loader', 'loader');
-    addOption('installer', 'installer');
-    addOption('jar', 'jar');
-    if (_truthy(template['isolated']) || parsed.flag('isolated')) {
-      createArgs.add('--isolated');
-    }
-    if (_truthy(template['auto_build']) || parsed.flag('auto-build')) {
-      createArgs.add('--auto-build');
-    }
-
-    await _dispatchServer(createArgs, io, creationToken: creationToken);
-    if (runtimeKeys.isNotEmpty) {
-      _runtimeSettingsSave(
-        profile,
-        nextSettings,
-        instance: instance,
-        keys: runtimeKeys,
-      );
-      io.write('[INFO] Runtime settings updated for $instance');
-    }
-
-    final properties = _stringMap(template['server_properties']);
-    if (properties.isNotEmpty) {
-      _applyServerProperties(profile, instance, properties);
-    }
-
-    final dropins = _mapValue(template['dropins']);
-    final cleanDropins = _truthy(dropins['clean']);
-    if (parsed.flag('sync') || cleanDropins) {
-      if (_instanceIsolated(profile, instance)) {
-        io.write(
-          '[INFO] $instance is isolated; shared drop-in sync was skipped.',
-        );
-        return;
-      }
-      final report = _pluginsSyncInstance(
-        profile,
-        instance,
-        clean: cleanDropins,
-        sourceModsOverride: !_isPluginConsumer(profile),
-        strict: true,
-        preserveLocalChanges: false,
-      );
-      io.write('[SYNC] ${report.copiedJars.length} jar(s) synced to $instance');
-    }
-  }
-
-  bool _truthy(dynamic value) {
-    if (value is bool) {
-      return value;
-    }
-    if (value is num) {
-      return value != 0;
-    }
-    final normalized = value?.toString().trim().toLowerCase() ?? '';
-    return normalized == 'true' || normalized == '1' || normalized == 'yes';
-  }
-
-  Map<String, dynamic> _mapValue(dynamic value) {
-    if (value is Map<String, dynamic>) {
-      return value;
-    }
-    if (value is Map) {
-      return Map<String, dynamic>.from(value);
-    }
-    return const <String, dynamic>{};
-  }
-
-  Map<String, String> _stringMap(dynamic value) {
-    final map = _mapValue(value);
-    return <String, String>{
-      for (final entry in map.entries)
-        entry.key.toString(): entry.value.toString(),
-    };
-  }
-
-  void _applyServerProperties(
-    ConsumerProfile profile,
-    String instance,
-    Map<String, String> overrides,
-  ) {
-    _ensureLocalServerProperties(profile, instance);
-    final file = File(_instanceServerProperties(profile, instance));
-    final lines = file.existsSync() ? file.readAsLinesSync() : <String>[];
-    final remaining = Map<String, String>.from(overrides);
-    final next = <String>[];
-    for (final raw in lines) {
-      final trimmed = raw.trim();
-      if (trimmed.startsWith('#') || !trimmed.contains('=')) {
-        next.add(raw);
-        continue;
-      }
-      final key = trimmed.substring(0, trimmed.indexOf('=')).trim();
-      if (remaining.containsKey(key)) {
-        next.add('$key=${remaining.remove(key)}');
-      } else {
-        next.add(raw);
-      }
-    }
-    for (final entry in remaining.entries) {
-      next.add('${entry.key}=${entry.value}');
-    }
-    file.writeAsStringSync('${next.join('\n')}\n');
   }
 
   String _contentManifestFile(ConsumerProfile profile) {
@@ -4711,7 +4210,6 @@ class NativeCommandService {
   }
 
   Future<String> _resolveLatestNeoForgeLoader(String mc) async {
-    final key = mc.startsWith('1.') ? mc.substring(2) : mc;
     final metadata = await _httpGetText(
       'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml',
     );
@@ -4720,7 +4218,9 @@ class NativeCommandService {
         .map((m) => m.group(1)!.trim())
         .toList(growable: false);
     final matches = versions
-        .where((v) => v.startsWith('$key.') || v.startsWith('$key-'))
+        .where(
+          (String version) => minecraftVersionFromNeoForgeLoader(version) == mc,
+        )
         .toList(growable: false);
     if (matches.isEmpty) {
       throw _NativeCommandException(
@@ -5175,7 +4675,11 @@ class NativeCommandService {
                 (f) =>
                     mcFilter == null ||
                     mcFilter.isEmpty ||
-                    p.basename(f.path).contains(mcFilter),
+                    inferServerMinecraftVersion(
+                          serverType: type,
+                          jarPaths: <String>[f.path],
+                        ) ==
+                        mcFilter,
               )
               .toList(growable: false)
             ..sort(
@@ -5540,7 +5044,7 @@ class NativeCommandService {
     final versions = RegExp(r'<version>([^<]+)</version>')
         .allMatches(metadata)
         .map((m) => m.group(1)?.trim() ?? '')
-        .map(_minecraftVersionFromNeoForgeLoader)
+        .map(minecraftVersionFromNeoForgeLoader)
         .whereType<String>()
         .toSet();
     return _stableSortedMcVersions(versions);
@@ -5570,30 +5074,6 @@ class NativeCommandService {
     } catch (_) {
       return false;
     }
-  }
-
-  String? _minecraftVersionFromNeoForgeLoader(String loaderVersion) {
-    final match = RegExp(
-      r'^(\d+)\.(\d+)(?:\.(\d+))?(?:[.-]|$)',
-    ).firstMatch(loaderVersion);
-    if (match == null) {
-      return null;
-    }
-
-    final major = int.tryParse(match.group(1) ?? '');
-    final minor = int.tryParse(match.group(2) ?? '');
-    final patch = int.tryParse(match.group(3) ?? '');
-    if (major == null || minor == null) {
-      return null;
-    }
-
-    // Older NeoForge loader ids drop the leading "1." from Minecraft releases
-    // and use the third segment for the loader build rather than the MC patch.
-    if (major < 24) {
-      return '1.$major.$minor';
-    }
-
-    return '$major.$minor.${patch ?? 0}';
   }
 
   List<String> _stableSortedMcVersions(Iterable<dynamic> values) {
@@ -10453,7 +9933,14 @@ class NativeCommandService {
             .listSync()
             .whereType<File>()
             .where((f) => f.path.endsWith('.jar'))
-            .where((f) => p.basename(f.path).contains(mc))
+            .where(
+              (File file) =>
+                  inferServerMinecraftVersion(
+                    serverType: type,
+                    jarPaths: <String>[file.path],
+                  ) ==
+                  mc,
+            )
             .toList(growable: false)
           ..sort(
             (a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()),

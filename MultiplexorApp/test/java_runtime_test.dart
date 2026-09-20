@@ -56,6 +56,7 @@ void main() {
     expect(minimumMinecraftJava('1.20.5'), 21);
     expect(minimumMinecraftJava('1.21.11'), 21);
     expect(minimumMinecraftJava('26.1'), 25);
+    expect(minimumMinecraftJava('26.3'), 25);
     expect(minimumMinecraftJava('26.2-pre-1'), 25);
     expect(minimumMinecraftJava('custom'), isNull);
     expect(minimumMinecraftJava(null), isNull);

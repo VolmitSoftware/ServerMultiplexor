@@ -88,7 +88,6 @@ enum WorkspaceModalAction {
   files,
   bulkActions,
   diagnostics,
-  templates,
   networks,
 }
 
@@ -192,7 +191,6 @@ String workspaceModalActionHotkey(WorkspaceModalAction action) =>
       WorkspaceModalAction.connect => 'c',
       WorkspaceModalAction.files => 'f',
       WorkspaceModalAction.diagnostics => 'd',
-      WorkspaceModalAction.templates => 't',
       WorkspaceModalAction.networks => 'v',
     };
 
@@ -525,7 +523,6 @@ List<List<ButtonSpec>> _workspaceRows({
 }) => <List<ButtonSpec>>[
   <ButtonSpec>[
     _workspaceButton(WorkspaceModalAction.diagnostics, 'DIAGNOSTICS'),
-    _workspaceButton(WorkspaceModalAction.templates, 'TEMPLATES'),
   ],
   if (networks)
     <ButtonSpec>[_workspaceButton(WorkspaceModalAction.networks, 'NETWORKS')],

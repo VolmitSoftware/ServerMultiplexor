@@ -84,7 +84,7 @@ The detail screen (`d`) gives one server the whole frame: `TPS`, `CPU %`, `MEM M
 
 ## Interactive Wizard
 
-Local instance cards include **BACKUPS** for creating, verifying, and restoring snapshots, and **RUNTIME** for per-instance Java, heap, presets, compatibility checks, and template export. **WORKSPACES** in the top bar opens the workspace card without changing the selected Local/Remote view. The Local card includes **DIAGNOSTICS**, **TEMPLATES**, and, for the plugin consumer, **NETWORKS**. **TEMPLATES** and **New → Use an example or saved template** offer bundled examples alongside saved templates. Each entry describes what it creates and lets you inspect its YAML. Choose cached or fresh server builds, review the setup, and create it. New servers stay stopped; templates apply runtime settings only to their new instances.
+Local instance cards include **BACKUPS** for creating, verifying, and restoring snapshots, and **RUNTIME** for per-instance Java, heap, presets, and compatibility checks. **New** opens the single-server creator directly, with platform and Minecraft version selection. **WORKSPACES → CREATE MANY** opens bulk creation with an optional shared Minecraft version. **WORKSPACES** in the top bar opens the workspace card without changing the selected Local/Remote view. The Local card includes **DIAGNOSTICS** and, for the plugin consumer, **NETWORKS**.
 
 An isolated Local instance's **RUNTIME → Run bot swarm** action selects idle, wander, redstone, workshop, mixed, stress, or a custom JSON recipe. Choose the bot count, duration, seed, activity radius, placement, origin, and scripted chat. Stress also offers a JSON workload, coordinate bounds, activity goals, and duration or goal completion. The wizard shows persistent arena changes before starting. A stopped target is prepared for offline loopback access, started for the run, and stopped afterward; an already running target stays running.
 
@@ -120,7 +120,7 @@ The workspace card (`[ MORE ]` on the workspace bar) holds the actions that are 
 
 When upstream version metadata is unavailable, the picker offers known cached versions, manual entry, and Retry. Cached choices remain usable without a refresh, and no fallback is labeled latest.
 
-Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Ordinary creates and updates reuse a cached build when it is under 24 hours old and fetch a fresh one otherwise (or when nothing is cached). Template creation lets you choose cached or fresh builds when matching jars are available. Spigot is the exception to age-based refresh: an existing BuildTools jar is reused no matter its age, since rebuilds take many minutes. Force one with `build spigot --force`.
+Platform and version pickers show when each build was last fetched (`updated 2h ago`, `cached 3d ago`), and a `builds` status footer on the platform picker and Build & tuning menus shows per-platform freshness at a glance. Ordinary creates and updates reuse a cached build when it is under 24 hours old and fetch a fresh one otherwise (or when nothing is cached). Spigot is the exception to age-based refresh: an existing BuildTools jar is reused no matter its age, since rebuilds take many minutes. Force one with `build spigot --force`.
 
 Pull latest builds refreshes the newest build of every platform the active consumer owns, spigot included. Spigot only runs BuildTools when its upstream Jenkins build is newer than the cached jar, so the bulk pull normally stays fast; any platform that fails is named in the summary line.
 
@@ -141,7 +141,6 @@ Independent builds, repository syncs, addon preparation, Remote fleet polling, D
 - **Shared plugin data** — `consumers/plugin-consumers/shared-plugin-data/` holds Iris packs and a merged `ops.json` for non-isolated plugin instances.
 - **Build cache** — `consumers/<profile>/builds/<type>/` holds versioned server jars. `server create --type ...` resolves jars from here; `--auto-build` refreshes from upstream first.
 - **Content lockfile** — `consumers/<profile>/state/content-lock.yaml` tracks jars installed by `content install` so they can be updated, removed, and re-synced through the existing dropin pipeline.
-- **Template** — `.multiplexor/templates/<name>.yaml` captures a reusable server blueprint: server type/version, JVM settings, isolation, server.properties overrides, and optional dropin sync behavior.
 - **Backup** — `consumers/<profile>/backups/<instance>/<backup-id>/` stores a restorable snapshot with checksums and a manifest. Backups are used manually and by `instance safe-update`.
 - **Gameplay test** — a Mineflayer scenario run against an actual instance. Built-ins cover connection, command responses, and status effects; custom `.mjs` scenarios can assert any protocol-visible player behavior. Reports stay under ignored per-consumer state.
 - **Remote profile** — non-secret Pterodactyl panel metadata in `.multiplexor/pterodactyl-profiles.yaml`. Client/Application bearer keys live in macOS Keychain under an exact profile+HTTPS-origin identity, never in the YAML file.
@@ -478,9 +477,9 @@ Positions are integer world coordinates, bounded like `--origin`, with 1–1,024
 }
 ```
 
-The harness pins bleeding-edge [Mineflayer commit `f603758e`](https://github.com/PrismarineJS/mineflayer/commit/f603758e4228a7e61d1337526e6066e79308b976), which identifies itself as version 4.38.0 and requires Node 22+. It supports vanilla Java protocols through 26.1. Minecraft 26.2 is outside its tested protocol range. Gameplay results prove protocol-visible behavior, not client rendering, resource packs, sound, camera behavior, client mods, or human feel.
+The harness pins bleeding-edge [Mineflayer commit `f603758e`](https://github.com/PrismarineJS/mineflayer/commit/f603758e4228a7e61d1337526e6066e79308b976), which identifies itself as version 4.38.0 and requires Node 22+. It supports vanilla Java protocols through 26.1. Minecraft 26.2 and newer are outside its tested protocol range. Gameplay results prove protocol-visible behavior, not client rendering, resource packs, sound, camera behavior, client mods, or human feel.
 
-For protocol QA with this dependency set, create an isolated 1.21.11 server instead of using a 26.2 instance. A passing doctor check verifies the harness installation; it does not make an unsupported server protocol compatible.
+For protocol QA with this dependency set, create an isolated 1.21.11 server instead of using a 26.2 or 26.3 instance. A passing doctor check verifies the harness installation; it does not make an unsupported server protocol compatible.
 
 #### Persistent player sessions
 
@@ -565,29 +564,6 @@ Updates and restores allow up to 60 seconds for a clean shutdown. If the server 
 | `backup delete [instance] <backup-id> [--instance <name>]` | Delete one backup. |
 | `backup prune [instance] [--keep <n>]` | Keep the newest `n` backups per instance and delete older ones. Default `10`. |
 
-### template — reusable server blueprints
-
-| Command | What it does |
-|---------|--------------|
-| `template list` | List bundled examples and saved templates under `.multiplexor/templates/`. |
-| `template init <name> [--type <type>] [--mc <v>] [--heap <size>] [--preset <name>] [--isolated]` | Write a starter YAML template. |
-| `template show <name>` | Print the complete YAML of a bundled or saved template. |
-| `template apply <template> <name> [--auto-build] [--sync] [--isolated]` | Create a stopped server, or use the target name as the prefix for a network template. Apply server.properties and per-instance runtime overrides; optionally sync dropins. Network templates create their backends and Velocity routing together. |
-| `template export <instance> <template>` | Create a template from an existing instance's source metadata, runtime settings, isolation flag, and `server.properties`. |
-| `template delete <name>` | Delete a saved template file. Bundled examples cannot be deleted or overwritten. |
-
-Bundled examples target Minecraft **1.21.11**. This is an explicit example version, not a claim about the latest release.
-
-| Example | Creates |
-|---------|---------|
-| `paper-dev` | A Paper server for plugin development. |
-| `purpur-survival` | A Purpur survival server. |
-| `bot-settlement` | An isolated, offline, loopback server with flat terrain for the settlement session profiles. The session run creates the settlement fixtures. |
-| `velocity-lobby-survival` | A Velocity proxy and two backends with stable `lobby` and `survival` routing aliases. |
-| `velocity-bot-lab` | An isolated, offline, loopback Velocity network ready for the bundled Velocity settlement session profile. |
-
-Network templates belong to the plugin consumer. Applying one as `demo` creates the network `demo`, proxy `demo-proxy`, and backends `demo-lobby` and `demo-survival`. Everything remains stopped. Open **WORKSPACES → NETWORKS → demo → Start network** when ready. The bot lab uses loopback access; the ordinary Velocity example authenticates players. To customize an example, save `template show` output under a different name in `.multiplexor/templates/` and edit that YAML.
-
 ### addons — per-instance plugin and mod checklists
 
 The bundled catalog offers EssentialsX (core), FastAsyncWorldEdit (FAWE), BlueMap, ViaVersion, ViaBackwards, and ProtocolLib. These are server plugins. EssentialsX and FAWE are offered for Paper, Purpur, Leaf, and Spigot; BlueMap, ViaVersion, ViaBackwards, and ProtocolLib also support Folia/Canvas. Forge, Fabric, NeoForge, and Mohist can use explicitly compatible custom entries. Platform restrictions are applied before selection; Modrinth installs require an exact published Minecraft-version match and a stable release, preferring Paper artifacts for Paper derivatives.
@@ -607,7 +583,7 @@ Installation replaces an existing matching jar and removes matching version/plat
 
 ProtocolLib uses the official stable `5.4.0` release through Minecraft 1.21.8. For 1.21.9–1.21.11 and 26.1–26.1.2 it uses the official `dev-build` Spigot-compatible artifact, including on Paper. For 26.2 it uses the Paper artifact on Paper derivatives and the Spigot artifact on Spigot. The checklist labels these **ProtocolLib (development)**. The modern Paper artifact requires Paper API 26.2 and cannot be substituted on older servers. These rules are based on [ProtocolLib's artifacts and support declarations](https://github.com/dmulloy2/ProtocolLib). Unknown newer versions need a catalog update before ProtocolLib is offered.
 
-EssentialsX prefers a compatible stable Modrinth release. On Minecraft 26.2, if none exists, it downloads the core jar from the [official EssentialsX CI](https://ci.ender.zone/job/EssentialsX/), which includes [26.2 support](https://github.com/EssentialsX/Essentials/pull/6561). The checklist labels this **EssentialsX (development fallback)**. CI downloads pin the successful build number before downloading, so a newer build cannot change the selected artifact mid-install. All six bundled addons have downloadable builds for Leaf 26.2; no local source build is required.
+EssentialsX prefers a compatible stable Modrinth release. On Minecraft 26.2 or 26.3, if none exists, it downloads the core jar from the [official EssentialsX CI](https://ci.ender.zone/job/EssentialsX/), which includes [26.2 support](https://github.com/EssentialsX/Essentials/pull/6561) and [26.3 support](https://github.com/EssentialsX/Essentials/pull/6624). The checklist labels this **EssentialsX (development fallback)**. CI downloads pin the successful build number before downloading, so a newer build cannot change the selected artifact mid-install. For 26.3, EssentialsX, BlueMap, ViaVersion, and ViaBackwards have compatible sources. FAWE and ProtocolLib remain unavailable until their upstreams publish verified compatible builds.
 
 BlueMap installs the latest stable, exact-version platform artifact from its [official Modrinth project](https://modrinth.com/plugin/bluemap). On first start it creates `plugins/BlueMap/`; before rendering, set `accept-download: true` in `core.conf` only after accepting the stated Mojang download terms. Its integrated web server defaults to port `8100`, so assign a unique port in `webserver.conf` for every concurrently running BlueMap instance.
 
@@ -685,6 +661,8 @@ Install, update, and remove stage file and lockfile changes before commit. A fai
 | `build list-all [type]` | Show cache contents across profiles. |
 | `build test-latest [--spigot-mc <v>]` | Sanity-check the latest of every type with up to four concurrent builds, spigot included. `--spigot-mc` pins spigot to its own version, since it lags the others on a fresh Minecraft release. |
 | `build prune [all\|type]` | Sweep every consumer's build cache: drop superseded jars and remove leftover BuildTools work directories. Builds prune themselves, so this is only needed to clean up history. |
+
+Minecraft 26.3 uses the same provider discovery and download commands as earlier versions. Availability comes from each upstream; a new Minecraft release does not imply every platform has a build. NeoForge maps loader versions such as `26.3.0.7-beta` to Minecraft `26.3` and selects loaders for the exact game version. Explicit version requests and cache filters match the whole version, so `26.3` cannot select a `26.3.1` jar. Alpha and beta server builds can appear when those are the available upstream releases.
 
 **Build caches keep one jar per Minecraft version.** Every successful build deletes the older builds of that same version, so upstream build-number churn stops accumulating. Two things are never pruned: a jar an instance still launches from (instances stay pinned to whatever they were created with until you update them), and the newest jar of every *other* Minecraft version — switching back to an older version still hits the cache instead of re-downloading or, for spigot, recompiling.
 
@@ -831,6 +809,9 @@ multiplexor update auto on
 # Wipe every instance across every consumer (asks for a double y/N confirmation)
 ./start.sh instance delete-all --everywhere
 
+# Cache a Minecraft 26.3 server build
+./start.sh --consumer plugin build paper --mc 26.3
+
 # Test and promote an update with a restore point
 ./start.sh instance safe-update lobby --mc 1.21.11 --auto-build --promote
 
@@ -842,21 +823,6 @@ multiplexor update auto on
 ./start.sh runtime settings set-java /absolute/path/to/java --instance lobby
 ./start.sh runtime settings set-heap 6G --instance lobby
 ./start.sh runtime settings check --instance lobby
-
-# Apply a reusable server blueprint
-./start.sh template init purpur-dev --type purpur --heap 6G --preset aikar
-./start.sh template apply purpur-dev dev-lobby --auto-build --sync
-
-# Create a complete Velocity example, then start it
-./start.sh --consumer plugin template apply velocity-lobby-survival demo --auto-build
-./start.sh --consumer plugin network start demo
-
-# Create a stopped, isolated network for the bot session profiles
-./start.sh --consumer plugin template apply velocity-bot-lab bot-lab --auto-build
-
-# Save an editable copy of an example under a new template name
-mkdir -p .multiplexor/templates
-./start.sh template show bot-settlement > .multiplexor/templates/my-bot-world.yaml
 
 # Install managed content from Modrinth, then sync it everywhere
 ./start.sh content search luckperms
@@ -950,7 +916,6 @@ consumers/<profile>/              # plugin-consumers, forge-mod-consumers, ...
   state/trends/                   # per-instance metric history for the monitor
   state/content-lock.yaml          # managed plugin/mod manifest
   state/gameplay-tests/             # ignored Mineflayer JSON reports
-.multiplexor/templates/             # reusable server blueprints
 .multiplexor/addons.json            # optional custom checklist entries
 .multiplexor/workspace.yaml         # workspace marker
 .multiplexor/pterodactyl-profiles.yaml # non-secret remote panel metadata

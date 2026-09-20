@@ -1,11 +1,13 @@
 import 'dart:io';
 
+import 'neoforge_version.dart';
+
 /// Returns explicit Minecraft metadata, otherwise the version in a recognized
 /// server jar name. Paths are tried in order and symlink targets take precedence
 /// over their aliases. Missing paths can still supply a canonical filename.
 ///
-/// Returns null for custom/hash names and NeoForge's loader-version filenames;
-/// loader versions must never become Minecraft version metadata.
+/// NeoForge installer names use the loader's defined Minecraft version mapping.
+/// Custom and hash names remain unknown.
 String? inferServerMinecraftVersion({
   required String serverType,
   String? minecraft,
@@ -25,6 +27,7 @@ String? inferServerMinecraftVersion({
     'forge',
     'mohist',
     'fabric',
+    'neoforge',
   }.contains(type)) {
     return null;
   }
@@ -42,6 +45,18 @@ String? inferServerMinecraftVersion({
         .toLowerCase();
     if (!filename.endsWith('.jar')) continue;
     final String stem = filename.substring(0, filename.length - 4);
+    if (type == 'neoforge') {
+      final RegExpMatch? installer = RegExp(
+        r'^neoforge-(.+)-installer$',
+      ).firstMatch(stem);
+      if (installer != null) {
+        final String? version = minecraftVersionFromNeoForgeLoader(
+          installer[1]!,
+        );
+        if (version != null) return version;
+      }
+      continue;
+    }
     final String prefix = switch (type) {
       'paper' || 'folia' => '$type-(?:[0-9]{8}-[0-9]{6}-$type-bundler-)?',
       'fabric' => r'fabric-(?:server-mc\.)?',

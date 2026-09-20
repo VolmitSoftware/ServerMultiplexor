@@ -180,57 +180,6 @@ void main() {
   );
 
   test(
-    'template settings apply only to the new instance and export its values',
-    () async {
-      final File jar = File(p.join(root.path, 'fixture.jar'))
-        ..writeAsBytesSync(<int>[80, 75, 3, 4]);
-      final File template = File(
-        p.join(root.path, '.multiplexor', 'templates', 'light.yaml'),
-      );
-      template.parent.createSync(recursive: true);
-      template.writeAsStringSync(
-        'type: custom\njar: ${jar.path}\nheap: 512M\njvm_preset: vanilla\nisolated: true\n',
-      );
-      final CapturedResult result = await run(<String>[
-        'template',
-        'apply',
-        'light',
-        'new',
-      ]);
-      expect(result.exitCode, 0, reason: result.stderr);
-      expect(await settings('new'), contains('heap size:      512M'));
-      expect(await settings('new'), contains('flags profile:  vanilla'));
-      expect(await settings('large'), contains('heap size:      4G'));
-      expect(await settings(), contains('flags profile:  aikar'));
-      expect(
-        (await run(<String>['template', 'export', 'new', 'exported'])).exitCode,
-        0,
-      );
-      expect(
-        File(p.join(template.parent.path, 'exported.yaml')).readAsStringSync(),
-        contains('heap: 512M'),
-      );
-    },
-  );
-
-  test('invalid template settings fail before creating an instance', () async {
-    final File template = File(
-      p.join(root.path, '.multiplexor', 'templates', 'bad.yaml'),
-    );
-    template.parent.createSync(recursive: true);
-    template.writeAsStringSync('type: custom\nheap: 0G\n');
-    expect(
-      (await run(<String>['template', 'apply', 'bad', 'new'])).exitCode,
-      2,
-    );
-    expect(
-      Directory(
-        p.join(consumers.rootFor(ConsumerProfile.plugin), 'instances', 'new'),
-      ).existsSync(),
-      isFalse,
-    );
-  });
-  test(
     'installer uses configured Java and rejects an old runtime before executing',
     () async {
       final ManagerContext context = ManagerContext(
