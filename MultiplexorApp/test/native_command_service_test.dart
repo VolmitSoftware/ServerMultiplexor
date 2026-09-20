@@ -569,6 +569,11 @@ void main() {
     );
 
     test('instance update imports a replacement custom jar', () async {
+      service = NativeCommandService(
+        context: service.context,
+        consumerService: consumerService,
+        javaInspector: (String _) async => 25,
+      );
       final File first = File('${root.path}/external/first.jar');
       final File second = File('${root.path}/external/second.jar');
       first.parent.createSync(recursive: true);

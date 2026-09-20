@@ -934,6 +934,15 @@ dart test
 dart run tool/build_exe.dart      # outputs ../multiplexor
 ```
 
+Before pushing, also run the checks below from the repository root. The Dart suite does not run the Node harness or launcher tests. A failure in either blocks the GitHub release even when every executable compiles.
+
+```bash
+(cd MultiplexorApp/tool/mineflayer && npm ci --no-audit --no-fund && npm test && npm run doctor -- --json)
+/bin/bash MultiplexorApp/tool/test_launcher.sh  # macOS
+```
+
+CI uses Dart 3.10.0 and Node 22, and checks macOS, Windows, and Linux. Local checks cover the current host; the GitHub matrix verifies the other platforms.
+
 End-to-end testing always goes through the root entrypoint:
 
 ```bash

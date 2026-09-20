@@ -153,17 +153,32 @@ test('parent cancellation preserves a cancelled summary after every worker settl
   assert.equal(active, 0)
 })
 
-test('load stages activate extra workers and emit bounded periodic summaries', async () => {
+test('load stages activate extra workers and emit bounded periodic summaries', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 })
   const options = fixture({ durationMs: 1150, workload: { reportIntervalSeconds: 1, schedule: [{ atSeconds: 0, activeBots: 1 }, { atSeconds: 1, activeBots: 2 }] } })
   const records = []
   let firstSecondWorker
-  const start = performance.now()
-  const summary = await runStressWorkload({ ...options, record: (event) => records.push(event), executeActivity: async ({ index, activity, signal }) => {
-    if (index === 1 && firstSecondWorker === undefined) firstSecondWorker = performance.now() - start
+  const advance = async (milliseconds) => {
+    for (let elapsed = 0; elapsed < milliseconds; elapsed++) {
+      context.mock.timers.tick(1)
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+  const task = runStressWorkload({ ...options, now: () => Date.now(), record: (event) => records.push(event), executeActivity: async ({ index, activity, signal }) => {
+    if (index === 1 && firstSecondWorker === undefined) firstSecondWorker = Date.now()
     await pause(3, signal)
     return { counts: { [activity]: 1 } }
   } })
-  assert(firstSecondWorker >= 950)
+  await advance(999)
+  assert.equal(firstSecondWorker, undefined)
+  assert.equal(records.filter((event) => event.type === 'stress-stage').length, 0)
+  assert.equal(records.filter((event) => event.type === 'stress-summary').length, 1)
+  await advance(1)
+  assert.equal(firstSecondWorker, 1000)
+  assert.equal(records.filter((event) => event.type === 'stress-summary').length, 2)
+  await advance(150)
+  const summary = await task
+  assert.equal(summary.elapsedMs, 1150)
   assert.equal(summary.scheduleIndex, 1)
   assert(summary.workers.every((worker) => worker.completed > 0))
   assert.equal(records.filter((event) => event.type === 'stress-stage').length, 1)
