@@ -9,7 +9,7 @@
   "scripts": {
     "doctor": "node src/cli.mjs doctor",
     "list": "node src/cli.mjs list",
-    "test": "node --test"
+    "test": "node --test \"test/**/*_test.mjs\""
   },
   "dependencies": {
     "compression": "1.8.1",

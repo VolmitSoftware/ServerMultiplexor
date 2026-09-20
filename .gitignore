@@ -110,3 +110,6 @@ multiplexor.exe.building.*
 .codegraph/
 
 .qa/
+
+# Local Mineflayer probe scripts
+/MultiplexorApp/tool/mineflayer/*.cjs

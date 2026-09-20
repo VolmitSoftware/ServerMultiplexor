@@ -954,4 +954,4 @@ Windows PowerShell uses the native entrypoint:
 .\start.ps1 --consumer plugin instance delete gameplay-qa
 ```
 
-If `dart` resolves to a Flutter launcher that stalls, use its cached `bin/cache/dart-sdk/bin/dart.exe` for the Dart development commands above. Both root launchers select it automatically. Run the harness unit tests from `MultiplexorApp/tool/mineflayer` with `npm ci`, then `npm test` and `npm run doctor`.
+If `dart` resolves to a Flutter launcher that stalls, use its cached `bin/cache/dart-sdk/bin/dart.exe` for the Dart development commands above. Both root launchers select it automatically. Run the harness unit tests from `MultiplexorApp/tool/mineflayer` with `npm ci`, then `npm test` and `npm run doctor`. `npm test` runs only `test/**/*_test.mjs`; local live-server probes are excluded.

@@ -9,6 +9,11 @@ import 'package:multiplexor/utils/process_runner.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
+const Map<ConsumerProfile, String> _installerNames = <ConsumerProfile, String>{
+  ConsumerProfile.forge: 'forge-1.21.1-52.0.0-installer.jar',
+  ConsumerProfile.neoforge: 'neoforge-21.1.234-installer.jar',
+};
+
 void main() {
   for (final bool failFirst in <bool>[false, true]) {
     test(
@@ -43,11 +48,11 @@ void main() {
                 consumers.rootFor(profile),
                 'builds',
                 profile.shortName,
-                '${profile.shortName}-1.21.1-installer.jar',
+                _installerNames[profile]!,
               ),
             )
             ..createSync(recursive: true)
-            ..writeAsStringSync('fixture installer');
+            ..writeAsStringSync('fixture installer ${profile.shortName}');
         }
         final CapturedResult existing = await service.execute(<String>[
           'instance',
@@ -57,19 +62,35 @@ void main() {
         ], stream: false);
         expect(existing.exitCode, 0, reason: existing.stderr);
 
-        final CapturedResult result = await service.execute(<String>[
-          'server',
-          'create-many',
-          '--types',
-          'forge,neoforge,FORGE',
-          '--mc',
-          '1.21.1',
-          '--isolated',
-        ], stream: false);
+        final Future<CapturedResult> creation = HttpOverrides.runZoned(
+          () => service.execute(<String>[
+            'server',
+            'create-many',
+            '--types',
+            'forge,neoforge,FORGE',
+            '--mc',
+            '1.21.1',
+            '--isolated',
+          ], stream: false),
+          createHttpClient: (_) => throw StateError(
+            'Cached server creation must not request upstream builds',
+          ),
+        );
+        addTearDown(() async {
+          runner.releaseInstallers();
+          await creation;
+        });
+
+        await Future.any<void>(<Future<void>>[runner.bothStarted, creation]);
+        try {
+          expect(runner.maximumActive, 2);
+        } finally {
+          runner.releaseInstallers();
+        }
+        final CapturedResult result = await creation;
 
         expect(result.exitCode, 0, reason: result.stderr);
         expect(runner.started, <String>['forge', 'neoforge']);
-        expect(runner.maximumActive, 2);
         expect(runner.ports.toSet(), hasLength(2));
         expect(runner.ports, everyElement(greaterThan(25565)));
         expect(
@@ -89,6 +110,10 @@ void main() {
           ),
         );
         expect(installed.readAsStringSync(), contains('launch=argsfile'));
+        expect(
+          installed.readAsStringSync(),
+          contains(_installerNames[ConsumerProfile.neoforge]!),
+        );
       },
     );
   }
@@ -99,10 +124,17 @@ final class _ConcurrentInstallerRunner extends ProcessRunner {
 
   final bool failFirst;
   final Completer<void> _bothStarted = Completer<void>();
+  final Completer<void> _releaseInstallers = Completer<void>();
   final List<String> started = <String>[];
   final List<int> ports = <int>[];
   int _active = 0;
   int maximumActive = 0;
+
+  Future<void> get bothStarted => _bothStarted.future;
+
+  void releaseInstallers() {
+    if (!_releaseInstallers.isCompleted) _releaseInstallers.complete();
+  }
 
   @override
   Future<CapturedResult> runCaptured(
@@ -115,6 +147,14 @@ final class _ConcurrentInstallerRunner extends ProcessRunner {
     expect(arguments, contains('--installServer'));
     final String directory = workingDirectory!;
     final String name = p.basename(directory);
+    final ConsumerProfile profile = name == 'forge'
+        ? ConsumerProfile.forge
+        : ConsumerProfile.neoforge;
+    final String installer = arguments[arguments.indexOf('-jar') + 1];
+    expect(
+      File(installer).readAsStringSync(),
+      'fixture installer ${profile.shortName}',
+    );
     started.add(name);
     final String properties = File(
       p.join(directory, 'server.properties'),
@@ -131,7 +171,7 @@ final class _ConcurrentInstallerRunner extends ProcessRunner {
     if (_active > maximumActive) maximumActive = _active;
     if (started.length == 2) _bothStarted.complete();
     try {
-      await _bothStarted.future.timeout(const Duration(seconds: 2));
+      await _releaseInstallers.future;
       if (failFirst && name == 'forge') {
         return CapturedResult(
           exitCode: 1,
