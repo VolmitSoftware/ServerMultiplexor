@@ -38,6 +38,7 @@ const String viewSwitchHitId = 'view:switch';
 
 /// Opens the current provider's workspace card without switching views.
 const String workspaceHeaderHitId = 'workspace:open';
+const String updateHitId = 'app:update';
 
 /// The selection action bar's button ids: what the chips over the selected
 /// server do. `monitor_model.dart` builds the chips from these and
@@ -71,6 +72,7 @@ const String wsMoreHitId = 'ws:more';
 const List<String> monitorBarHitIds = <String>[
   viewSwitchHitId,
   workspaceHeaderHitId,
+  updateHitId,
   actStartHitId,
   actStopHitId,
   actRestartHitId,

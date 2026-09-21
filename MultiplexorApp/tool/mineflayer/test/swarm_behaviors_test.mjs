@@ -87,6 +87,14 @@ test('plans reject commands in chat, unknown functions, conflicting blocks and a
   assert.equal(validateSwarmPlan(plan({ action: 'chat', messages: ['{bot} is ready'] })).phases.length, 1)
 })
 
+test('circle plan centers use the same bounded route contract as scenarios', () => {
+  const phase = { action: 'circle', positions: [[0, 80, 0], [24, 80, 0]], radius: 8, laps: 3, clockwise: false }
+  const plan = { name: 'circles', phases: [phase] }
+  assert.equal(validateSwarmPlan(plan, { bots: 2 }).phases[0].laps, 3)
+  assert.throws(() => validateSwarmPlan({ ...plan, phases: [{ ...phase, radius: 1 }] }), /radius/)
+  assert.throws(() => validateSwarmPlan({ ...plan, phases: [{ ...phase, laps: 0 }] }), /laps/)
+})
+
 test('mining cannot pass on the digger optimistic block prediction', async () => {
   const bot = new EventEmitter()
   const position = new Vec3(1, 81, 1)
@@ -130,6 +138,15 @@ test('late cancellation of an old walking route cannot stop its replacement', as
   assert.equal(bot.pathfinder.goal, pending[1].goal)
   pending[1].reject(new Error('finish second'))
   await assert.rejects(second, /finish second/)
+})
+
+test('fractional waypoints verify the same block center that pathfinder targets', async () => {
+  const bot = {
+    entity: { position: new Vec3(0, 81, 0) }, clearControlStates() {},
+    pathfinder: { setGoal() {}, async goto(goal) { bot.entity.position = new Vec3(goal.x + 0.5, goal.y, goal.z + 0.5) } }
+  }
+  await walkTo(bot, new Vec3(-2.3368, 81, 7.9801), new AbortController().signal)
+  assert.deepEqual(bot.entity.position, new Vec3(-2.5, 81, 7.5))
 })
 
 test('all assigned workers finish a phase before the next coordinated phase starts', async () => {

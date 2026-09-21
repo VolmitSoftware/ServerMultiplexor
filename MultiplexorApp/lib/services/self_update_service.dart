@@ -51,6 +51,20 @@ class SelfUpdateService {
 
   bool get exitRequired => _exitRequired;
 
+  Future<SelfUpdateRelease?> check() =>
+      client.latest(currentVersion, _requirePlatform());
+
+  Future<int?> updateAndRestart(List<String> restartArguments) async {
+    _requireReleaseBuild();
+    final bool? helperStarted = await store.locked(
+      () => _apply(restartArguments),
+    );
+    if (helperStarted == null) return null;
+    if (helperStarted) return 0;
+    client.close();
+    return _restart(executablePath, restartArguments);
+  }
+
   Future<int> command(List<String> args) async {
     if (args.isEmpty || (args.length == 1 && args.single == 'install')) {
       _requireReleaseBuild();
@@ -58,10 +72,7 @@ class SelfUpdateService {
       return 0;
     }
     if (args.length == 1 && args.single == 'check') {
-      final SelfUpdateRelease? release = await client.latest(
-        currentVersion,
-        _requirePlatform(),
-      );
+      final SelfUpdateRelease? release = await check();
       _write(
         release == null
             ? 'Multiplexor v${currentVersion.text} is up to date.'

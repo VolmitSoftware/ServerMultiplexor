@@ -101,6 +101,55 @@ void main() {
   });
 
   test(
+    'dashboard update bypasses automatic throttle and reopens workspace',
+    () async {
+      store.write(
+        SelfUpdateSettings(
+          automatic: false,
+          lastAttempt: now,
+          checkedVersion: '0.2.9',
+          succeeded: true,
+        ),
+      );
+      final List<String> args = <String>[
+        '--root',
+        '/tmp/test [workspace]',
+        '--consumer',
+        'fabric',
+        'wizard',
+      ];
+      expect(await service().updateAndRestart(args), 42);
+      expect(installs, <List<String>>[args]);
+      expect(restarts, <List<String>>[args]);
+      expect(store.read().automatic, isFalse);
+    },
+  );
+
+  test(
+    'dashboard helper handoff does not launch a competing restart',
+    () async {
+      helper = true;
+      final SelfUpdateService updater = service();
+      expect(await updater.updateAndRestart(<String>['wizard']), 0);
+      expect(updater.exitRequired, isTrue);
+      expect(restarts, isEmpty);
+    },
+  );
+
+  test('dashboard current and failed installs never restart', () async {
+    client.available = false;
+    expect(await service().updateAndRestart(<String>['wizard']), isNull);
+    client.available = true;
+    installFails = true;
+    await expectLater(
+      service().updateAndRestart(<String>['wizard']),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(restarts, isEmpty);
+    expect(client.downloadedFile!.existsSync(), isFalse);
+  });
+
+  test(
     'manual update bypasses disabled automatic updates and throttle',
     () async {
       store.write(

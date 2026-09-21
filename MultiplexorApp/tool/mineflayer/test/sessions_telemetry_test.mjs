@@ -92,3 +92,25 @@ test('resume retains performance breaches while routing waits for a fresh snapsh
   assert.equal(resumed.summary().samples, 2)
   assert.equal(resumed.summary().violations['town.p95Ms'], 1)
 })
+
+test('Folia process observations stay available without inventing tick threshold passes', async (t) => {
+  const { file, now, snapshot } = await fixture(t)
+  await writeFile(file, JSON.stringify({ ...snapshot, platform: 'folia', tick: null,
+    capabilities: { globalTickTimings: false, regionTickTimings: false },
+    process: { heapUsedBytes: 1000 },
+    worlds: [{ id: 'world-id', name: 'world', loadedChunks: null, entities: null }]
+  }))
+  const options = { target: { kind: 'instance', backends: [{ alias: 'regions', observerPath: file }] }, now: () => now }
+  const observed = await readObserverSnapshot(file, { now: () => now, kind: 'paper' })
+  assert.equal(observed.status, 'available')
+  assert.equal(observed.snapshot.tick, null)
+  const processOnly = createSessionTelemetry({ ...options, profile: { telemetry: { required: true, warmupSeconds: 0 } } })
+  await processOnly.sample()
+  assert.equal(processOnly.summary().status, 'measured')
+  const timingRequired = createSessionTelemetry({ ...options,
+    profile: { telemetry: { required: true, maxP95TickMs: 50, warmupSeconds: 0 } } })
+  await timingRequired.sample()
+  assert.equal(timingRequired.summary().status, 'failed')
+  assert.equal(timingRequired.summary().unavailableSamples, 1)
+  assert.deepEqual(timingRequired.summary().violations, {})
+})

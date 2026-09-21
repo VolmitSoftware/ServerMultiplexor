@@ -687,6 +687,7 @@ class NativeCommandService {
         instance: instance,
         json: json,
         logPath: _runtimeLogFile(profile, instance),
+        instanceDirectory: _instanceDir(profile, instance),
         port: _instanceGetServerPort(profile, instance),
         profilesFolder: auth == 'microsoft' ? profilesFolder : null,
         scenario: File(scenario).existsSync()

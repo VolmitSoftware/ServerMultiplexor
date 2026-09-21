@@ -122,7 +122,9 @@ export function validateSessionProfile(raw, target) {
       groupSize: number(population.groupSize, Math.min(4, identities), 1, identities, 'population.groupSize', true),
       ...(population.minimumAchievedFraction !== undefined ? { minimumAchievedFraction: number(population.minimumAchievedFraction, undefined, 0, 1, 'population.minimumAchievedFraction') } : {}) },
     playerRoles: [...roles], playerWorlds: [...playerWorlds],
-    pluginActivities: validatePluginActivities(raw.pluginActivities, { aliases: target?.backends.map((backend) => backend.alias), roles: SESSION_ROLES }),
+    pluginActivities: validatePluginActivities(Array.isArray(raw.pluginActivities) ? raw.pluginActivities.map((activity) =>
+      activity?.backend === 'standalone' && target ? { ...activity, backend: target.defaultBackend ?? target.backends[0]?.alias ?? target.name } : activity
+    ) : raw.pluginActivities, { aliases: target?.backends.map((backend) => backend.alias), roles: SESSION_ROLES }),
     pacing: { minSeconds, maxSeconds },
     recovery: { maxConsecutiveFailures: number(recovery.maxConsecutiveFailures, 5, 1, 1000, 'recovery.maxConsecutiveFailures', true),
       maxTotalFailures: number(recovery.maxTotalFailures, 100, 1, 1000000, 'recovery.maxTotalFailures', true),

@@ -164,6 +164,9 @@ export async function runSessions(rawConfiguration, dependencies = {}) {
     const context = (signal) => ({
       signal, random, assertCurrent: () => { signal.throwIfAborted(); assertCurrent() }, checkpoint, record, owner: session.owner, coordinator: leases,
       backend: player.backend, world: action?.world, timeoutMs: profile.timeouts.actionSeconds * 1000,
+      observerPath: configuration.target.backends.find((backend) => backend.alias === player.backend)?.observerPath,
+      worldTransition: (operation) => transport.worldTransition(owned, operation),
+      failTransition: (error) => owned.abort.abort(error),
       peers: state.players.filter((peer) => peer.socialGroup === player.socialGroup && peer.lifecycle === 'playing').map((peer) => ({ id: peer.id, username: peer.username, backend: peer.backend, homeWorld: peer.homeWorld }))
     })
     try {

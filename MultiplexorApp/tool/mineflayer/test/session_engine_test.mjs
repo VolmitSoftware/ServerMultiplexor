@@ -61,6 +61,26 @@ function fakeRuntime(options = {}) {
   }
 }
 
+test('only a bounded declared transition may change a live session world', async () => {
+  const transport = createSessionTransport({ runtime: fakeRuntime(), target: configuration('/tmp').target, timeoutMs: 100, cleanupTimeoutMs: 20 })
+  const owned = await transport.connect({ id: 'one', username: 'WorldCheck' }, new AbortController().signal)
+  await transport.worldTransition(owned, async () => { owned.bot.emit('respawn'); return 'verified' })
+  assert.equal(owned.signal.aborted, false)
+  assert.equal(owned.switching, false)
+  owned.bot.emit('respawn')
+  assert.equal(owned.signal.reason.kind, 'world-change')
+  await transport.close()
+})
+
+test('failed declared arrival fences the session instead of resuming in the wrong world', async () => {
+  const transport = createSessionTransport({ runtime: fakeRuntime(), target: configuration('/tmp').target, timeoutMs: 100, cleanupTimeoutMs: 20 })
+  const owned = await transport.connect({ id: 'one', username: 'WorldFailure' }, new AbortController().signal)
+  await assert.rejects(transport.worldTransition(owned, async () => { owned.bot.emit('respawn'); throw new Error('Wrong world UUID') }), /Wrong world/)
+  assert.equal(owned.signal.aborted, true)
+  assert.equal(owned.switching, false)
+  await transport.close()
+})
+
 function engineDependencies(runtime, overrides = {}) {
   let setupCalls = 0
   const observed = []
@@ -94,6 +114,16 @@ test('profile validation rejects unknown fields, missing producers, invalid rang
   assert.throws(() => validateSessionConfiguration(configuration('/tmp', { target: { ...configuration('/tmp').target, host: 'example.com' } })), /loopback/)
   assert.throws(() => profile({ telemetry: { warmupSeconds: -1 } }), /warmupSeconds/)
   assert.equal(playerNames(profile())[1], 'Sess002')
+})
+
+test('bundled plugin workflows resolve the standalone alias to the selected instance', async () => {
+  const raw = JSON.parse(await readFile(new URL('../session-profiles/plugin-circuits.json', import.meta.url), 'utf8'))
+  const target = { kind: 'instance', name: 'portal-qa', defaultBackend: 'portal-qa', backends: [{ alias: 'portal-qa' }] }
+  const selected = validateSessionProfile(raw, target)
+  assert.ok(selected.pluginActivities.length > 0)
+  assert.ok(selected.pluginActivities.every((activity) => activity.backend === 'portal-qa'))
+  assert.ok(selected.worlds.every((world) => world.backend === 'portal-qa'))
+  assert.ok(raw.pluginActivities.every((activity) => activity.backend === 'standalone'))
 })
 
 test('roster resumes intent and random stream but fences old ownership and reconnects', () => {

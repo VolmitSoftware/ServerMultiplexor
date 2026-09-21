@@ -7,7 +7,7 @@ test('lists the built-in scenarios', async () => {
   const scenarios = await listScenarios()
   assert.deepEqual(
     scenarios.map((scenario) => scenario.name),
-    ['command', 'connect', 'effect']
+    ['circle', 'command', 'connect', 'effect']
   )
 })
 

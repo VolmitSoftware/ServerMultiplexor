@@ -1,10 +1,12 @@
 import { readFile } from 'node:fs/promises'
 import { bounded, buildBlock, controllerCommand, interact, mineBlock, pause, point, sendChat, until, walkTo } from './swarm_actions.mjs'
 import { scatterSwarm } from './swarm_behaviors.mjs'
+import { circleRoute, createScenarioActions } from './scenario_actions.mjs'
 
-const actions = new Set(['chat', 'teleport', 'scatter', 'walk', 'mine', 'build', 'interact', 'wait'])
+const actions = new Set(['chat', 'teleport', 'scatter', 'walk', 'circle', 'mine', 'build', 'interact', 'wait'])
 const fields = {
   chat: ['messages'], teleport: ['positions'], scatter: ['radius'], walk: ['positions'],
+  circle: ['positions', 'radius', 'laps', 'clockwise'],
   mine: ['positions'], build: ['positions', 'block'], interact: ['positions'], wait: ['seconds']
 }
 
@@ -39,6 +41,9 @@ export function validateSwarmPlan(value, { bots = 256 } = {}) {
       throw new Error('Chat messages must be 1-200 characters of plain chat, never commands')
     }
     if (phase.action === 'scatter' && (!Number.isInteger(phase.radius) || phase.radius < 8 || phase.radius > 4096)) throw new Error('Scatter radius must be 8-4096 blocks')
+    if (phase.action === 'circle') {
+      for (const center of phase.positions) circleRoute({ center: { x: center[0], y: center[1], z: center[2] }, radius: phase.radius, laps: phase.laps, clockwise: phase.clockwise })
+    }
     if (phase.action === 'wait' && (!Number.isFinite(phase.seconds) || phase.seconds < 0.1 || phase.seconds > 300)) throw new Error('Wait must be 0.1-300 seconds')
     if (phase.action === 'build' && (typeof phase.block !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(phase.block))) throw new Error('Build block must be a Minecraft block identifier')
   }
@@ -103,6 +108,11 @@ export async function runSwarmPlan({ bots, controller, plan, origin, deadline, s
                     await until(() => bot.entity.position.distanceTo(position.offset(0.5, 0, 0.5)) < 1, jobSignal, 'teleport arrival')
                     break
                   case 'walk': await walkTo(bot, position, jobSignal); break
+                  case 'circle': {
+                    const movement = createScenarioActions({ bot, signal: jobSignal })
+                    details = { ...details, ...await movement.walkCircle({ center: position, radius: phase.radius, laps: phase.laps, clockwise: phase.clockwise, timeoutMs: actionTimeoutMs }) }
+                    break
+                  }
                   case 'interact': details = { ...details, ...await interact(bot, position, jobSignal) }; break
                   case 'mine': await mineBlock({ bot, observer: controller, position, signal: jobSignal, timeoutMs: actionTimeoutMs }); break
                   case 'build': await buildBlock({ bot, observer: controller, position, blockName: phase.block, signal: jobSignal, timeoutMs: actionTimeoutMs }); break

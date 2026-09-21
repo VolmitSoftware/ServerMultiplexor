@@ -27,6 +27,7 @@ import 'monitor_modal.dart';
 import 'monitor_model.dart';
 import 'monitor_network_tree.dart';
 import 'monitor_selection.dart';
+import 'monitor_update.dart';
 
 /// How long each iteration waits for input. Together with [_yieldWindow] this
 /// is the heartbeat: no [Timer] drives this screen, the blocking read's own
@@ -179,6 +180,10 @@ class MonitorSwitchView extends MonitorResult {
   const MonitorSwitchView();
 }
 
+class MonitorUpdateRequested extends MonitorResult {
+  const MonitorUpdateRequested();
+}
+
 /// Runs the command-center dashboard until the user leaves it.
 ///
 /// Every collaborator is injected: [sampler] supplies metric history,
@@ -209,9 +214,11 @@ class MonitorScreen {
     this.sweepIntervalProvider,
     this.refreshImmediately = true,
     this.sessionInvalidated,
+    this.update,
   }) : _sweepInterval = sweepInterval;
 
   final MetricsSampler sampler;
+  final MonitorUpdate? update;
   final MonitorTheme theme;
   final Future<MonitorSnapshot> Function() loadSnapshot;
   final Future<void> Function(Future<void> Function() flow) suspend;
@@ -505,6 +512,8 @@ class MonitorScreen {
             range: _range,
             now: chartNow,
             clockNow: wallClock.toUtc(),
+            updateLabel: update?.label,
+            updateChecking: update?.state == MonitorUpdateState.checking,
             hoveredId: baseHovered,
             pressedId: basePressed,
           );
@@ -959,6 +968,8 @@ class MonitorScreen {
       return null;
     }
     switch (id) {
+      case updateHitId:
+        return _updateAction();
       case selectAllHitId:
         _selection.toggleAll(_snapshot);
       case clearSelectionHitId:
@@ -1172,6 +1183,8 @@ class MonitorScreen {
       return action == MonitorAction.quit ? const MonitorQuit() : null;
     }
     switch (action) {
+      case MonitorAction.update:
+        return _detailMode ? null : _updateAction();
       case MonitorAction.up:
         _moveSelection(-1);
         return null;
@@ -1248,6 +1261,21 @@ class MonitorScreen {
       return _detailInstance.isEmpty ? null : _detailInstance;
     }
     return _selectedInstance;
+  }
+
+  MonitorResult? _updateAction() {
+    final MonitorUpdate? updater = update;
+    if (updater == null || updater.state == MonitorUpdateState.checking) {
+      return null;
+    }
+    if (updater.state == MonitorUpdateState.available ||
+        updater.state == MonitorUpdateState.development ||
+        updater.state == MonitorUpdateState.unsupported ||
+        updater.state == MonitorUpdateState.failed) {
+      return const MonitorUpdateRequested();
+    }
+    unawaited(updater.check());
+    return null;
   }
 
   Future<MonitorResult?> _runQuickAction(MonitorAction action) async {

@@ -1048,6 +1048,7 @@ void main() {
       now: now,
       clockNow: now,
       checkedInstances: checkedInstances,
+      updateLabel: 'u CHECK FOR UPDATE',
     );
 
     /// Asserts the `[ LABEL ]` chip on [row] is covered by a button hitbox

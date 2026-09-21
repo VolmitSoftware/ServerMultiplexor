@@ -126,7 +126,7 @@ export function sendChat(bot, observer, message, signal) {
 }
 
 export async function walkTo(bot, destination, signal, { near = false } = {}) {
-  const position = point(destination)
+  const position = point(destination).floored()
   signal.throwIfAborted()
   assertWorkerBounds(bot)
   assertTargetBounds(bot, position, { walking: !near })

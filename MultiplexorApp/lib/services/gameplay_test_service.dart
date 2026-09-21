@@ -90,6 +90,8 @@ class GameplayTestService {
       '${run.port}',
       '--instance',
       run.instance,
+      '--instance-directory',
+      run.instanceDirectory,
       '--username',
       run.username,
       '--auth',
@@ -404,6 +406,7 @@ class GameplayTestRun {
     required this.connectTimeoutSeconds,
     required this.host,
     required this.instance,
+    required this.instanceDirectory,
     required this.json,
     required this.logPath,
     required this.port,
@@ -428,6 +431,7 @@ class GameplayTestRun {
   final String? expected;
   final String host;
   final String instance;
+  final String instanceDirectory;
   final bool json;
   final String logPath;
   final int port;

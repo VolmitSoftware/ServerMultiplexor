@@ -177,6 +177,21 @@ export function createSessionTransport({ runtime, target, timeoutMs = 45000, rec
       }
       return connectionGate ? connectionGate.run(attempt, signal) : attempt()
     },
+    async worldTransition(owned, operation) {
+      owned.signal.throwIfAborted()
+      if (owned.switching) throw sessionError('Another world transition is active', 'invariant')
+      cancelBot(owned.bot)
+      owned.switching = true
+      try {
+        const result = await bounded(Promise.resolve().then(operation), timeoutMs, `${owned.username} world arrival`, owned.signal)
+        await ready(owned, timeoutMs)
+        runtime.configureMovements?.(owned.bot)
+        return result
+      } catch (error) {
+        owned.abort.abort(error)
+        throw error
+      } finally { owned.switching = false }
+    },
     async switchBackend(owned, alias) {
       if (!target.backends.some((backend) => backend.alias === alias)) throw sessionError(`Unknown backend ${alias}`, 'configuration')
       if (target.kind !== 'network') throw sessionError('Backend switching requires Velocity', 'configuration')

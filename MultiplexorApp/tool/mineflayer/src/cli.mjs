@@ -233,6 +233,7 @@ async function run(args) {
     connectTimeoutMs: connectTimeoutSeconds * 1000,
     host: args.option('host') ?? '127.0.0.1',
     instance: args.option('instance') ?? 'unknown',
+    instanceDirectory: args.option('instance-directory'),
     json,
     logPath: args.option('log-path'),
     notice: (line) => {

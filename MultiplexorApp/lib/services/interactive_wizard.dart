@@ -5,6 +5,8 @@ import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 
 import '../models/build_cache.dart';
+import '../cli/command_help.dart'
+    show multiplexorVersion, multiplexorReleaseBuild;
 import '../models/build_version_catalog.dart';
 import '../models/backup_summary.dart';
 import '../models/consumer_profile.dart';
@@ -24,6 +26,7 @@ import 'monitor/monitor_keymap.dart';
 import 'monitor/monitor_modal.dart';
 import 'monitor/monitor_network_tree.dart';
 import 'monitor/monitor_screen.dart';
+import 'monitor/monitor_update.dart';
 import 'monitor/trend_store.dart';
 import 'networks/network_definition.dart';
 import 'passthrough_service.dart';
@@ -42,6 +45,9 @@ import 'pterodactyl/pterodactyl_smb_service.dart';
 import 'pterodactyl/pterodactyl_transfer_models.dart';
 import 'pterodactyl/pterodactyl_transfer_service.dart';
 import 'runtime_state.dart';
+import 'self_update_release.dart';
+import 'self_update_service.dart';
+import 'self_update_settings.dart';
 
 part 'interactive_wizard_addons.dart';
 part 'interactive_wizard_selection.dart';
@@ -619,6 +625,25 @@ class InteractiveWizard {
   MonitorView _monitorView = MonitorView.local;
   String? _remoteProfileId;
   bool _remoteConnectionChanged = false;
+  MonitorUpdate? _appUpdate;
+
+  MonitorUpdate get _updater => _appUpdate ??= _createUpdater();
+
+  MonitorUpdate _createUpdater() {
+    final String executable = File(
+      Platform.resolvedExecutable,
+    ).resolveSymbolicLinksSync();
+    return MonitorUpdate(
+      SelfUpdateService(
+        currentVersion: UpdateVersion.parse(multiplexorVersion),
+        executablePath: executable,
+        releaseBuild: multiplexorReleaseBuild && isRunningCompiledExecutable(),
+        platform: UpdatePlatform.current(),
+        store: SelfUpdateStore(SelfUpdateStore.defaultDirectory(), executable),
+        client: GithubUpdateClient(),
+      ),
+    );
+  }
 
   static const List<String> _serverTypes = <String>[
     'paper',
@@ -669,6 +694,8 @@ class InteractiveWizard {
       stdout.writeln('Wizard closed to avoid a redraw loop.');
     } finally {
       passthrough.disposeRcon();
+      _appUpdate?.service.client.close();
+      _appUpdate = null;
       TermIo.instance.restoreTerminal();
     }
   }
@@ -722,6 +749,7 @@ class InteractiveWizard {
     });
 
     final MonitorScreen screen = MonitorScreen(
+      update: _updater,
       sampler: sampler,
       theme: MonitorTheme.detect(),
       loadSnapshot: () async {
@@ -766,6 +794,8 @@ class InteractiveWizard {
     while (true) {
       final MonitorResult result = await screen.run();
       switch (result) {
+        case MonitorUpdateRequested():
+          if (await _monitorFlowChanged(_updateApplication)) return false;
         case MonitorQuit():
           return false;
         case MonitorSwitchView():
@@ -842,6 +872,7 @@ class InteractiveWizard {
     }
 
     final MonitorScreen screen = MonitorScreen(
+      update: _updater,
       sampler: sampler,
       theme: MonitorTheme.detect(),
       loadSnapshot: loadSnapshot,
@@ -873,6 +904,8 @@ class InteractiveWizard {
     while (true) {
       final MonitorResult result = await screen.run();
       switch (result) {
+        case MonitorUpdateRequested():
+          if (await _monitorFlowChanged(_updateApplication)) return false;
         case MonitorQuit():
           return false;
         case MonitorSwitchView():
@@ -911,6 +944,60 @@ class InteractiveWizard {
     }
     _remoteProfileId = profiles.first.id;
     return profiles.first;
+  }
+
+  Future<bool> _updateApplication() async {
+    final MonitorUpdate updater = _updater;
+    if (updater.state == MonitorUpdateState.development) {
+      stdout.writeln(
+        'Development build: use ./start.sh to compile local source.',
+      );
+      stdout.writeln('Self-installation is available in downloaded releases.');
+      await Ui.pause();
+      return false;
+    }
+    if (updater.state == MonitorUpdateState.unsupported) {
+      Ui.error('No compiled release is available for this platform.');
+      await Ui.pause();
+      return false;
+    }
+    if (updater.state == MonitorUpdateState.failed) {
+      Ui.error('Update check failed: ${updater.error}');
+      await Ui.spin('Checking for update', updater.check);
+      if (updater.state == MonitorUpdateState.failed) {
+        Ui.error('Update check failed: ${updater.error}');
+        await Ui.pause();
+        return false;
+      }
+    }
+    final SelfUpdateRelease? release = updater.release;
+    if (release == null) {
+      stdout.writeln('Multiplexor v$multiplexorVersion is up to date.');
+      await Ui.pause();
+      return false;
+    }
+    if (!await Ui.confirm(
+      'Install Multiplexor v${release.version.text} and restart?',
+      defaultValue: false,
+    )) {
+      return false;
+    }
+    TermIo.instance.restoreTerminal();
+    final int? code = await updater.service.updateAndRestart(<String>[
+      '--root',
+      consumerService.context.rootDir,
+      '--consumer',
+      _activeConsumer().shortName,
+      'wizard',
+    ]);
+    if (code == null) {
+      updater.state = MonitorUpdateState.current;
+      updater.release = null;
+      await Ui.pause();
+      return false;
+    }
+    exitCode = code;
+    return true;
   }
 
   /// Runs a hand-off flow on a cleared screen that reports whether it changed
@@ -997,6 +1084,7 @@ class InteractiveWizard {
       case MonitorAction.newInstance:
       case MonitorAction.buildMenu:
       case MonitorAction.workspaceCard:
+      case MonitorAction.update:
       case MonitorAction.toggleSelection:
       case MonitorAction.selectAll:
       case MonitorAction.clearSelection:
@@ -1207,6 +1295,7 @@ class InteractiveWizard {
       case MonitorAction.buildMenu:
       case MonitorAction.workspaceCard:
       case MonitorAction.toggleSelection:
+      case MonitorAction.update:
       case MonitorAction.selectAll:
       case MonitorAction.clearSelection:
       case MonitorAction.switchView:

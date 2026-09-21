@@ -187,6 +187,8 @@ MonitorFrame buildMonitorFrame({
   Set<String> checkedInstances = const <String>{},
   String? hoveredId,
   String? pressedId,
+  String? updateLabel,
+  bool updateChecking = false,
 }) {
   if (columns < monitorMinColumns || lines < monitorMinLines) {
     return MonitorFrame(
@@ -373,12 +375,39 @@ MonitorFrame buildMonitorFrame({
   rows.add(workspace.row);
   hitboxes.addAll(_buttonHits(workspace.spans, rows.length - 1));
 
-  rows.add(
-    theme.paint(
-      _footerHints(columns, snapshot.view, hasChecked: checked.isNotEmpty),
-      theme.faint,
-    ),
+  final String? buttonLabel = updateLabel == null
+      ? null
+      : Ansi.clipVisible(updateLabel, columns ~/ 2 - 4);
+  final int updateWidth = buttonLabel == null ? 0 : buttonLabel.length + 4;
+  final int hintsWidth = columns - updateWidth - (updateWidth > 0 ? 1 : 0);
+  final String hints = _footerHints(
+    hintsWidth,
+    snapshot.view,
+    hasChecked: checked.isNotEmpty,
   );
+  String footer = theme.paint(Ansi.clipVisible(hints, hintsWidth), theme.faint);
+  if (buttonLabel != null) {
+    final ButtonRowRender update = layoutButtonRow(
+      buttons: <ButtonSpec>[
+        ButtonSpec(
+          id: updateHitId,
+          label: buttonLabel,
+          enabled: !updateChecking,
+        ),
+      ],
+      width: updateWidth,
+      indent: 0,
+      theme: theme,
+      hoveredId: hoveredId,
+      pressedId: pressedId,
+    );
+    final int leftWidth = columns - updateWidth;
+    footer = '${Ansi.padVisible(footer, leftWidth)}${update.row}';
+    hitboxes.addAll(
+      _buttonHits(update.spans, rows.length, colOffset: leftWidth),
+    );
+  }
+  rows.add(footer);
 
   return padFrame(
     MonitorFrame(rows: rows, hitboxes: hitboxes),
@@ -478,6 +507,9 @@ String _footerHints(int columns, MonitorView view, {bool hasChecked = false}) {
       break;
     }
     shown.remove(hint);
+  }
+  while (shown.length > 1 && shown.join(_hintSeparator).length > columns) {
+    shown.removeAt(0);
   }
   return shown.join(_hintSeparator);
 }
