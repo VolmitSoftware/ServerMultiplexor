@@ -50,6 +50,7 @@ enum InstanceModalAction {
   restart,
   console,
   pullToLocal,
+  profile,
   pushToRemote,
   addons,
   backups,
@@ -160,6 +161,7 @@ String instanceModalActionHotkey(InstanceModalAction action) =>
       InstanceModalAction.console => 'c',
       InstanceModalAction.pullToLocal ||
       InstanceModalAction.pushToRemote => 'p',
+      InstanceModalAction.profile => 'j',
       InstanceModalAction.addons => 'o',
       InstanceModalAction.backups => 'b',
       InstanceModalAction.settings => 'e',
@@ -579,6 +581,7 @@ List<List<ButtonSpec>> _remoteInstanceRows({
         'PULL TO LOCAL',
         enabled: stopped && !operationsBlocked,
       ),
+      _instanceButton(InstanceModalAction.profile, 'PROFILE'),
     ],
     <ButtonSpec>[
       _instanceButton(InstanceModalAction.settings, 'SETTINGS'),

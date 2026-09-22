@@ -33,6 +33,10 @@ Default output is `../multiplexor`.
   endpoints, node capacity, resource statistics, power actions, a secure live
   console plus one-shot commands, and template-based server creation over the
   same service used by the TUI.
+- Remote JProfiler profiling supports startup captures, attachment to running
+  servers, and live sessions. It requires Pterodactyl Client and Application API
+  credentials plus SSH access to the Wings host with Docker permissions. See
+  [setup and usage](../README.md#remote-profiling-setup-and-usage).
 - `tool/mineflayer/` is the pinned Node 22 gameplay harness used by the
   `gameplay` CLI namespace. Install it through `../start.sh gameplay setup`;
   each run publishes its loopback Prismarine Viewer URL in terminal output,

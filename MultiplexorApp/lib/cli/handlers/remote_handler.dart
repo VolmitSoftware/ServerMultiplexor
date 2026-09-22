@@ -15,10 +15,12 @@ import '../../services/pterodactyl/pterodactyl_service.dart';
 import '../../services/pterodactyl/pterodactyl_smb_models.dart';
 import '../../services/pterodactyl/pterodactyl_transfer_models.dart';
 import '../../utils/user_prompt.dart';
+import 'remote_profile_handler.dart';
 
 Future<int> handleRemote(List<String> args) async {
   final String subcommand = args.isEmpty ? 'list' : args.first;
   final List<String> rest = args.skip(1).toList(growable: false);
+  if (subcommand == 'profile') return handleRemoteProfile(rest);
   final _RemoteArguments parsed = _RemoteArguments(rest);
   try {
     switch (subcommand) {

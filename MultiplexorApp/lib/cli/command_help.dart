@@ -68,6 +68,13 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'image <server> --image <docker-image> [--profile <id>]',
     'limits <server> [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--threads <set>|--clear-threads] [--databases <count>] [--allocations <count>] [--backups <count>] [--allocation <id>] [--add-allocation <id,...>] [--remove-allocation <id,...>] [--oom-disabled|--oom-enabled] [--profile <id>]',
     'startup <server> --command <command> [--profile <id>]',
+    'profile host-set <server> --ssh-target <target> [--ssh-port <port>] [--identity-file <path>] [--known-hosts-file <path>] [--sudo-docker] [--profile <id>]',
+    'profile check <server> [--profile <id>]',
+    'profile start <server> (--startup|--attach) [--duration <120s|5m|1h>] [--agent-dir <path>|--agent-version <version>] [--config <path>] [--session-id <id>] [--live] [--port <port>] [--restart] [--profile <id>]',
+    'profile status <server> [--profile <id>]',
+    'profile fetch <server> [--output <directory>] [--open] [--profile <id>]',
+    'profile recover <server> [--profile <id>]',
+    'profile live <server> [--local-port <port>] [--profile <id>]',
   ]),
   CommandHelpGroup('consumer', <String>[
     'list',

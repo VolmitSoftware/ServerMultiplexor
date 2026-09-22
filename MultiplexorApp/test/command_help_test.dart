@@ -139,6 +139,14 @@ void main() {
       expect(output, contains('--concurrency <1-8>'));
       expect(output, contains('remote variable <server>'));
       expect(output, contains('remote limits <server>'));
+      expect(output, contains('remote profile host-set <server>'));
+      expect(
+        output,
+        contains('remote profile start <server> (--startup|--attach)'),
+      );
+      expect(output, contains('--agent-version <version>'));
+      expect(output, contains('remote profile recover <server>'));
+      expect(output, contains('remote profile live <server>'));
     });
   });
 }

@@ -5,6 +5,8 @@ import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 
 import '../models/build_cache.dart';
+import '../cli/handlers/remote_profile_handler.dart';
+import '../cli/remote_profile_command.dart';
 import '../cli/command_help.dart'
     show multiplexorVersion, multiplexorReleaseBuild;
 import '../models/build_version_catalog.dart';
@@ -15,6 +17,7 @@ import '../utils/async_work_pool.dart';
 import '../utils/duration_format.dart';
 import '../utils/process_runner.dart';
 import '../utils/terminal/theme.dart';
+import '../utils/terminal/term_events.dart';
 import '../utils/user_prompt.dart';
 import 'consumer_service.dart';
 import 'instance_bulk.dart';
@@ -30,6 +33,7 @@ import 'monitor/monitor_update.dart';
 import 'monitor/trend_store.dart';
 import 'networks/network_definition.dart';
 import 'passthrough_service.dart';
+import 'profiling/remote_profiler_models.dart';
 import 'pterodactyl/pterodactyl_console_protocol.dart';
 import 'pterodactyl/pterodactyl_console_session.dart';
 import 'pterodactyl/pterodactyl_console_terminal.dart';
@@ -55,6 +59,7 @@ part 'interactive_wizard_local.dart';
 part 'interactive_wizard_networks.dart';
 part 'interactive_wizard_swarm.dart';
 part 'interactive_wizard_sessions.dart';
+part 'interactive_wizard_profiling.dart';
 
 /// The side effect a Remote quick key is allowed to perform after a fresh
 /// resource-state check.
@@ -1142,6 +1147,7 @@ class InteractiveWizard {
       case InstanceModalAction.backups:
         await _instanceBackups(name);
       case InstanceModalAction.pullToLocal:
+      case InstanceModalAction.profile:
         Ui.note('That action is Remote-only.');
         await Ui.pause();
       case InstanceModalAction.settings:
@@ -1325,6 +1331,8 @@ class InteractiveWizard {
         await _remoteConsole(identifier);
       case InstanceModalAction.pullToLocal:
         await _pullRemoteToLocal(identifier);
+      case InstanceModalAction.profile:
+        await _remoteProfile(identifier);
       case InstanceModalAction.pushToRemote:
         Ui.note('That action is Local-only.');
         await Ui.pause();

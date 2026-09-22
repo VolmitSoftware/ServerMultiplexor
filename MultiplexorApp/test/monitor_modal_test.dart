@@ -158,6 +158,7 @@ void main() {
         InstanceModalAction.restart,
         InstanceModalAction.console,
         InstanceModalAction.pullToLocal,
+        InstanceModalAction.profile,
         InstanceModalAction.pushToRemote,
         InstanceModalAction.addons,
         InstanceModalAction.backups,
@@ -719,6 +720,7 @@ void main() {
         ids,
         containsAll(<String>[
           'im:settings',
+          'im:profile',
           'im:history',
           'im:pullToLocal',
           'im:folder',

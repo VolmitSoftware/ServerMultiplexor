@@ -3,6 +3,9 @@ import 'consumer_service.dart';
 import 'environment_service.dart';
 import 'manager_context.dart';
 import 'passthrough_service.dart';
+import 'profiling/remote_profiler_host_store.dart';
+import 'profiling/remote_profiler_service.dart';
+import 'profiling/remote_profiler_host.dart';
 import 'pterodactyl/pterodactyl_credential_store.dart';
 import 'pterodactyl/pterodactyl_history_service.dart';
 import 'pterodactyl/pterodactyl_native_local_instance_gateway.dart';
@@ -19,6 +22,19 @@ late final PterodactylService pterodactylService;
 late final PterodactylHistoryService pterodactylHistoryService;
 late final PterodactylSmbService pterodactylSmbService;
 late final PterodactylTransferService pterodactylTransferService;
+
+SshRemoteProfilerGateway remoteProfilerGateway(String profileId) =>
+    SshRemoteProfilerGateway(
+      pterodactyl: pterodactylService,
+      profileId: profileId,
+      hosts: RemoteProfilerHostStore(appContext.metadataDir),
+    );
+
+RemoteProfilerService remoteProfilerService(String profileId) =>
+    RemoteProfilerService(
+      gateway: remoteProfilerGateway(profileId),
+      stateDirectory: '${appContext.globalStateDir}/profiling',
+    );
 
 void initializeAppContext({
   String? requestedConsumer,

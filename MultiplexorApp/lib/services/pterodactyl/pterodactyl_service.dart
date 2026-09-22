@@ -1015,6 +1015,23 @@ final class PterodactylService {
     }
   }
 
+  Future<PterodactylApplicationServer> applicationServer(
+    String profileId,
+    String selector,
+  ) async {
+    final PterodactylProfile profile = _requireProfile(profileId);
+    final PterodactylClientServerAccess access = await serverAccess(
+      profileId,
+      selector,
+    );
+    final _ClientHandle handle = await _applicationClientFor(profile);
+    try {
+      return await handle.client.getApplicationServer(access.server.internalId);
+    } finally {
+      handle.client.close();
+    }
+  }
+
   static Map<String, String> _editableEnvironment(
     PterodactylApplicationServer server,
   ) => <String, String>{
@@ -1110,6 +1127,18 @@ final class PterodactylService {
     final _ClientHandle handle = await _clientFor(_requireProfile(id));
     try {
       await _sendPower(handle.client, identifier, signal);
+    } finally {
+      handle.client.close();
+    }
+  }
+
+  Future<void> requestGracefulStop(String profileId, String identifier) async {
+    final _ClientHandle handle = await _clientFor(_requireProfile(profileId));
+    try {
+      await handle.client.sendPowerSignal(
+        identifier,
+        PterodactylPowerSignal.stop,
+      );
     } finally {
       handle.client.close();
     }

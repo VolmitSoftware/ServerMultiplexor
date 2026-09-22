@@ -116,6 +116,20 @@ void main() {
     expect(requestsPerMinute, lessThanOrEqualTo(100));
   });
 
+  test('graceful stop request never polls or escalates to kill', () async {
+    final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
+      _ServiceTransport(<_ServiceReply>[const _ServiceReply(204, '')]),
+    ]);
+    addTearDown(fixture.close);
+    await fixture.service.requestGracefulStop(fixture.profile.id, 'server01');
+    expect(fixture.transports.single.requests, hasLength(1));
+    expect(
+      fixture.transports.single.requests.single.uri.path,
+      '/api/client/servers/server01/power',
+    );
+    expect(fixture.transports.single.requests.single.body, contains('stop'));
+  });
+
   test('remote stop returns when the server shuts down cleanly', () async {
     final _ServiceFixture fixture = _serviceFixture(<_ServiceTransport>[
       _ServiceTransport(<_ServiceReply>[

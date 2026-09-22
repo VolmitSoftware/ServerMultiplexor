@@ -114,6 +114,8 @@ The Remote console has a persistent server/resource header, severity colors, saf
 
 The Remote server menu's Open folder action repairs or starts Multiplexor Drive when needed, then opens that server's exact local folder in Finder.
 
+The Remote server card's **PROFILE** action (`j`) checks JProfiler readiness, configures the node's SSH connection, records startup or attaches to a running JVM, shows capture status, downloads snapshots and logs, restores launch settings, and opens a live profiling tunnel. Startup recording asks for confirmation before starting or gracefully restarting the selected server.
+
 The Remote connection card is the guided account surface. It can add, select, rename, repair, rotate, and remove multiple panel accounts. Multiplexor asks for the panel HTTPS origin once, accepts the key through masked terminal input, saves it in macOS Keychain, and verifies it before selecting the account. It never accepts an API key on the command line or writes one into profile state. Standard `ptlc_` and `ptla_` prefixes select the Client or Application role automatically. A root-admin Client key provides the one-key experience on current Pterodactyl releases; a separate Application key is only needed when the Client key cannot reach administrative routes. First-server/egg creation needs Servers read/write plus Users, Nodes, Allocations, Nests, and Eggs read access.
 
 Remote cards show every configured advertised allocation and every bind allocation. DNS A/AAAA results are shown beside configured aliases when resolution succeeds. These are intentionally separate: Pterodactyl does not know an upstream NAT port mapping, so Multiplexor never guesses that a private bind address, node FQDN, and public game endpoint are interchangeable.
@@ -211,8 +213,19 @@ These commands also work directly on the downloaded executable, without a Dart S
 | `remote image <server> --image <docker-image> [--profile <id>]` | Select an allowed Docker image when `startup.docker-image` is granted. |
 | `remote limits <server> [--memory <MiB>] [--swap <MiB>] [--disk <MiB>] [--io <10-1000>] [--cpu <percent>] [--threads <set>\|--clear-threads] [--databases <count>] [--allocations <count>] [--backups <count>] [--allocation <id>] [--add-allocation <id,...>] [--remove-allocation <id,...>] [--oom-disabled\|--oom-enabled] [--profile <id>]` | Modify resource, feature, and allocation limits through the Application API while preserving unspecified values. |
 | `remote startup <server> --command <command> [--profile <id>]` | Modify the administrative startup command while preserving the current egg, image, variables, and install-script policy. |
+| `remote profile host-set <server> --ssh-target <target> [--ssh-port <port>] [--identity-file <path>] [--known-hosts-file <path>] [--sudo-docker] [--profile <id>]` | Associate the server's node with a Docker-host SSH alias or `user@host`. Uses existing SSH authentication and trusted host keys; port defaults to 22. `--sudo-docker` requires passwordless sudo. |
+| `remote profile check <server> [--profile <id>]` | Check Java, container platform, SSH access, and startup capture readiness without changing the server. |
+| `remote profile start <server> (--startup\|--attach) [--duration <120s\|5m\|1h>] [--agent-dir <path>\|--agent-version <version>] [--config <path>] [--session-id <id>] [--live] [--port <port>] [--restart] [--profile <id>]` | Launch with JProfiler or attach to an already-running JVM. Startup mode preserves and restores the original command; `--restart` explicitly authorizes restarting a running server and cannot be combined with `--attach`. Offline recording defaults to 120 seconds; duration accepts 1 second through 24 hours. Downloads the verified Linux JProfiler 16.2 agent unless a version or extracted agent directory is supplied. `--config` supplies an advanced JProfiler session XML; `--session-id` selects its session (default 1). Live mode uses agent port 8849 by default; `--port` requires `--live`. |
+| `remote profile status <server> [--profile <id>]` | Show the latest capture's durable phase, original-command restoration state, and remote snapshot directory. |
+| `remote profile fetch <server> [--output <directory>] [--open] [--profile <id>]` | Download available `.jps` snapshots and server logs. Defaults to local capture storage; `--open` opens the latest downloaded snapshot through the OS file association. |
+| `remote profile recover <server> [--profile <id>]` | Restore launch settings after an interrupted capture without overwriting another operator's startup edits. Does not restart the server or unload an agent from a running JVM. |
+| `remote profile live <server> [--local-port <port>] [--profile <id>]` | Open a loopback SSH tunnel to an existing live capture (default local port 8849). Connect JProfiler to the printed address; Ctrl-C closes the tunnel while the server keeps running. |
 
 The active account is used when `--profile` is omitted; `--profile` remains available as a one-command override. `ptero` is an alias for `remote`.
+
+Multiplexor supports remote JProfiler startup captures, attachment to running servers, and live sessions. This capability requires both Pterodactyl API credentials and a configured SSH connection to the Wings Docker host; panel or SFTP access alone is insufficient. See [Remote profiling setup and usage](#remote-profiling-setup-and-usage) for prerequisites and examples. The default agent download is cached under `.multiplexor/profiler-agents/`; host settings and capture state are local workspace data.
+
+Offline recording runs inside the remote JVM and saves snapshots even after Multiplexor closes. In startup mode, launch settings are restored after the profiling launch is confirmed, so the next ordinary start does not enable profiling. The agent stays loaded in the current JVM until a normal restart. Run `recover` after an interrupted operation; concurrent operator edits are preserved and reported for resolution. Fetch the snapshot after the requested duration; elapsed time alone does not mark a capture complete. `--attach` uses the container's `jcmd` to load JProfiler into the running JVM without restarting or changing its startup command; the JVM must permit dynamic agent loading. Attachment records activity from that point forward. Add `--live` to either mode to enable an interactive connection through `profile live`.
 
 Pull records a file baseline for the exact Local instance and Remote UUID. Subsequent Update pushes upload only changed and new files from the preview. Files changed or deleted only on Remote stay untouched; a file edited differently on both sides blocks the push and identifies the conflict. Local deletions also preserve Remote files in Update mode. Mirror still makes the transferable Remote tree match Local and requires its destructive confirmation. A target without a recorded baseline uses the current Local/Remote comparison shown in its preview. Baselines live under `.multiplexor/pterodactyl-transfer-baselines/` and advance after verified transfers, including across app restarts.
 
@@ -700,6 +713,44 @@ BuildTools uses the Java executable selected in consumer runtime settings and ch
 | `config status [instance]` | Print which config files are symlinked vs localized. |
 
 ## Common Workflows
+
+### Remote profiling setup and usage
+
+Remote profiling records Java execution on a Pterodactyl server for analysis in JProfiler. Startup capture loads the profiler before Minecraft and its plugins initialize, making it useful for slow boots and startup stalls. Attach capture records an already-running workload without restarting it; it cannot recover activity from before attachment.
+
+Before using either mode, configure:
+
+- A saved Pterodactyl account with Client and Application API credentials. It needs access to the target server, power controls, and administrative startup settings.
+- SSH key access to the Linux host where Wings runs the server's Docker container. If Wings runs inside a VM on TrueNAS, use that VM's SSH address. The SSH user must be able to inspect containers and run commands inside them, either directly through Docker or through passwordless sudo with `--sudo-docker`.
+- A trusted SSH host key in your local known-hosts file. Multiplexor reuses your SSH configuration and authentication; `--identity-file` can select an existing private-key file.
+- A supported Linux container (x86_64 or aarch64 with glibc). Startup capture requires a direct Java launch command. Attach capture additionally requires a full JDK with `jcmd`, one running JVM, permission to load an agent, and no JProfiler agent already loaded.
+- JProfiler on your workstation to inspect downloaded snapshots or control live sessions. Multiplexor downloads and verifies the remote agent automatically; you do not need to install the desktop application on the server.
+
+Register the SSH connection once per Pterodactyl account and node, then check the target. Here, `profiling-test` is a server selector and `minecraft-node` is an example alias from your local SSH configuration; `user@host` also works. Omit `--sudo-docker` when the SSH user can run Docker directly. API credentials continue using Multiplexor's existing credential store.
+
+```bash
+./start.sh remote profile host-set profiling-test --ssh-target minecraft-node --sudo-docker
+./start.sh remote profile check profiling-test
+```
+
+For a stopped server, start a two-minute capture and fetch it when ready:
+
+```bash
+./start.sh remote profile start profiling-test --startup --duration 120s
+./start.sh remote profile status profiling-test
+# After recording finishes:
+./start.sh remote profile fetch profiling-test --open
+# If the local command was interrupted before launch settings were restored:
+./start.sh remote profile recover profiling-test
+```
+
+Multiplexor uses the panel API to temporarily add the agent to the launch command and start the server, and SSH to stage the agent and retrieve results. It restores the original launch command once profiling starts. Recording continues remotely if you close Multiplexor; `fetch --open` downloads the `.jps` snapshot and matching capture log, then opens the snapshot through your local file association. The same actions are available from the remote server's **Profile** menu.
+
+Add `--restart` to `profile start` when the test server is already running. For an interactive JProfiler session, run `remote profile start profiling-test --startup --live`, then `remote profile live profiling-test` and connect JProfiler to `127.0.0.1:8849`. The connection travels through an SSH tunnel bound to localhost; no public profiler port is required. Keep the tunnel command open until profiling is finished. `--duration` applies only to offline recording; live recording and snapshot saving are controlled in JProfiler.
+
+To record a running workload without restarting it, use `./start.sh remote profile start profiling-test --attach --duration 120s`, then fetch the snapshot after recording. Attachment requires a full JDK image with `jcmd`, permission to attach as the JVM's user, and no existing JProfiler agent in that JVM. Replace `--duration 120s` with `--live` for an interactive attached session. Capture logs remain tied to the original container; live capture log collection runs for up to 24 hours plus five minutes of startup allowance.
+
+Finishing a recording leaves the server running and the agent loaded until the next normal restart. Restart before making a new attachment, or use live mode to control repeated recordings in the same JVM. `remote profile recover` restores launch settings after an interrupted operation; it does not restart the server or unload the agent.
 
 **Run a reproducible bot swarm**
 
