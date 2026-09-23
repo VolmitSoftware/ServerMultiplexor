@@ -6,6 +6,7 @@ gameplay tools.
 
 All documentation is maintained in the [Volmit docs](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor.md).
 
+- [Visual guide](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor/00-visual-guide.md)
 - [Installation and updates](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor/01-installation-and-updates.md)
 - [Dashboard and wizard](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor/02-dashboard.md)
 - [Local servers](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor/03-local-servers.md)
