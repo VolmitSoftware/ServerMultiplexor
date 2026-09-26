@@ -10,6 +10,11 @@ BIN_DIR="$TEMP_ROOT/bin"
 APP_DIR="$WORKSPACE/MultiplexorApp"
 HARNESS_DIR="$APP_DIR/tool/mineflayer"
 passed=0
+case "${1:-darwin}" in
+  darwin) export FIXTURE_PLATFORM=Darwin FIXTURE_OSTYPE=darwin ;;
+  linux) export FIXTURE_PLATFORM=Linux FIXTURE_OSTYPE=linux-gnu ;;
+  *) printf 'Usage: %s [darwin|linux]\n' "$0" >&2; exit 2 ;;
+esac
 
 cleanup() {
   local resolved
@@ -33,7 +38,7 @@ assert_equal() {
 }
 
 run_launcher() {
-  OSTYPE=darwin "$BASH" "$WORKSPACE/start.sh" "$@" \
+  OSTYPE="$FIXTURE_OSTYPE" "$BASH" "$WORKSPACE/start.sh" "$@" \
     >"$TEMP_ROOT/stdout" 2>"$TEMP_ROOT/stderr"
 }
 
@@ -46,7 +51,10 @@ printf '{}\n' >"$HARNESS_DIR/node_modules/.package-lock.json"
 touch -t 200001010000 "$APP_DIR/pubspec.yaml" "$HARNESS_DIR/package.json" "$HARNESS_DIR/package-lock.json"
 touch -t 200101010000 "$HARNESS_DIR/node_modules/.package-lock.json"
 
-export PATH="$BIN_DIR:/usr/bin:/bin"
+for tool in bash dirname mkdir cp chmod touch cat cmp rm find sed mv; do
+  ln -s "$(command -v "$tool")" "$BIN_DIR/$tool"
+done
+export PATH="$BIN_DIR"
 export FIXTURE_ROOT="$TEMP_ROOT"
 export FIXTURE_BIN="$BIN_DIR"
 export FIXTURE_APP_TEMPLATE="$TEMP_ROOT/application"
@@ -58,7 +66,7 @@ export FIXTURE_APP_EXIT=0
 
 cat >"$BIN_DIR/uname" <<'SH'
 #!/usr/bin/env bash
-printf 'Darwin\n'
+printf '%s\n' "$FIXTURE_PLATFORM"
 SH
 
 cat >"$BIN_DIR/brew" <<'SH'
@@ -109,9 +117,10 @@ for tool in java git tmux; do
 done
 cp "$TEMP_ROOT/dart" "$BIN_DIR/dart"
 cp "$FIXTURE_APP_TEMPLATE" "$WORKSPACE/multiplexor"
-chmod +x "$BIN_DIR"/* "$WORKSPACE/multiplexor" "$FIXTURE_APP_TEMPLATE"
+find "$BIN_DIR" -type f -exec chmod +x {} +
+chmod +x "$WORKSPACE/multiplexor" "$FIXTURE_APP_TEMPLATE"
 
-printf 'Darwin launcher simulation using Bash %s\n' "$BASH_VERSION"
+printf '%s launcher simulation using Bash %s\n' "$FIXTURE_PLATFORM" "$BASH_VERSION"
 expected_args=(--command '/tellraw @s {"text":"ready"}' '' 'directory with spaces/' 'trailing\')
 run_launcher "${expected_args[@]}"
 printf '%s\0' "${expected_args[@]}" >"$TEMP_ROOT/expected-arguments"
@@ -120,8 +129,48 @@ assert_equal 'fixture application' "$(cat "$TEMP_ROOT/stdout")" 'existing extens
 assert_equal 'absent' "$([[ -f "$TEMP_ROOT/dart.log" ]] && printf present || printf absent)" 'existing binary does not rebuild without pubspec.lock'
 
 rm "$BIN_DIR/tmux"
-run_launcher --version
-assert_equal 'install tmux' "$(cat "$TEMP_ROOT/brew.log")" 'missing Darwin tmux installs through Homebrew'
+if [[ "$FIXTURE_PLATFORM" == Darwin ]]; then
+  run_launcher --version
+  assert_equal 'install tmux' "$(cat "$TEMP_ROOT/brew.log")" 'missing Darwin tmux installs through Homebrew'
+else
+  cat >"$BIN_DIR/id" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FIXTURE_UID:-0}"
+SH
+  cat >"$TEMP_ROOT/package-manager" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${0##*/} $*" >>"$FIXTURE_ROOT/install.log"
+printf '#!/usr/bin/env bash\nprintf "tmux fixture\\n"\n' >"$FIXTURE_BIN/tmux"
+chmod +x "$FIXTURE_BIN/tmux"
+SH
+  chmod +x "$BIN_DIR/id" "$TEMP_ROOT/package-manager"
+  for manager in apt-get dnf pacman; do
+    cp "$TEMP_ROOT/package-manager" "$BIN_DIR/$manager"
+    run_launcher --version
+    case "$manager" in
+      apt-get | dnf) expected="$manager install -y tmux" ;;
+      pacman) expected='pacman -S --noconfirm tmux' ;;
+    esac
+    assert_equal "$expected" "$(cat "$TEMP_ROOT/install.log")" "Linux installs tmux through $manager as root"
+    rm "$BIN_DIR/$manager" "$BIN_DIR/tmux" "$TEMP_ROOT/install.log"
+  done
+  cp "$TEMP_ROOT/package-manager" "$BIN_DIR/apt-get"
+  FIXTURE_UID=1000 run_launcher --version
+  assert_equal absent "$([[ -f "$TEMP_ROOT/install.log" ]] && printf present || printf absent)" 'unprivileged Linux does not run the package manager'
+  assert_equal 'fixture application' "$(cat "$TEMP_ROOT/stdout")" 'missing privileges still permit commands without tmux'
+  cat >"$BIN_DIR/sudo" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FIXTURE_ROOT/sudo.log"
+[[ "$1" == -n ]] || exit 91
+shift
+"$@"
+SH
+  chmod +x "$BIN_DIR/sudo"
+  FIXTURE_UID=1000 run_launcher --version
+  assert_equal '-n true
+-n apt-get install -y tmux' "$(cat "$TEMP_ROOT/sudo.log")" 'Linux sudo installation remains noninteractive'
+  assert_equal absent "$([[ -f "$TEMP_ROOT/brew.log" ]] && printf present || printf absent)" 'Linux never invokes Homebrew'
+fi
 
 run_launcher gameplay doctor
 assert_equal 'absent' "$([[ -f "$TEMP_ROOT/npm.log" ]] && printf present || printf absent)" 'fresh installed lock skips npm'
@@ -161,6 +210,6 @@ assert_equal absent "$([[ -f "$TEMP_ROOT/arguments" ]] && printf present || prin
 failure=0
 FIXTURE_NPM_EXIT=31 run_launcher bootstrap || failure=$?
 assert_equal 1 "$failure" 'failed bootstrap returns failure'
-assert_equal absent "$([[ -f "$TEMP_ROOT/forbidden.log" ]] && printf present || printf absent)" 'Darwin never invokes Windows bootstrap tools or the Flutter wrapper'
-assert_equal absent "$([[ -f "$WORKSPACE/multiplexor.exe" ]] && printf present || printf absent)" 'Darwin retains the extensionless executable'
+assert_equal absent "$([[ -f "$TEMP_ROOT/forbidden.log" ]] && printf present || printf absent)" 'Unix never invokes Windows bootstrap tools or the Flutter wrapper'
+assert_equal absent "$([[ -f "$WORKSPACE/multiplexor.exe" ]] && printf present || printf absent)" 'Unix retains the extensionless executable'
 printf 'Passed %s launcher checks.\n' "$passed"

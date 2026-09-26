@@ -94,6 +94,7 @@ void main() {
                 <String>[
                   '--format=ustar',
                   '--no-xattrs',
+                  if (Platform.isLinux) '--blocking-factor=1',
                   '-czf',
                   archive.path,
                   '-C',

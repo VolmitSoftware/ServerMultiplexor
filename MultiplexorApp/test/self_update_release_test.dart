@@ -86,6 +86,12 @@ void main() {
         case Abi.macosX64:
           expect(platform?.archiveSuffix, 'macos-x64.tar.gz');
           expect(platform?.executableName, 'multiplexor');
+        case Abi.linuxArm64:
+          expect(platform?.archiveSuffix, 'linux-arm64.tar.gz');
+          expect(platform?.executableName, 'multiplexor');
+        case Abi.linuxX64:
+          expect(platform?.archiveSuffix, 'linux-x64.tar.gz');
+          expect(platform?.executableName, 'multiplexor');
         case Abi.windowsX64:
           expect(platform?.archiveSuffix, 'windows-x64.zip');
           expect(platform?.executableName, 'multiplexor.exe');
@@ -210,6 +216,24 @@ void main() {
       expect(requests, <String>['/latest', '/SHA256SUMS', '/$_assetName']);
     });
 
+    for (final String architecture in <String>['x64', 'arm64']) {
+      test('verifies the Linux $architecture release download', () async {
+        final String suffix = 'linux-$architecture.tar.gz';
+        final String name = 'multiplexor-v0.2.10-$suffix';
+        assets.insert(0, asset(name, _archive.length));
+        setChecksums('$checksums${sha256.convert(_archive)}  $name\n');
+        final SelfUpdateRelease release = (await client.latest(
+          UpdateVersion.parse('0.2.9'),
+          UpdatePlatform(archiveSuffix: suffix, executableName: 'multiplexor'),
+        ))!;
+        expect(release.assetName, name);
+        expect(release.sha256, sha256.convert(_archive).toString());
+        await client.download(release, destination());
+        expect(await destination().readAsBytes(), _archive);
+        expect(requests, <String>['/latest', '/SHA256SUMS', '/$name']);
+      });
+    }
+
     test(
       'accepts matching optional GitHub digest and binary checksum lines',
       () async {
@@ -263,7 +287,7 @@ void main() {
         client.latest(
           UpdateVersion.parse('0.2.9'),
           const UpdatePlatform(
-            archiveSuffix: 'linux-x64.tar.gz',
+            archiveSuffix: 'linux-arm.tar.gz',
             executableName: 'multiplexor',
           ),
         ),

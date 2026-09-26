@@ -83,6 +83,12 @@ jobs:
         shell: bash
         run: /bin/bash MultiplexorApp/tool/test_launcher.sh
 
+      - name: Test Linux launcher
+        if: runner.os == 'Linux'
+        working-directory: .
+        shell: bash
+        run: /bin/bash MultiplexorApp/tool/test_launcher.sh linux
+
       - name: Test Mineflayer harness
         run: npm test
 
@@ -98,6 +104,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Linux (x64)
+            runner: ubuntu-22.04
+            executable: multiplexor
+            archive_suffix: linux-x64.tar.gz
+          - name: Linux (ARM64)
+            runner: ubuntu-24.04-arm
+            executable: multiplexor
+            archive_suffix: linux-arm64.tar.gz
           - name: macOS (Apple Silicon)
             runner: macos-15
             executable: multiplexor
@@ -138,8 +152,8 @@ jobs:
         working-directory: MultiplexorApp
         run: dart test
 
-      - name: Compile macOS executable
-        if: runner.os == 'macOS'
+      - name: Compile Unix executable
+        if: runner.os != 'Windows'
         shell: bash
         run: dart run MultiplexorApp/tool/build_exe.dart --version "$BUILD_VERSION" --output "$RUNNER_TEMP/$EXECUTABLE_NAME"
 
@@ -150,8 +164,8 @@ jobs:
           $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
           dart run MultiplexorApp/tool/build_exe.dart --version $env:BUILD_VERSION --output $outputPath
 
-      - name: Smoke-test macOS executable
-        if: runner.os == 'macOS'
+      - name: Smoke-test Unix executable
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           actual="$("$RUNNER_TEMP/$EXECUTABLE_NAME" version | head -n 1)"
@@ -404,6 +418,22 @@ jobs:
         shell: bash
         run: COPYFILE_DISABLE=1 tar --format=ustar --no-xattrs -czf "$RUNNER_TEMP/$ARCHIVE_NAME" -C "$RUNNER_TEMP" "$EXECUTABLE_NAME"
 
+      - name: Package Linux executable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tar --format=ustar -b 1 -czf "$RUNNER_TEMP/$ARCHIVE_NAME" -C "$RUNNER_TEMP" "$EXECUTABLE_NAME"
+
+      - name: Smoke-test Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          archive_root="$(mktemp -d)"
+          trap 'rm -rf "$archive_root"' EXIT
+          tar -xzf "$RUNNER_TEMP/$ARCHIVE_NAME" -C "$archive_root"
+          test -x "$archive_root/$EXECUTABLE_NAME"
+          actual="$("$archive_root/$EXECUTABLE_NAME" version | head -n 1)"
+          test "$actual" = "Multiplexor CLI v$BUILD_VERSION"
+
       - name: Package Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
@@ -452,13 +482,15 @@ jobs:
           set -euo pipefail
           shopt -s nullglob dotglob
           archives=(
+            "multiplexor-v$BUILD_VERSION-linux-arm64.tar.gz"
+            "multiplexor-v$BUILD_VERSION-linux-x64.tar.gz"
             "multiplexor-v$BUILD_VERSION-macos-arm64.tar.gz"
             "multiplexor-v$BUILD_VERSION-macos-x64.tar.gz"
             "multiplexor-v$BUILD_VERSION-windows-x64.zip"
           )
           downloaded=(*)
           if [[ ${#downloaded[@]} -ne ${#archives[@]} ]]; then
-            echo "Expected exactly three executable archives, got ${#downloaded[@]}." >&2
+            echo "Expected exactly ${#archives[@]} executable archives, got ${#downloaded[@]}." >&2
             exit 1
           fi
           for archive in "${archives[@]}"; do

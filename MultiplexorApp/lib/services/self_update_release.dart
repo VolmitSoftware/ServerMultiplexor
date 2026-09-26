@@ -98,6 +98,14 @@ class UpdatePlatform {
       archiveSuffix: 'macos-x64.tar.gz',
       executableName: 'multiplexor',
     ),
+    Abi.linuxArm64 => const UpdatePlatform(
+      archiveSuffix: 'linux-arm64.tar.gz',
+      executableName: 'multiplexor',
+    ),
+    Abi.linuxX64 => const UpdatePlatform(
+      archiveSuffix: 'linux-x64.tar.gz',
+      executableName: 'multiplexor',
+    ),
     Abi.windowsX64 => const UpdatePlatform(
       archiveSuffix: 'windows-x64.zip',
       executableName: 'multiplexor.exe',
@@ -153,6 +161,8 @@ class GithubUpdateClient {
   static const Set<String> _archiveSuffixes = <String>{
     'macos-arm64.tar.gz',
     'macos-x64.tar.gz',
+    'linux-arm64.tar.gz',
+    'linux-x64.tar.gz',
     'windows-x64.zip',
   };
   static final RegExp _digestPattern = RegExp(r'^[0-9a-fA-F]{64}$');

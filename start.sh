@@ -91,7 +91,7 @@ install_tmux_linux() {
   fi
 
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo "${install[@]}" >&2
+    sudo -n "${install[@]}" >&2
     return
   fi
 
