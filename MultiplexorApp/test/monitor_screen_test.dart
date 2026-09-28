@@ -1,3 +1,4 @@
+import 'package:multiplexor/models/consumer_profile.dart';
 import 'package:multiplexor/services/monitor/metric_sample.dart';
 import 'package:multiplexor/services/monitor/metrics_sampler.dart';
 import 'package:multiplexor/services/monitor/monitor_frame_util.dart';
@@ -29,6 +30,79 @@ MonitorScreen screen({
 );
 
 void main() {
+  group('grouped local focus', () {
+    const MonitorSnapshot snapshot = MonitorSnapshot(
+      instances: <String>['plugin/demo', 'fabric/demo'],
+      history: <String, List<MetricSample>>{},
+      consumerName: 'Local',
+      groupedLocal: true,
+      instanceConsumers: <String, ConsumerProfile>{
+        'plugin/demo': ConsumerProfile.plugin,
+        'fabric/demo': ConsumerProfile.fabric,
+      },
+    );
+
+    test('moves through group creation headers and scoped server rows', () {
+      expect(
+        moveLocalMonitorFocus(
+          snapshot: snapshot,
+          focusedGroup: 'plugin',
+          selectedInstance: null,
+          delta: 1,
+        ),
+        'server:plugin/demo',
+      );
+      expect(
+        moveLocalMonitorFocus(
+          snapshot: snapshot,
+          focusedGroup: null,
+          selectedInstance: 'plugin/demo',
+          delta: 1,
+        ),
+        'group:new:fabric',
+      );
+      expect(
+        moveLocalMonitorFocus(
+          snapshot: snapshot,
+          focusedGroup: null,
+          selectedInstance: 'fabric/demo',
+          delta: 1,
+        ),
+        'group:new:forge',
+      );
+    });
+
+    test('keeps empty groups reachable and clamps both ends', () {
+      expect(
+        moveLocalMonitorFocus(
+          snapshot: snapshot,
+          focusedGroup: 'forge',
+          selectedInstance: null,
+          delta: 1,
+        ),
+        'group:new:neoforge',
+      );
+      expect(
+        moveLocalMonitorFocus(
+          snapshot: snapshot,
+          focusedGroup: 'plugin',
+          selectedInstance: null,
+          delta: -1,
+        ),
+        'group:new:plugin',
+      );
+      expect(
+        moveLocalMonitorFocus(
+          snapshot: snapshot,
+          focusedGroup: 'neoforge',
+          selectedInstance: null,
+          delta: 1,
+        ),
+        'group:new:neoforge',
+      );
+    });
+  });
+
   group('MonitorGeometryStabilizer', () {
     test('accepts the first observed size immediately', () {
       final MonitorGeometryStabilizer stabilizer = MonitorGeometryStabilizer();

@@ -41,6 +41,7 @@ void main() {
     test('has exactly the kinds the dashboard needs', () {
       expect(MonitorHitKind.values, <MonitorHitKind>[
         MonitorHitKind.serverRow,
+        MonitorHitKind.listArea,
         MonitorHitKind.checkbox,
         MonitorHitKind.button,
         MonitorHitKind.chart,

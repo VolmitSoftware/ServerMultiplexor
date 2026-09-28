@@ -11,8 +11,10 @@ import 'dart:io';
 
 import '../../services/app_context.dart';
 import '../../services/interactive_wizard.dart';
-import '../../services/monitor/metric_sample.dart';
-import '../../services/monitor/metrics_sampler.dart';
+import '../../models/consumer_profile.dart';
+import '../../services/passthrough_service.dart';
+import '../../services/monitor/local_monitor_feed.dart';
+import '../../services/monitor/monitor_network_tree.dart';
 import '../../services/monitor/monitor_frame_util.dart';
 import '../../services/monitor/monitor_hitbox.dart';
 import '../../services/monitor/monitor_keymap.dart';
@@ -57,37 +59,44 @@ Future<int> handleRuntimeWatch(List<String> args) async {
 
 /// Sweeps metrics once and writes one plain frame to stdout.
 Future<int> _printSnapshot() async {
-  // The lock and isolation columns are tee'd off the sampler's own capture
-  // rather than asked for again, exactly as the live dashboard does it, so a
-  // snapshot carries the same workspace facts a frame does.
-  Map<String, InstanceFlags> flags = const <String, InstanceFlags>{};
-  Future<String> captureMetrics() async {
-    final String raw = await _captureMetrics();
-    if (raw.isNotEmpty) {
-      flags = metricsTsvFlagsByInstance(raw);
+  final Map<ConsumerProfile, PassthroughService> sources =
+      <ConsumerProfile, PassthroughService>{
+        for (final ConsumerProfile profile in ConsumerProfile.values)
+          profile: PassthroughService(appContext, consumerService)
+            ..setConsumerOverride(profile),
+      };
+  late final MonitorSnapshot snapshot;
+  try {
+    final LocalMonitorFeed feed = LocalMonitorFeed(
+      captureMetrics: (ConsumerProfile profile) =>
+          _captureMetrics(sources[profile]!),
+      capturePrimary: (ConsumerProfile profile) =>
+          sources[profile]!.captureStdoutLine(<String>['instance', 'current']),
+    );
+    await feed.sweep();
+    final CapturedResult networks = await sources[ConsumerProfile.plugin]!
+        .capture(<String>['network', 'list', '--json']);
+    final List<WizardNetwork> groups = networks.success
+        ? WizardNetwork.parseList(networks.stdout)
+        : const <WizardNetwork>[];
+    snapshot = feed.snapshot(
+      networks: <MonitorNetworkGroup>[
+        for (final WizardNetwork group in groups) group.monitorGroup,
+      ],
+      advertisedEndpoints: <String, String>{
+        for (final WizardNetwork group in groups) group.proxy: group.address,
+      },
+      networkTopologyStale: !networks.success,
+    );
+    if (snapshot.captureError case final String error) {
+      stderr.writeln('[ERROR] $error');
+      return 1;
     }
-    return raw;
+  } finally {
+    for (final PassthroughService source in sources.values) {
+      source.disposeRcon();
+    }
   }
-
-  final MetricsSampler sampler = MetricsSampler(captureMetrics: captureMetrics);
-  await sampler.sweep();
-  if (sampler.lastError case final String error) {
-    stderr.writeln('[ERROR] $error');
-    return 1;
-  }
-
-  final List<String> instances = sampler.instances;
-  final MonitorSnapshot snapshot = MonitorSnapshot(
-    instances: instances,
-    history: <String, List<MetricSample>>{
-      for (final String instance in instances)
-        instance: sampler.history(instance),
-    },
-    flags: flags,
-    consumerName: (appContext.requestedConsumer ?? consumerService.readActive())
-        .shortName,
-    activeInstance: await _activeInstance(),
-  );
 
   final (int columns, int lines) = _snapshotSize();
   final DateTime now = DateTime.now().toUtc();
@@ -140,8 +149,8 @@ MonitorTheme _snapshotTheme() {
   return glyphs.isAscii ? MonitorTheme.plainAscii() : MonitorTheme.plain();
 }
 
-Future<String> _captureMetrics() async {
-  final CapturedResult result = await passthroughService.capture(<String>[
+Future<String> _captureMetrics(PassthroughService source) async {
+  final CapturedResult result = await source.capture(<String>[
     'runtime',
     'metrics',
   ]);
@@ -153,13 +162,4 @@ Future<String> _captureMetrics() async {
     );
   }
   return result.stdout;
-}
-
-Future<String?> _activeInstance() async {
-  final String? line = await passthroughService.captureStdoutLine(<String>[
-    'instance',
-    'current',
-  ]);
-  final String cleaned = (line ?? '').trim();
-  return cleaned.isEmpty ? null : cleaned;
 }

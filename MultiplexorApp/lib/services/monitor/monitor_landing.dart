@@ -20,6 +20,7 @@ import '../../utils/terminal/theme.dart';
 import '../runtime_state.dart';
 import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
+import 'monitor_groups.dart';
 import 'monitor_hitbox.dart';
 import 'monitor_network_tree.dart';
 
@@ -428,7 +429,18 @@ List<String> renderKpiStrip({
 }
 
 /// One column of the fleet table.
-enum _TableColumn { name, port, state, players, tps, trend, mem, cpu, up }
+enum _TableColumn {
+  name,
+  port,
+  state,
+  players,
+  tps,
+  trend,
+  mem,
+  cpu,
+  up,
+  primary,
+}
 
 /// The column headers, and which columns right-align (the numeric readings,
 /// so their units line up down the table).
@@ -442,6 +454,7 @@ const Map<_TableColumn, String> _tableHeaders = <_TableColumn, String>{
   _TableColumn.mem: 'MEM',
   _TableColumn.cpu: 'CPU',
   _TableColumn.up: 'UP',
+  _TableColumn.primary: 'PRIMARY',
 };
 const Set<_TableColumn> _rightAligned = <_TableColumn>{
   _TableColumn.port,
@@ -469,6 +482,7 @@ const List<_TableColumn> _tableDropOrder = <_TableColumn>[
 ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) _planTable(
   int inner, {
   bool networkTree = false,
+  bool grouped = false,
 }) {
   final Map<_TableColumn, int> widths = <_TableColumn, int>{
     _TableColumn.name: networkTree ? 28 : _colNameWidth,
@@ -480,9 +494,18 @@ const List<_TableColumn> _tableDropOrder = <_TableColumn>[
     _TableColumn.mem: _colMemWidth,
     _TableColumn.cpu: _colCpuWidth,
     _TableColumn.up: _colUpWidth,
+    _TableColumn.primary: 7,
   };
   final List<_TableColumn> columns = _TableColumn.values.toList();
-  if (!networkTree) columns.remove(_TableColumn.port);
+  if (grouped) {
+    columns.remove(_TableColumn.port);
+    columns.add(_TableColumn.port);
+    columns.remove(_TableColumn.primary);
+    columns.add(_TableColumn.primary);
+  } else {
+    columns.remove(_TableColumn.primary);
+    if (!networkTree) columns.remove(_TableColumn.port);
+  }
 
   int needed() {
     int total = _tablePrefix + _tableGap * (columns.length - 1);
@@ -510,7 +533,169 @@ const List<_TableColumn> _tableDropOrder = <_TableColumn>[
     }
   }
 
+  if (grouped && needed() < inner) {
+    widths[_TableColumn.name] = widths[_TableColumn.name]! + inner - needed();
+  }
+
   return (columns: columns, widths: widths);
+}
+
+MonitorPanelRender renderGroupedServerList({
+  required MonitorSnapshot snapshot,
+  required int selectedIndex,
+  required int rows,
+  required int width,
+  required int topRow,
+  required MonitorTheme theme,
+  required DateTime windowStart,
+  required DateTime windowEnd,
+  Set<String> checkedInstances = const <String>{},
+  String? focusedGroup,
+  String? hoveredId,
+}) {
+  String? selectedInstance =
+      focusedGroup == null &&
+          selectedIndex >= 0 &&
+          selectedIndex < snapshot.instances.length
+      ? snapshot.instances[selectedIndex]
+      : null;
+  ({List<_TableColumn> columns, Map<_TableColumn, int> widths}) plan =
+      _planTable(
+        width - 4,
+        grouped: true,
+        networkTree: snapshot.networkRows.isNotEmpty,
+      );
+  List<MonitorConsumerGroup> groups = planMonitorConsumerGroups(
+    snapshot: snapshot,
+    rows: rows,
+    selectedInstance: selectedInstance,
+  );
+  int checkedCount = snapshot.instances.where(checkedInstances.contains).length;
+  List<String> output = <String>[
+    '  ${_tableHeaderRow(plan: plan, theme: theme, selectionMark: checkedCount == 0
+        ? '[ ]'
+        : checkedCount == snapshot.instances.length
+        ? '[x]'
+        : '[-]', hovered: hoveredId == selectAllHitId)}  ',
+  ];
+  List<MonitorHitbox> hitboxes = <MonitorHitbox>[
+    if (snapshot.instances.isNotEmpty)
+      MonitorHitbox(
+        id: selectAllHitId,
+        row: topRow,
+        colStart: 2,
+        colEnd: 9,
+        kind: MonitorHitKind.checkbox,
+      ),
+  ];
+  for (MonitorConsumerGroup group in groups) {
+    int groupTop = topRow + output.length;
+    String id = '$groupNewHitPrefix${group.consumer.shortName}';
+    bool focused = focusedGroup == group.consumer.shortName;
+    bool active = focused || group.instances.contains(selectedInstance);
+    bool empty = group.instances.isEmpty;
+    String badge = empty ? '[+ Create first server]' : '[+ New]';
+    String title =
+        '${focused ? '${theme.glyphs.selector} ' : ''}'
+        '${monitorConsumerLabel(group.consumer)}';
+    if (group.visibleInstances.length < group.instances.length) {
+      title +=
+          ' ${group.offset + 1}-${group.offset + group.visibleInstances.length}'
+          '/${group.instances.length}';
+    }
+    if (snapshot.networkTopologyStale &&
+        group.instances.any(snapshot.networkRows.containsKey)) {
+      title += ' · NETWORKS STALE';
+    }
+    List<String> content = <String>[];
+    for (String instance in group.visibleInstances) {
+      int row = groupTop + content.length + 1;
+      hitboxes.addAll(<MonitorHitbox>[
+        MonitorHitbox(
+          id: '$serverHitPrefix$instance',
+          row: row,
+          colStart: 0,
+          colEnd: width,
+          kind: MonitorHitKind.serverRow,
+        ),
+        MonitorHitbox(
+          id: '$serverCheckHitPrefix$instance',
+          row: row,
+          colStart: 2,
+          colEnd: 5,
+          kind: MonitorHitKind.checkbox,
+        ),
+        MonitorHitbox(
+          id: '$primaryHitPrefix$instance',
+          row: row,
+          colStart: width - 9,
+          colEnd: width - 2,
+          kind: MonitorHitKind.checkbox,
+        ),
+      ]);
+      content.add(
+        _serverTableRow(
+          plan: plan,
+          instance: snapshot.displayNameFor(instance),
+          network: snapshot.networkRows[instance],
+          latest: snapshot.latestFor(instance),
+          history: snapshot.historyFor(instance),
+          selected: selectedInstance == instance,
+          checked: checkedInstances.contains(instance),
+          checkboxHovered: hoveredId == '$serverCheckHitPrefix$instance',
+          hovered: hoveredId == '$serverHitPrefix$instance',
+          active: snapshot.isPrimary(instance),
+          primaryHovered: hoveredId == '$primaryHitPrefix$instance',
+          port: snapshot.portFor(instance),
+          theme: theme,
+          windowStart: windowStart,
+          windowEnd: windowEnd,
+        ),
+      );
+    }
+    while (content.length < group.contentRows) {
+      hitboxes.add(
+        MonitorHitbox(
+          id: 'group:area:${group.consumer.shortName}:${content.length}',
+          row: groupTop + content.length + 1,
+          colStart: 0,
+          colEnd: width,
+          kind: MonitorHitKind.listArea,
+        ),
+      );
+      content.add('');
+    }
+    List<String> panel = renderPanel(
+      title: title,
+      badge: badge,
+      styledBadge: theme.paint(
+        badge,
+        focused || hoveredId == id ? theme.accent : theme.text,
+      ),
+      content: content,
+      width: width,
+      theme: theme,
+      emphasis: active ? PanelEmphasis.active : PanelEmphasis.normal,
+    );
+    if (empty) {
+      output.add(panel.first);
+    } else {
+      output.addAll(panel);
+    }
+    hitboxes.add(
+      MonitorHitbox(
+        id: id,
+        row: groupTop,
+        colStart: empty ? 0 : width - badge.length - 3,
+        colEnd: empty ? width : width - 3,
+        kind: MonitorHitKind.button,
+      ),
+    );
+  }
+  while (output.length < rows) {
+    output.add('');
+  }
+  return MonitorPanelRender(rows: output, hitboxes: hitboxes);
 }
 
 /// The full-width fleet table: a faint column-header row, then one reading
@@ -718,6 +903,8 @@ String _serverTableRow({
   required MonitorTheme theme,
   required DateTime windowStart,
   required DateTime windowEnd,
+  bool primaryHovered = false,
+  int? port,
 }) {
   final MonitorGlyphs glyphs = theme.glyphs;
   final RuntimeState? state = latest?.state;
@@ -761,7 +948,12 @@ String _serverTableRow({
               : ' (${network.alias})';
           label = '$branch$instance$alias';
         }
-        final String activeMark = active && network != null ? ' *' : '';
+        final String activeMark =
+            active &&
+                network != null &&
+                !plan.columns.contains(_TableColumn.primary)
+            ? ' *'
+            : '';
         row.write(
           theme.paint(
             '${_fitCell(label, cellWidth - activeMark.length)}$activeMark',
@@ -772,7 +964,7 @@ String _serverTableRow({
         row.write(
           theme.paint(
             _fitCell(
-              '${network?.port ?? latest?.port ?? dash}',
+              '${port ?? network?.port ?? latest?.port ?? dash}',
               cellWidth,
               right: true,
             ),
@@ -783,6 +975,13 @@ String _serverTableRow({
         final String tone = live ? theme.statusTone(state) : theme.faint;
         row.write(
           theme.paint(_fitCell(monitorStateText(latest), cellWidth), tone),
+        );
+      case _TableColumn.primary:
+        row.write(
+          theme.paint(
+            _fitCell(active ? '  [x]' : '  [ ]', cellWidth),
+            active || primaryHovered ? theme.accent : theme.faint,
+          ),
         );
       case _TableColumn.players:
         final String text = monitorPlayersText(latest, theme);

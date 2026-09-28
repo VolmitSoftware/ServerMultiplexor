@@ -1,3 +1,4 @@
+import 'package:multiplexor/models/consumer_profile.dart';
 import 'package:multiplexor/services/interactive_wizard.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_credential.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_create_push.dart';
@@ -10,6 +11,48 @@ import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_models.dar
 import 'package:test/test.dart';
 
 void main() {
+  group('Local monitor targets', () {
+    test('keeps duplicate server names scoped to their owning profile', () {
+      for (final ConsumerProfile profile in ConsumerProfile.values) {
+        expect(localMonitorTarget('${profile.shortName}/demo'), (
+          profile,
+          'demo',
+        ));
+      }
+    });
+
+    test('empty group actions retain their consumer without an instance', () {
+      for (final ConsumerProfile profile in ConsumerProfile.values) {
+        expect(localMonitorTarget('group:new:${profile.shortName}'), (
+          profile,
+          '',
+        ));
+      }
+    });
+
+    test('plain names remain available to scoped action implementations', () {
+      expect(localMonitorTarget('demo'), isNull);
+      expect(localMonitorTarget(''), isNull);
+    });
+
+    test('rejects malformed scoped targets instead of redirecting them', () {
+      for (final String identifier in <String>[
+        'unknown/demo',
+        'forge/',
+        'forge/demo/other',
+        '/demo',
+        'group:new:unknown',
+        'group:new:',
+      ]) {
+        expect(
+          () => localMonitorTarget(identifier),
+          throwsArgumentError,
+          reason: identifier,
+        );
+      }
+    });
+  });
+
   group('Remote transfer destination policy', () {
     test('offers linked, existing, and new targets when available', () {
       expect(

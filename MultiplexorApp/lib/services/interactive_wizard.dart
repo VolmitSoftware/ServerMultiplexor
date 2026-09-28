@@ -22,6 +22,8 @@ import '../utils/user_prompt.dart';
 import 'consumer_service.dart';
 import 'instance_bulk.dart';
 import 'monitor/log_tail.dart';
+import 'monitor/local_monitor_feed.dart';
+import 'monitor/monitor_hitbox.dart';
 import 'monitor/metric_sample.dart';
 import 'monitor/metrics_sampler.dart';
 import 'monitor/monitor_frame_util.dart';
@@ -600,15 +602,35 @@ bool pterodactylCredentialMatchesRole(
   return inferred == null || inferred == expected;
 }
 
+(ConsumerProfile, String)? localMonitorTarget(String identifier) {
+  if (identifier.startsWith(groupNewHitPrefix)) {
+    final ConsumerProfile? profile = ConsumerProfile.parse(
+      identifier.substring(groupNewHitPrefix.length),
+    );
+    if (profile == null) throw ArgumentError.value(identifier, 'identifier');
+    return (profile, '');
+  }
+  final int separator = identifier.indexOf('/');
+  if (separator < 0) return null;
+  final ConsumerProfile? profile = ConsumerProfile.parse(
+    identifier.substring(0, separator),
+  );
+  final String name = identifier.substring(separator + 1);
+  if (profile == null || name.isEmpty || name.contains('/')) {
+    throw ArgumentError.value(identifier, 'identifier');
+  }
+  return (profile, name);
+}
+
 /// Monitor-driven interactive wizard.
 ///
 /// The landing view is the full-screen monitor ([MonitorScreen]): it owns the
 /// dashboard, the charts, the modal cards, and the per-instance quick keys.
 /// The flows behind those cards live here and are injected into the screen,
 /// which runs each one on a suspended terminal — so a card button and a key
-/// reach the same command by the same route. The one hand-off that still ends
-/// a session is the consumer switch, which invalidates the sampler and its
-/// trend store. All background commands run shielded so stray keystrokes
+/// reach the same command by the same route. Local profiles share a dashboard
+/// while keeping separate metrics and trend stores. All background commands
+/// run shielded so stray keystrokes
 /// cannot corrupt the UI.
 class InteractiveWizard {
   InteractiveWizard({
@@ -690,9 +712,7 @@ class InteractiveWizard {
   Future<void> runMonitor() async {
     TermIo.instance.installSignalRestore();
     try {
-      // A consumer switch invalidates the sampler, its trend store, and
-      // every reading either holds, so that one hand-off rebuilds the
-      // session rather than resuming it.
+      // Switching providers rebuilds the corresponding monitoring session.
       while (await _monitorSession()) {}
     } on PromptInputUnavailable catch (e) {
       Ui.error('Input stream lost: $e');
@@ -715,10 +735,7 @@ class InteractiveWizard {
 
   // ─── Monitor ─────────────────────────────────────────────────────────
 
-  /// One monitor session, against whichever consumer is active when it
-  /// starts. Returns true when the caller should build a fresh session:
-  /// the user switched consumers, so every sample taken so far — and the
-  /// trend directory they were written to — belongs to the old profile.
+  /// Returns true when switching providers requires a fresh session.
   Future<bool> _monitorSession() async {
     if (_monitorView == MonitorView.remote) {
       return _remoteMonitorSession();
@@ -727,94 +744,123 @@ class InteractiveWizard {
   }
 
   Future<bool> _localMonitorSession() async {
-    // The sampler drops the lock and isolation columns — they are workspace
-    // facts, not readings — but the modal card needs them, and asking for
-    // them separately would mean a second capture per sweep. So the feed is
-    // tee'd on the way past: one `runtime metrics` call, samples to the
-    // sampler and flags to the snapshot.
-    Map<String, InstanceFlags> flags = const <String, InstanceFlags>{};
-    List<WizardNetwork> networks = const <WizardNetwork>[];
-    Future<String> captureMetrics() async {
-      final String raw = await _captureMetrics();
-      flags = metricsTsvFlagsByInstance(raw);
-      return raw;
-    }
-
-    final MetricsSampler sampler = MetricsSampler(
-      captureMetrics: captureMetrics,
-      store: await _trendStore(),
-      ringCapacity: _localTrendCapacity,
-    );
-    // Swept and seeded before the screen opens so the first frame carries
-    // both live readings and whatever history the last session left behind.
-    await Ui.spin('Loading servers', () async {
-      await sampler.sweep();
-      await sampler.compactStore(sampler.instances);
-      await sampler.seedFromStore(sampler.instances, window: _trendSeedWindow);
-    });
-
-    final MonitorScreen screen = MonitorScreen(
-      update: _updater,
-      sampler: sampler,
-      theme: MonitorTheme.detect(),
-      loadSnapshot: () async {
-        bool topologyStale = false;
-        if (_activeConsumer() == ConsumerProfile.plugin) {
+    final Map<ConsumerProfile, PassthroughService> sources =
+        <ConsumerProfile, PassthroughService>{
+          for (final ConsumerProfile profile in ConsumerProfile.values)
+            profile: _commandsForConsumer(profile),
+        };
+    try {
+      final Map<ConsumerProfile, TrendStore> stores =
+          <ConsumerProfile, TrendStore>{};
+      for (final ConsumerProfile profile in ConsumerProfile.values) {
+        final String? root = await sources[profile]!.captureStdoutLine(<String>[
+          'consumer',
+          'path',
+        ]);
+        if (root != null && root.trim().isNotEmpty) {
+          stores[profile] = TrendStore(
+            Directory(p.join(root.trim(), 'state', 'trends')),
+          );
+        }
+      }
+      final LocalMonitorFeed feed = LocalMonitorFeed(
+        captureMetrics: (ConsumerProfile profile) async {
+          final CapturedResult result = await sources[profile]!.capture(
+            <String>['runtime', 'metrics'],
+          );
+          if (!result.success) {
+            throw StateError(
+              result.stderr.trim().isEmpty
+                  ? 'Metrics capture failed (exit ${result.exitCode})'
+                  : result.stderr.trim(),
+            );
+          }
+          return result.stdout;
+        },
+        capturePrimary: (ConsumerProfile profile) async {
+          final CapturedResult result = await sources[profile]!.capture(
+            <String>['instance', 'current'],
+          );
+          if (result.exitCode == 1 &&
+              result.stdout.trim().isEmpty &&
+              result.stderr.trim().isEmpty) {
+            return null;
+          }
+          if (!result.success) {
+            throw StateError('Could not read the primary server.');
+          }
+          final String name = result.stdout.trim();
+          return name.isEmpty ? null : name;
+        },
+        stores: stores,
+        ringCapacity: _localTrendCapacity,
+      );
+      await Ui.spin(
+        'Loading servers',
+        () => feed.initialize(window: _trendSeedWindow),
+      );
+      List<WizardNetwork> networks = const <WizardNetwork>[];
+      final MonitorScreen screen = MonitorScreen(
+        update: _updater,
+        sampler: feed,
+        theme: MonitorTheme.detect(),
+        loadSnapshot: () async {
+          bool topologyStale = false;
           try {
-            final CapturedResult result = await passthrough.capture(<String>[
-              'network',
-              'list',
-              '--json',
-            ]);
-            if (result.exitCode != 0) {
-              topologyStale = true;
-            } else {
+            final CapturedResult result = await sources[ConsumerProfile.plugin]!
+                .capture(<String>['network', 'list', '--json']);
+            if (result.success) {
               networks = WizardNetwork.parseList(result.stdout);
+            } else {
+              topologyStale = true;
             }
           } on Exception {
             topologyStale = true;
           }
-        }
-        return _monitorSnapshot(
-          sampler,
-          flags,
-          networks: networks,
-          networkTopologyStale: topologyStale,
-        );
-      },
-      suspend: _suspendedFlow,
-      quickAction: _monitorQuickAction,
-      instanceAction: _monitorInstanceAction,
-      workspaceAction: _monitorWorkspaceAction,
-      bulkAction:
-          (
-            List<String> instances,
-            InstanceBulkAction? action,
-            MonitorSnapshot snapshot,
-          ) => _monitorSelectionAction(instances, action, snapshot),
-      readLogTail: readLogTail,
-      refreshImmediately: false,
-    );
-
-    while (true) {
-      final MonitorResult result = await screen.run();
-      switch (result) {
-        case MonitorUpdateRequested():
-          if (await _monitorFlowChanged(_updateApplication)) return false;
-        case MonitorQuit():
-          return false;
-        case MonitorSwitchView():
-          _monitorView = _monitorView == MonitorView.local
-              ? MonitorView.remote
-              : MonitorView.local;
-          return true;
-        case MonitorSwitchConsumer():
-          // Only an actual profile change invalidates this session. Backing
-          // out of the picker, or re-picking the profile already in use,
-          // leaves the sampler and its trend directory correct.
-          if (await _monitorFlowChanged(_switchConsumer)) {
+          return feed.snapshot(
+            networks: <MonitorNetworkGroup>[
+              for (final WizardNetwork network in networks)
+                network.monitorGroup,
+            ],
+            advertisedEndpoints: <String, String>{
+              for (final WizardNetwork network in networks)
+                network.proxy: network.address,
+            },
+            networkTopologyStale: topologyStale,
+          );
+        },
+        suspend: _suspendedFlow,
+        createGroup: (ConsumerProfile profile) =>
+            _withConsumer(profile, _createInstance),
+        quickAction: _monitorQuickAction,
+        instanceAction: _monitorInstanceAction,
+        workspaceAction: _monitorWorkspaceAction,
+        bulkAction:
+            (
+              List<String> instances,
+              InstanceBulkAction? action,
+              MonitorSnapshot snapshot,
+            ) => _monitorSelectionAction(instances, action, snapshot),
+        readLogTail: readLogTail,
+        refreshImmediately: false,
+      );
+      while (true) {
+        final MonitorResult result = await screen.run();
+        switch (result) {
+          case MonitorUpdateRequested():
+            if (await _monitorFlowChanged(_updateApplication)) return false;
+          case MonitorQuit():
+            return false;
+          case MonitorSwitchView():
+            _monitorView = MonitorView.remote;
             return true;
-          }
+          case MonitorSwitchConsumer():
+            continue;
+        }
+      }
+    } finally {
+      for (final PassthroughService source in sources.values) {
+        source.disposeRcon();
       }
     }
   }
@@ -1071,6 +1117,14 @@ class InteractiveWizard {
       await _remoteQuickAction(instance, action);
       return;
     }
+    final (ConsumerProfile, String)? target = localMonitorTarget(instance);
+    if (target != null) {
+      await _withConsumer(
+        target.$1,
+        () => _monitorQuickAction(target.$2, action),
+      );
+      return;
+    }
     switch (action) {
       case MonitorAction.restart:
         await _quickRestart(instance);
@@ -1091,6 +1145,7 @@ class InteractiveWizard {
       case MonitorAction.workspaceCard:
       case MonitorAction.update:
       case MonitorAction.toggleSelection:
+      case MonitorAction.setPrimary:
       case MonitorAction.selectAll:
       case MonitorAction.clearSelection:
       case MonitorAction.switchView:
@@ -1120,6 +1175,14 @@ class InteractiveWizard {
   ) async {
     if (_monitorView == MonitorView.remote) {
       await _remoteInstanceAction(name, action);
+      return;
+    }
+    final (ConsumerProfile, String)? target = localMonitorTarget(name);
+    if (target != null) {
+      await _withConsumer(
+        target.$1,
+        () => _monitorInstanceAction(target.$2, action),
+      );
       return;
     }
     switch (action) {
@@ -1214,6 +1277,18 @@ class InteractiveWizard {
       await _remoteWorkspaceAction(action, selectedIdentifier);
       return;
     }
+    final (ConsumerProfile, String)? target = localMonitorTarget(
+      selectedIdentifier ?? '',
+    );
+    if (target != null) {
+      await _withConsumer(
+        action == WorkspaceModalAction.networks
+            ? ConsumerProfile.plugin
+            : target.$1,
+        () => _monitorWorkspaceAction(action, target.$2),
+      );
+      return;
+    }
     switch (action) {
       case WorkspaceModalAction.diagnostics:
         await _shellRun(<String>['doctor']);
@@ -1301,6 +1376,7 @@ class InteractiveWizard {
       case MonitorAction.buildMenu:
       case MonitorAction.workspaceCard:
       case MonitorAction.toggleSelection:
+      case MonitorAction.setPrimary:
       case MonitorAction.update:
       case MonitorAction.selectAll:
       case MonitorAction.clearSelection:
@@ -4294,74 +4370,6 @@ class InteractiveWizard {
     }
   }
 
-  Future<String> _captureMetrics() async {
-    final CapturedResult result = await passthrough.capture(<String>[
-      'runtime',
-      'metrics',
-    ]);
-    if (!result.success) {
-      throw StateError(
-        result.stderr.trim().isEmpty
-            ? 'Local metrics capture failed (exit ${result.exitCode})'
-            : result.stderr.trim(),
-      );
-    }
-    return result.stdout;
-  }
-
-  /// Assembles the workspace view around the rings the sampler already
-  /// holds. Capturing metrics is the sampler's job; this only adds the
-  /// workspace facts the frame needs on top of them — [flags] among them,
-  /// tee'd off the same capture the sampler parsed.
-  Future<MonitorSnapshot> _monitorSnapshot(
-    MetricsSampler sampler,
-    Map<String, InstanceFlags> flags, {
-    List<WizardNetwork> networks = const <WizardNetwork>[],
-    bool networkTopologyStale = false,
-  }) async {
-    final MonitorNetworkTree tree = MonitorNetworkTree.project(
-      sampler.instances,
-      <MonitorNetworkGroup>[
-        for (final WizardNetwork network in networks) network.monitorGroup,
-      ],
-    );
-    final List<String> instances = tree.instances;
-    return MonitorSnapshot(
-      instances: instances,
-      captureError: sampler.lastError,
-      lastSuccessfulCapture: sampler.lastSuccessfulSweep,
-      networkRows: tree.rows,
-      networkTopologyStale: networkTopologyStale,
-      history: <String, List<MetricSample>>{
-        for (final String instance in instances)
-          instance: sampler.history(instance),
-      },
-      flags: flags,
-      consumerName: _activeConsumer().shortName,
-      activeInstance: await _activeInstance(),
-      advertisedEndpoints: <String, String>{
-        for (final WizardNetwork network in networks)
-          network.proxy: network.address,
-      },
-      view: _monitorView,
-    );
-  }
-
-  /// The active consumer's trend directory: `state/trends`, the sibling of
-  /// the `state/runtime` folder every metrics row's `logPath` points into.
-  /// Null when the consumer root cannot be resolved, in which case the
-  /// session runs on in-memory history alone.
-  Future<TrendStore?> _trendStore() async {
-    final String? root = await Ui.shielded(
-      () => passthrough.captureStdoutLine(<String>['consumer', 'path']),
-    );
-    final String trimmed = (root ?? '').trim();
-    if (trimmed.isEmpty) {
-      return null;
-    }
-    return TrendStore(Directory(p.join(trimmed, 'state', 'trends')));
-  }
-
   // ─── Instance actions ────────────────────────────────────────────────
 
   Future<void> _quickRestart(String name) async {
@@ -5048,31 +5056,6 @@ class InteractiveWizard {
     await _shellRun(<String>['instance', 'port', name, '$port']);
   }
 
-  /// Picks a consumer profile and points the session at it. Returns whether
-  /// the active profile actually changed, so a caller holding per-profile
-  /// state (the monitor's sampler and trend store) only rebuilds when it has
-  /// to. Escaping the picker throws and never reaches the return.
-  Future<bool> _switchConsumer() async {
-    final ConsumerProfile before = _activeConsumer();
-    final List<String> options = consumerService
-        .listProfiles()
-        .map((ConsumerProfile e) => e.shortName)
-        .toList(growable: false);
-    final int initialIndex = options
-        .indexOf(before.shortName)
-        .clamp(0, options.isEmpty ? 0 : options.length - 1);
-    final String selected = await Ui.pick(
-      'Consumer profile',
-      options,
-      initialIndex: initialIndex,
-    );
-    await _shellRun(<String>['consumer', 'use', selected]);
-    final ConsumerProfile profile = ConsumerProfile.parse(selected)!;
-    _consumerOverride = profile;
-    passthrough.setConsumerOverride(profile);
-    return profile != before;
-  }
-
   // ─── Build & tuning ──────────────────────────────────────────────────
 
   Future<void> _buildAndTuningMenu() async {
@@ -5529,6 +5512,22 @@ class InteractiveWizard {
     await _shellRun(<String>[command, 'sync', '--all']);
   }
 
+  Future<void> _withConsumer(
+    ConsumerProfile profile,
+    Future<void> Function() action,
+  ) async {
+    final ConsumerProfile? previous = _consumerOverride;
+    final ConsumerProfile previousCommands = passthrough.effectiveConsumer;
+    _consumerOverride = profile;
+    passthrough.setConsumerOverride(profile);
+    try {
+      await action();
+    } finally {
+      _consumerOverride = previous;
+      passthrough.setConsumerOverride(previousCommands);
+    }
+  }
+
   ConsumerProfile _activeConsumer() {
     return _consumerOverride ??
         requestedConsumer ??
@@ -5594,15 +5593,6 @@ class InteractiveWizard {
         .map((String line) => line.replaceAll(' (active)', '').trim())
         .where((String line) => line.isNotEmpty)
         .toList(growable: false);
-  }
-
-  Future<String?> _activeInstance() async {
-    final String? line = await passthrough.captureStdoutLine(<String>[
-      'instance',
-      'current',
-    ]);
-    final String cleaned = (line ?? '').trim();
-    return cleaned.isEmpty ? null : cleaned;
   }
 
   Future<_RuntimeSettings> _runtimeSettings({

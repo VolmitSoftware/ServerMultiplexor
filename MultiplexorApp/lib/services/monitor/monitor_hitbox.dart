@@ -7,6 +7,7 @@ library;
 /// The kind of interactive region a [MonitorHitbox] represents.
 enum MonitorHitKind {
   serverRow,
+  listArea,
   checkbox,
   button,
   chart,
@@ -21,6 +22,8 @@ enum MonitorHitKind {
 const String serverHitPrefix = 'server:';
 
 const String serverCheckHitPrefix = 'check:';
+const String groupNewHitPrefix = 'group:new:';
+const String primaryHitPrefix = 'primary:';
 const String selectAllHitId = 'selection:all';
 const String clearSelectionHitId = 'selection:clear';
 const String bulkStartHitId = 'bulk:start';
@@ -87,7 +90,6 @@ const List<String> monitorBarHitIds = <String>[
   wsNewHitId,
   wsBuildsHitId,
   wsTuningHitId,
-  wsConsumerHitId,
   wsConsolesHitId,
   wsConnectHitId,
   wsMoreHitId,

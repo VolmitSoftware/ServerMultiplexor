@@ -12,6 +12,7 @@
 library;
 
 import '../../utils/duration_format.dart';
+import '../../models/consumer_profile.dart';
 import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
@@ -64,6 +65,9 @@ class MonitorSnapshot {
     this.lastSuccessfulCapture,
     this.networkRows = const <String, MonitorNetworkRow>{},
     this.networkTopologyStale = false,
+    this.groupedLocal = false,
+    this.instanceConsumers = const <String, ConsumerProfile>{},
+    this.primaryInstances = const <String>{},
   });
 
   /// Instance names in display order.
@@ -73,6 +77,19 @@ class MonitorSnapshot {
   final DateTime? lastSuccessfulCapture;
   final Map<String, MonitorNetworkRow> networkRows;
   final bool networkTopologyStale;
+  final bool groupedLocal;
+  final Map<String, ConsumerProfile> instanceConsumers;
+  final Set<String> primaryInstances;
+
+  ConsumerProfile consumerFor(String instance) =>
+      instanceConsumers[instance] ??
+      ConsumerProfile.parse(consumerName) ??
+      ConsumerProfile.plugin;
+
+  bool isPrimary(String instance) =>
+      primaryInstances.contains(instance) || activeInstance == instance;
+
+  int? portFor(String instance) => latestFor(instance)?.port;
 
   /// Metric history per instance, oldest sample first. An instance with no
   /// entry (or an empty list) has no readings yet and renders as such —

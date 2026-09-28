@@ -1114,7 +1114,6 @@ void main() {
       expectChip(rows, frame.hitboxes, 22, 'ws:new', '+ NEW');
       expectChip(rows, frame.hitboxes, 22, 'ws:builds', 'BUILDS');
       expectChip(rows, frame.hitboxes, 22, 'ws:tuning', 'TUNING');
-      expectChip(rows, frame.hitboxes, 22, 'ws:consumer', 'CONSUMER');
       expectChip(rows, frame.hitboxes, 22, 'ws:consoles', 'CONSOLES');
       expectChip(rows, frame.hitboxes, 22, 'ws:more', 'MORE');
     });

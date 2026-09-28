@@ -17,6 +17,7 @@ import '../instance_bulk.dart';
 import '../runtime_state.dart';
 import 'metric_sample.dart';
 import 'monitor_frame_util.dart';
+import 'monitor_groups.dart';
 import 'monitor_hitbox.dart';
 import 'monitor_landing.dart';
 import 'monitor_selection.dart';
@@ -50,7 +51,7 @@ const String _hintSeparator = ' · ';
 /// a terminal wide enough for all of it.
 const String _localFooterHints =
     '[tab] local/remote · [enter] open · Space check · a all · x clear · d detail · Shift+R repaint · S stop · X kill · O console · '
-    'g consoles · n new · b build · w workspace · c consumer · r range · '
+    'g consoles · n new · b build · w workspace · r range · '
     'q quit';
 
 /// Remote replaces Local build and consumer shortcuts with its fleet bulk
@@ -71,7 +72,7 @@ const String _remoteFooterHints =
 /// shortcut costs a keystroke, while giving up `w` would leave the card
 /// reachable by mouse alone.
 const String _localFooterDropOrder =
-    'b build,c consumer,n new,g consoles,O console,X kill,S stop,'
+    'b build,n new,g consoles,O console,X kill,S stop,'
     'r range,w workspace,[tab] local/remote,x clear,a all,Space check';
 
 const String _remoteFooterDropOrder =
@@ -137,7 +138,6 @@ const List<ButtonSpec> _workspaceButtons = <ButtonSpec>[
   newInstanceButton,
   ButtonSpec(id: wsBuildsHitId, label: 'BUILDS'),
   ButtonSpec(id: wsTuningHitId, label: 'TUNING'),
-  ButtonSpec(id: wsConsumerHitId, label: 'CONSUMER'),
   ButtonSpec(id: wsConsolesHitId, label: 'CONSOLES'),
   ButtonSpec(id: wsMoreHitId, label: 'MORE'),
 ];
@@ -189,6 +189,7 @@ MonitorFrame buildMonitorFrame({
   String? pressedId,
   String? updateLabel,
   bool updateChecking = false,
+  String? focusedGroup,
 }) {
   if (columns < monitorMinColumns || lines < monitorMinLines) {
     return MonitorFrame(
@@ -287,21 +288,44 @@ MonitorFrame buildMonitorFrame({
     if (cardRows < _idleCardRows) {
       cardRows = 0;
     }
+    if (snapshot.groupedLocal) {
+      int spare = bodyRows - localMonitorNaturalRows(snapshot);
+      int cardFloor = informationFloor;
+      cardRows = focusedGroup != null || spare < cardFloor
+          ? 0
+          : selectedLive
+          ? _minInt(spare, _maxLiveCardRows)
+          : cardFloor;
+    }
     final int listRows = bodyRows - cardRows;
 
-    final MonitorPanelRender list = renderServerList(
-      snapshot: snapshot,
-      rollup: rollup,
-      selectedIndex: selected,
-      rows: listRows,
-      width: columns,
-      topRow: bodyTop,
-      theme: theme,
-      windowStart: now.subtract(range),
-      windowEnd: now,
-      checkedInstances: checked,
-      hoveredId: hoveredId,
-    );
+    final MonitorPanelRender list = snapshot.groupedLocal
+        ? renderGroupedServerList(
+            snapshot: snapshot,
+            selectedIndex: selected,
+            rows: listRows,
+            width: columns,
+            topRow: bodyTop,
+            theme: theme,
+            windowStart: now.subtract(range),
+            windowEnd: now,
+            checkedInstances: checked,
+            hoveredId: hoveredId,
+            focusedGroup: focusedGroup,
+          )
+        : renderServerList(
+            snapshot: snapshot,
+            rollup: rollup,
+            selectedIndex: selected,
+            rows: listRows,
+            width: columns,
+            topRow: bodyTop,
+            theme: theme,
+            windowStart: now.subtract(range),
+            windowEnd: now,
+            checkedInstances: checked,
+            hoveredId: hoveredId,
+          );
     rows.addAll(list.rows);
     hitboxes.addAll(list.hitboxes);
 
@@ -326,7 +350,11 @@ MonitorFrame buildMonitorFrame({
         ? ''
         : ' ${checked.length} SELECTED  ';
     final ButtonRowRender bar = layoutButtonRow(
-      buttons: checked.isEmpty
+      buttons: snapshot.groupedLocal && focusedGroup != null && checked.isEmpty
+          ? <ButtonSpec>[
+              ButtonSpec(id: '$groupNewHitPrefix$focusedGroup', label: '+ NEW'),
+            ]
+          : checked.isEmpty
           ? _selectionButtons(
               selectedLatest,
               operationBlockReason: operationBlockReason,
@@ -347,6 +375,21 @@ MonitorFrame buildMonitorFrame({
     hitboxes.addAll(
       _buttonHits(bar.spans, rows.length - 1, colOffset: selectionLabel.length),
     );
+  } else if (snapshot.groupedLocal) {
+    MonitorPanelRender body = renderGroupedServerList(
+      snapshot: snapshot,
+      selectedIndex: -1,
+      rows: bodyRows,
+      width: columns,
+      topRow: bodyTop,
+      theme: theme,
+      windowStart: now.subtract(range),
+      windowEnd: now,
+      focusedGroup: focusedGroup,
+      hoveredId: hoveredId,
+    );
+    rows.addAll(body.rows);
+    hitboxes.addAll(body.hitboxes);
   } else {
     final MonitorPanelRender body = renderEmptyBody(
       rows: bodyRows,
@@ -384,6 +427,7 @@ MonitorFrame buildMonitorFrame({
     hintsWidth,
     snapshot.view,
     hasChecked: checked.isNotEmpty,
+    groupedLocal: snapshot.groupedLocal,
   );
   String footer = theme.paint(Ansi.clipVisible(hints, hintsWidth), theme.faint);
   if (buttonLabel != null) {
@@ -483,10 +527,20 @@ List<MonitorHitbox> _buttonHits(
 /// The footer hint row for a [columns]-wide frame: as many of
 /// the provider's hints as fit, dropped whole and highest rank first, so
 /// the row never ends mid-hint and never hides `q quit`.
-String _footerHints(int columns, MonitorView view, {bool hasChecked = false}) {
+String _footerHints(
+  int columns,
+  MonitorView view, {
+  bool hasChecked = false,
+  bool groupedLocal = false,
+}) {
   final bool remote = view == MonitorView.remote;
   String hints = remote ? _remoteFooterHints : _localFooterHints;
   String dropOrder = remote ? _remoteFooterDropOrder : _localFooterDropOrder;
+  if (groupedLocal) {
+    hints = hints.replaceFirst('Space check', 'Space primary · v check');
+    dropOrder = dropOrder.replaceFirst(',Space check', '');
+    dropOrder = '$dropOrder,d detail,Shift+R repaint';
+  }
   if (hasChecked) {
     hints = hints.replaceFirst(
       remote ? 'b bulk' : 'b build',
@@ -539,7 +593,7 @@ List<String> _headerPanel({
   final String facts = snapshot.captureError != null
       ? 'METRICS ${snapshot.lastSuccessfulCapture == null ? 'UNAVAILABLE' : 'STALE'} · retrying automatically · ${snapshot.captureError}'
       : 'VIEW ${snapshot.view.name.toUpperCase()} · '
-            'ACTIVE ${snapshot.activeInstance == null ? 'none' : snapshot.displayNameFor(snapshot.activeInstance!)} · '
+            '${snapshot.groupedLocal ? 'ALL PROFILES' : 'ACTIVE ${snapshot.activeInstance == null ? 'none' : snapshot.displayNameFor(snapshot.activeInstance!)}'} · '
             'RANGE ${rangeLabel(range)} · '
             '$instances SERVERS';
 
@@ -563,7 +617,7 @@ List<String> _headerPanel({
   );
   final int providerBudget = badgeBudget - fixedBadgeWidth;
   final String provider = Ansi.clipVisible(
-    snapshot.consumerName,
+    snapshot.groupedLocal ? 'Local' : snapshot.consumerName,
     providerBudget < 0 ? 0 : providerBudget,
   );
   final String badgePrefix =
@@ -626,3 +680,5 @@ List<MonitorHitbox> _headerActionHitboxes(
   }
   return hitboxes;
 }
+
+int _minInt(int left, int right) => left < right ? left : right;

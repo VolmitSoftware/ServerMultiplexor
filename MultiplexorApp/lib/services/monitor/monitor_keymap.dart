@@ -27,6 +27,7 @@ enum MonitorAction {
   workspaceCard,
   update,
   toggleSelection,
+  setPrimary,
   selectAll,
   clearSelection,
   switchView,
@@ -85,7 +86,10 @@ Duration nextRange(Duration current) {
 /// actions carried over from the legacy dashboard, and their lowercase
 /// counterparts must never trigger them by a slipped shift key. Shift+R
 /// repaints the current screen; plain `r` still cycles the chart range.
-MonitorAction monitorActionForEvent(TermEvent event) {
+MonitorAction monitorActionForEvent(
+  TermEvent event, {
+  bool groupedLocal = false,
+}) {
   switch (event.kind) {
     case TermEventKind.arrowUp:
     case TermEventKind.wheelUp:
@@ -102,6 +106,9 @@ MonitorAction monitorActionForEvent(TermEvent event) {
     case TermEventKind.tab:
       return MonitorAction.switchView;
     case TermEventKind.char:
+      if (groupedLocal && event.char == ' ') {
+        return MonitorAction.setPrimary;
+      }
       return _charAction(event.char);
     case TermEventKind.backspace:
     case TermEventKind.arrowLeft:
@@ -122,6 +129,7 @@ MonitorAction monitorActionForEvent(TermEvent event) {
 
 MonitorAction _charAction(String char) => switch (char) {
   ' ' => MonitorAction.toggleSelection,
+  'v' => MonitorAction.toggleSelection,
   'a' => MonitorAction.selectAll,
   'x' => MonitorAction.clearSelection,
   'd' => MonitorAction.detail,

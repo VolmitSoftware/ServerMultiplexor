@@ -82,12 +82,28 @@ void main() {
           MonitorAction.toggleSelection,
         );
         expect(monitorActionForEvent(typed('a')), MonitorAction.selectAll);
+        expect(
+          monitorActionForEvent(typed('v')),
+          MonitorAction.toggleSelection,
+        );
         expect(monitorActionForEvent(typed('x')), MonitorAction.clearSelection);
         expect(monitorActionForEvent(typed('b')), MonitorAction.buildMenu);
         expect(monitorActionForEvent(typed('A')), MonitorAction.none);
         expect(monitorActionForEvent(typed('X')), MonitorAction.kill);
       },
     );
+
+    test('Space sets primary only in the grouped local view', () {
+      expect(
+        monitorActionForEvent(typed(' '), groupedLocal: true),
+        MonitorAction.setPrimary,
+      );
+      expect(monitorActionForEvent(typed(' ')), MonitorAction.toggleSelection);
+      expect(
+        monitorActionForEvent(typed('v'), groupedLocal: true),
+        MonitorAction.toggleSelection,
+      );
+    });
 
     test('maps w to the workspace card behind the WORKSPACES header', () {
       expect(monitorActionForEvent(typed('w')), MonitorAction.workspaceCard);

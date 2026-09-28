@@ -12,6 +12,7 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import '../../models/consumer_profile.dart';
 import '../../utils/terminal/frame_patch.dart';
 import '../../utils/terminal/term_events.dart';
 import '../../utils/terminal/term_io.dart';
@@ -21,6 +22,7 @@ import 'metric_sample.dart';
 import 'metrics_sampler.dart';
 import 'monitor_detail_model.dart';
 import 'monitor_frame_util.dart';
+import 'monitor_groups.dart';
 import 'monitor_hitbox.dart';
 import 'monitor_keymap.dart';
 import 'monitor_modal.dart';
@@ -152,6 +154,20 @@ WorkspaceModalAction monitorBuildShortcutAction(MonitorView view) =>
     ? WorkspaceModalAction.bulkActions
     : WorkspaceModalAction.buildTuning;
 
+String moveLocalMonitorFocus({
+  required MonitorSnapshot snapshot,
+  required String? focusedGroup,
+  required String? selectedInstance,
+  required int delta,
+}) {
+  final List<String> targets = localMonitorFocusTargets(snapshot);
+  final String current = focusedGroup != null
+      ? '$groupNewHitPrefix$focusedGroup'
+      : '$serverHitPrefix$selectedInstance';
+  final int index = targets.indexOf(current);
+  return targets[(index < 0 ? 0 : index + delta).clamp(0, targets.length - 1)];
+}
+
 /// Why the monitor screen stopped: either the user left it, or it is
 /// handing off to a flow the dashboard itself does not implement.
 ///
@@ -210,6 +226,7 @@ class MonitorScreen {
     required this.workspaceAction,
     required this.readLogTail,
     this.bulkAction,
+    this.createGroup,
     Duration sweepInterval = _localSweepInterval,
     this.sweepIntervalProvider,
     this.refreshImmediately = true,
@@ -217,7 +234,7 @@ class MonitorScreen {
     this.update,
   }) : _sweepInterval = sweepInterval;
 
-  final MetricsSampler sampler;
+  final MonitorMetricsSource sampler;
   final MonitorUpdate? update;
   final MonitorTheme theme;
   final Future<MonitorSnapshot> Function() loadSnapshot;
@@ -232,6 +249,7 @@ class MonitorScreen {
   )
   workspaceAction;
   final Future<List<String>> Function(String logPath, int maxLines) readLogTail;
+  final Future<void> Function(ConsumerProfile consumer)? createGroup;
   final Future<void> Function(
     List<String> instances,
     InstanceBulkAction? action,
@@ -292,6 +310,7 @@ class MonitorScreen {
   String? _modalSelectedId;
 
   int _selectedIndex = 0;
+  String? _focusedGroup;
   final MonitorSelection _selection = MonitorSelection();
   Duration _range = monitorRanges.first;
   bool _forceFull = true;
@@ -319,6 +338,7 @@ class MonitorScreen {
   /// True while a sweep-and-reload is in flight, so overlapping refreshes
   /// cannot interleave and publish an older snapshot over a newer one.
   bool _refreshing = false;
+  Future<void>? _refreshTask;
 
   /// Takes over the terminal, runs the dashboard, and gives the terminal
   /// back — on every path out, including a thrown flow.
@@ -350,9 +370,13 @@ class MonitorScreen {
       // mode, SGR, the signal watch), so a failure while stepping off the
       // alternate screen must not be allowed to skip it.
       try {
-        _leaveScreen(io);
+        try {
+          _leaveScreen(io);
+        } finally {
+          io.restoreTerminal();
+        }
       } finally {
-        io.restoreTerminal();
+        await _refreshTask;
       }
     }
   }
@@ -505,6 +529,7 @@ class MonitorScreen {
             snapshot: _snapshot,
             checkedInstances: _selection.checked,
             selectedIndex: _selectedIndex,
+            focusedGroup: _focusedGroup,
             frame: activityFrame,
             columns: columns,
             lines: lines,
@@ -600,7 +625,7 @@ class MonitorScreen {
       locked: flags.locked,
       isolated: flags.isolated,
       remote: _snapshot.view == MonitorView.remote,
-      networks: _snapshot.consumerName == 'plugin',
+      networks: _groupedLocal || _snapshot.consumerName == 'plugin',
       operationBlockReason: instance.isEmpty
           ? null
           : _snapshot.operationBlockReasonFor(instance),
@@ -632,10 +657,21 @@ class MonitorScreen {
   /// The server-row hitboxes from the most recently rendered frame — the
   /// only kind the main view has to hit-test against today.
   List<MonitorHitbox> _hits() => _hitboxes
-      .where((MonitorHitbox hitbox) => hitbox.kind == MonitorHitKind.serverRow)
+      .where(
+        (MonitorHitbox hitbox) =>
+            hitbox.kind == MonitorHitKind.serverRow ||
+            hitbox.kind == MonitorHitKind.listArea ||
+            _groupedLocal && hitbox.id.startsWith(groupNewHitPrefix),
+      )
       .toList(growable: false);
 
+  bool get _groupedLocal =>
+      _snapshot.view == MonitorView.local && _snapshot.groupedLocal;
+
   String? get _selectedInstance {
+    if (_groupedLocal && _focusedGroup != null) {
+      return null;
+    }
     final List<String> instances = _snapshot.instances;
     if (instances.isEmpty ||
         _selectedIndex < 0 ||
@@ -650,6 +686,9 @@ class MonitorScreen {
     final int count = _snapshot.instances.length;
     if (count == 0) {
       _selectedIndex = 0;
+      if (_groupedLocal) {
+        _focusedGroup ??= ConsumerProfile.plugin.shortName;
+      }
       return;
     }
     if (_selectedIndex < 0) {
@@ -660,6 +699,23 @@ class MonitorScreen {
   }
 
   void _moveSelection(int delta) {
+    if (_groupedLocal && !_detailMode) {
+      final String target = moveLocalMonitorFocus(
+        snapshot: _snapshot,
+        focusedGroup: _focusedGroup,
+        selectedInstance: _selectedInstance,
+        delta: delta,
+      );
+      if (target.startsWith(groupNewHitPrefix)) {
+        _focusedGroup = target.substring(groupNewHitPrefix.length);
+      } else {
+        _focusedGroup = null;
+        _selectedIndex = _snapshot.instances.indexOf(
+          target.substring(serverHitPrefix.length),
+        );
+      }
+      return;
+    }
     final int count = _snapshot.instances.length;
     if (count == 0) {
       return;
@@ -705,7 +761,7 @@ class MonitorScreen {
       return;
     }
     _refreshing = true;
-    unawaited(_sweepAndReload());
+    _refreshTask = _sweepAndReload();
   }
 
   Future<void> _sweepAndReload() async {
@@ -772,7 +828,10 @@ class MonitorScreen {
 
   Future<MonitorResult?> _handleEvent(TermEvent event) async {
     _clampSelection();
-    final MonitorAction action = monitorActionForEvent(event);
+    final MonitorAction action = monitorActionForEvent(
+      event,
+      groupedLocal: _groupedLocal,
+    );
     if (action == MonitorAction.repaint) {
       // Repaint precedes modal hotkeys, which otherwise accept uppercase
       // letters and could treat Shift+R as the modal's restart shortcut.
@@ -870,7 +929,9 @@ class MonitorScreen {
         return _activateModal(modal, id);
       }
     }
-    return _handleAction(monitorActionForEvent(event));
+    return _handleAction(
+      monitorActionForEvent(event, groupedLocal: _groupedLocal),
+    );
   }
 
   List<String> _modalButtonIds() => _hitboxes
@@ -921,13 +982,22 @@ class MonitorScreen {
     if (!_detailMode) {
       final List<MonitorHitbox> hits = _hits();
       if (hits.isNotEmpty) {
-        final MonitorHitbox first = hits.first;
+        int colStart = hits.first.colStart;
+        int colEnd = hits.first.colEnd;
+        int rowStart = hits.first.row;
+        int rowEnd = hits.first.row;
+        for (final MonitorHitbox hit in hits.skip(1)) {
+          if (hit.colStart < colStart) colStart = hit.colStart;
+          if (hit.colEnd > colEnd) colEnd = hit.colEnd;
+          if (hit.row < rowStart) rowStart = hit.row;
+          if (hit.row > rowEnd) rowEnd = hit.row;
+        }
         final int row = event.row - 1;
         final int col = event.col - 1;
-        if (col >= first.colStart &&
-            col < first.colEnd &&
-            row >= first.row - 1 &&
-            row <= hits.last.row + 1) {
+        if (col >= colStart &&
+            col < colEnd &&
+            row >= rowStart - 1 &&
+            row <= rowEnd + 1) {
           _moveSelection(action == MonitorAction.up ? -1 : 1);
           return null;
         }
@@ -954,11 +1024,32 @@ class MonitorScreen {
   /// constants the builders draw their chips from, so this switch and the
   /// bars cannot drift apart on an id.
   Future<MonitorResult?> _activateBase(String id) async {
+    if (_groupedLocal && id.startsWith(groupNewHitPrefix)) {
+      final ConsumerProfile? consumer = ConsumerProfile.parse(
+        id.substring(groupNewHitPrefix.length),
+      );
+      if (consumer != null) {
+        _focusedGroup = consumer.shortName;
+        return _runGroupCreation(consumer);
+      }
+      return null;
+    }
+    if (_groupedLocal && id.startsWith(primaryHitPrefix)) {
+      final String instance = id.substring(primaryHitPrefix.length);
+      final int index = _snapshot.instances.indexOf(instance);
+      if (index >= 0) {
+        _focusedGroup = null;
+        _selectedIndex = index;
+        return _runInstanceAction(InstanceModalAction.makeActive);
+      }
+      return null;
+    }
     if (id.startsWith(serverCheckHitPrefix)) {
       final String instance = id.substring(serverCheckHitPrefix.length);
       final int index = _snapshot.instances.indexOf(instance);
       if (index >= 0) {
         _selection.toggle(instance, _snapshot);
+        _focusedGroup = null;
         _selectedIndex = index;
       }
       return null;
@@ -1003,7 +1094,7 @@ class MonitorScreen {
       case wsConsumerHitId:
         // The one hand-off that still ends the session: a new profile means
         // a new sampler and a new trend store.
-        return const MonitorSwitchConsumer();
+        return _groupedLocal ? null : const MonitorSwitchConsumer();
       case wsConsolesHitId:
         return _runQuickAction(MonitorAction.consolesGrid);
       case wsConnectHitId:
@@ -1027,6 +1118,12 @@ class MonitorScreen {
   void _activateServerRow(String instance) {
     final int index = _snapshot.instances.indexOf(instance);
     if (index < 0) {
+      return;
+    }
+    if (_groupedLocal) {
+      _focusedGroup = null;
+      _selectedIndex = index;
+      _openInstanceModal(instance);
       return;
     }
     if (index == _selectedIndex) {
@@ -1074,10 +1171,7 @@ class MonitorScreen {
           return null;
         }
         _closeModal();
-        final bool invalidated = await _suspended(
-          () => workspaceAction(action, _actionTarget()),
-        );
-        return invalidated ? const MonitorSwitchConsumer() : null;
+        return _runWorkspaceAction(action);
     }
   }
 
@@ -1097,9 +1191,36 @@ class MonitorScreen {
   Future<MonitorResult?> _runWorkspaceAction(
     WorkspaceModalAction action,
   ) async {
+    if (_groupedLocal && action == WorkspaceModalAction.newInstance) {
+      return _runGroupCreation(_creationConsumer());
+    }
     final bool invalidated = await _suspended(
-      () => workspaceAction(action, _actionTarget()),
+      () => workspaceAction(action, _workspaceTarget()),
     );
+    return invalidated ? const MonitorSwitchConsumer() : null;
+  }
+
+  ConsumerProfile _creationConsumer() {
+    final ConsumerProfile? focused = ConsumerProfile.parse(_focusedGroup);
+    if (focused != null) {
+      return focused;
+    }
+    final String? selected = _actionTarget();
+    return selected == null
+        ? ConsumerProfile.plugin
+        : _snapshot.consumerFor(selected);
+  }
+
+  String? _workspaceTarget() => _groupedLocal && _focusedGroup != null
+      ? '$groupNewHitPrefix$_focusedGroup'
+      : _actionTarget();
+
+  Future<MonitorResult?> _runGroupCreation(ConsumerProfile consumer) async {
+    final Future<void> Function(ConsumerProfile)? callback = createGroup;
+    if (callback == null) {
+      return null;
+    }
+    final bool invalidated = await _suspended(() => callback(consumer));
     return invalidated ? const MonitorSwitchConsumer() : null;
   }
 
@@ -1192,6 +1313,9 @@ class MonitorScreen {
         _moveSelection(1);
         return null;
       case MonitorAction.open:
+        if (_groupedLocal && !_detailMode && _focusedGroup != null) {
+          return _runGroupCreation(_creationConsumer());
+        }
         // What `enter` used to hand back to the caller is now a card drawn
         // over this frame: same actions, without leaving the dashboard.
         _openInstanceModal(_actionTarget());
@@ -1205,6 +1329,10 @@ class MonitorScreen {
           _selection.toggle(focused, _snapshot);
         }
         return null;
+      case MonitorAction.setPrimary:
+        return _detailMode
+            ? null
+            : _runInstanceAction(InstanceModalAction.makeActive);
       case MonitorAction.selectAll:
         if (!_detailMode) _selection.toggleAll(_snapshot);
         return null;
@@ -1236,7 +1364,7 @@ class MonitorScreen {
       case MonitorAction.switchView:
         return const MonitorSwitchView();
       case MonitorAction.switchConsumer:
-        return const MonitorSwitchConsumer();
+        return _groupedLocal ? null : const MonitorSwitchConsumer();
       case MonitorAction.cycleRange:
         _range = nextRange(_range);
         return null;
@@ -1279,7 +1407,9 @@ class MonitorScreen {
   }
 
   Future<MonitorResult?> _runQuickAction(MonitorAction action) async {
-    final String? target = _actionTarget();
+    final String? target = action == MonitorAction.consolesGrid
+        ? _workspaceTarget()
+        : _actionTarget();
     // The consoles grid is a workspace-level view, not a per-instance
     // command: it opens with or without a selection, and the name is only a
     // hint about which pane to focus. Every other quick action needs a

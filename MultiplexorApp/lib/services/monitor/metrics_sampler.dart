@@ -11,9 +11,15 @@ library;
 import 'metric_sample.dart';
 import 'trend_store.dart';
 
+abstract interface class MonitorMetricsSource {
+  Future<void> sweep();
+  List<MetricSample> history(String instance);
+  MetricSample? latest(String instance);
+}
+
 /// Samples every managed instance on each [sweep] and keeps a bounded,
 /// oldest-first ring of [MetricSample]s per instance in memory.
-class MetricsSampler {
+class MetricsSampler implements MonitorMetricsSource {
   MetricsSampler({
     required Future<String> Function() captureMetrics,
     TrendStore? store,
@@ -58,6 +64,7 @@ class MetricsSampler {
   /// throws, the error is swallowed, no state changes, and [sweeping] is
   /// still cleared — a broken capture must never take down the dashboard's
   /// event loop.
+  @override
   Future<void> sweep() async {
     if (_sweeping) {
       return;
@@ -187,6 +194,7 @@ class MetricsSampler {
 
   /// This instance's samples, oldest-first. Empty for an instance that has
   /// never been swept or seeded.
+  @override
   List<MetricSample> history(String instance) {
     final List<MetricSample>? ring = _rings[instance];
     if (ring == null) {
@@ -196,6 +204,7 @@ class MetricsSampler {
   }
 
   /// The most recent sample for this instance, or null if it has none.
+  @override
   MetricSample? latest(String instance) {
     final List<MetricSample>? ring = _rings[instance];
     if (ring == null || ring.isEmpty) {

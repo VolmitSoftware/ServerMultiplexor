@@ -42,6 +42,59 @@ void main() {
   );
 
   test(
+    'monitor snapshot lists every group without changing CLI profile',
+    () async {
+      for (final String profile in <String>['plugin', 'forge']) {
+        final ProcessResult create = await run(<String>[
+          '--consumer',
+          profile,
+          'instance',
+          'create',
+          'demo',
+          '--isolated',
+        ]);
+        expect(create.exitCode, 0, reason: '${create.stderr}');
+        final ProcessResult port = await run(<String>[
+          '--consumer',
+          profile,
+          'instance',
+          'port',
+          'demo',
+          profile == 'plugin' ? '25571' : '25572',
+        ]);
+        expect(port.exitCode, 0, reason: '${port.stderr}');
+        final ProcessResult activate = await run(<String>[
+          '--consumer',
+          profile,
+          'instance',
+          'activate',
+          'demo',
+        ]);
+        expect(activate.exitCode, 0, reason: '${activate.stderr}');
+      }
+      final ProcessResult frame = await run(<String>[
+        '--consumer',
+        'fabric',
+        'runtime',
+        'watch',
+        '--once',
+      ]);
+      expect(frame.exitCode, 0, reason: '${frame.stderr}');
+      final String output = frame.stdout.toString();
+      expect(output, contains('Plugins'));
+      expect(output, contains('Fabric'));
+      expect(output, contains('Forge'));
+      expect(output, contains('NeoForge'));
+      expect(output, contains('25571'));
+      expect(output, contains('25572'));
+      expect(output, contains('PRIMARY'));
+      expect(output, contains('Create first server'));
+      expect(output, isNot(contains('\u001b')));
+      expect((await run(<String>['consumer', 'current'])).stdout, 'plugin\n');
+    },
+  );
+
+  test(
     'source executable update commands do not bootstrap or replace anything',
     () async {
       final ProcessResult status = await run(<String>['update', 'status']);

@@ -80,20 +80,50 @@ extension _SelectionWizard on InteractiveWizard {
       );
       return;
     }
-    final ConsumerProfile? profile = ConsumerProfile.parse(
-      snapshot.consumerName,
-    );
-    if (profile == null) {
-      throw StateError('The selected consumer is no longer available.');
+    final Map<ConsumerProfile, List<String>> grouped =
+        <ConsumerProfile, List<String>>{};
+    for (final String identifier in targets) {
+      if (!snapshot.instances.contains(identifier)) {
+        throw StateError('A selected server is no longer available.');
+      }
+      final (ConsumerProfile, String)? target = localMonitorTarget(identifier);
+      final ConsumerProfile profile =
+          target?.$1 ?? snapshot.consumerFor(identifier);
+      grouped
+          .putIfAbsent(profile, () => <String>[])
+          .add(target?.$2 ?? identifier);
     }
-    final PassthroughService scoped = PassthroughService(
-      passthrough.context,
-      consumerService,
-    )..setConsumerOverride(profile);
+    final Map<ConsumerProfile, PassthroughService> sources =
+        <ConsumerProfile, PassthroughService>{
+          for (final ConsumerProfile profile in grouped.keys)
+            profile: _commandsForConsumer(profile),
+        };
     try {
-      await _runLocalSelectionAction(targets, action, profile, scoped);
+      for (final ConsumerProfile profile in grouped.keys) {
+        final Set<String> available = <String>{
+          for (final _InstanceRow row in await _loadInstanceRows(
+            source: sources[profile],
+          ))
+            row.name,
+        };
+        if (grouped[profile]!.any((String name) => !available.contains(name))) {
+          throw StateError(
+            'A selected ${profile.shortName} server is no longer available. Refresh and select again.',
+          );
+        }
+      }
+      for (final ConsumerProfile profile in grouped.keys) {
+        await _runLocalSelectionAction(
+          grouped[profile]!,
+          action,
+          profile,
+          sources[profile]!,
+        );
+      }
     } finally {
-      scoped.disposeRcon();
+      for (final PassthroughService source in sources.values) {
+        source.disposeRcon();
+      }
     }
   }
 
