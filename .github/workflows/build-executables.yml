@@ -168,7 +168,8 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          actual="$("$RUNNER_TEMP/$EXECUTABLE_NAME" version | head -n 1)"
+          output="$("$RUNNER_TEMP/$EXECUTABLE_NAME" version)"
+          actual="${output%%$'\n'*}"
           test "$actual" = "Multiplexor CLI v$BUILD_VERSION"
 
       - name: Smoke-test Windows executable
@@ -176,7 +177,9 @@ jobs:
         shell: pwsh
         run: |
           $outputPath = Join-Path $env:RUNNER_TEMP $env:EXECUTABLE_NAME
-          $actual = (& $outputPath version | Select-Object -First 1)
+          $versionOutput = @(& $outputPath version)
+          if ($LASTEXITCODE -ne 0) { throw "Version command failed with exit code $LASTEXITCODE" }
+          $actual = $versionOutput[0]
           if ($actual -ne "Multiplexor CLI v$env:BUILD_VERSION") {
             throw "Expected Multiplexor CLI v$env:BUILD_VERSION, got $actual"
           }
@@ -431,7 +434,8 @@ jobs:
           trap 'rm -rf "$archive_root"' EXIT
           tar -xzf "$RUNNER_TEMP/$ARCHIVE_NAME" -C "$archive_root"
           test -x "$archive_root/$EXECUTABLE_NAME"
-          actual="$("$archive_root/$EXECUTABLE_NAME" version | head -n 1)"
+          output="$("$archive_root/$EXECUTABLE_NAME" version)"
+          actual="${output%%$'\n'*}"
           test "$actual" = "Multiplexor CLI v$BUILD_VERSION"
 
       - name: Package Windows executable
