@@ -18,6 +18,7 @@ void main() {
   late _NetworkRuntime runtime;
   late File jar;
   late int port;
+  late Set<int> occupiedPorts;
 
   String instancePath(String name) =>
       p.join(consumers.rootFor(ConsumerProfile.plugin), 'instances', name);
@@ -50,22 +51,19 @@ void main() {
     consumers = ConsumerService(context)
       ..ensureConsumerDirs(ConsumerProfile.plugin);
     runtime = _NetworkRuntime();
+    occupiedPorts = <int>{};
     service = NativeCommandService(
       context: context,
       consumerService: consumers,
       recoveryRuntime: runtime,
       javaInspector: (String _) async => 25,
+      portInUse: (int port) async => occupiedPorts.contains(port),
       processExecutor: (String _, List<String> _) async =>
           ProcessResult(0, 1, '', ''),
     );
     jar = File(p.join(root.path, 'velocity.jar'))
       ..writeAsStringSync('fixture jar');
-    final ServerSocket socket = await ServerSocket.bind(
-      InternetAddress.loopbackIPv4,
-      0,
-    );
-    port = socket.port;
-    await socket.close();
+    port = 28010;
     for (final String name in <String>['lobby', 'survival', 'extra']) {
       final Directory directory = Directory(instancePath(name))
         ..createSync(recursive: true);
@@ -150,6 +148,12 @@ void main() {
 
   for (final int players in <int>[0, 7]) {
     test('status reports $players players from the proxy', () async {
+      final ServerSocket server = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      addTearDown(server.close);
+      port = server.port;
       await create(offline: false);
       expect(
         (await command(<String>[
@@ -162,11 +166,6 @@ void main() {
         0,
       );
       runtime.running.addAll(<String>['lobby', 'survival', 'test-proxy']);
-      final ServerSocket server = await ServerSocket.bind(
-        InternetAddress.loopbackIPv4,
-        port,
-      );
-      addTearDown(server.close);
       final List<Socket> clients = <Socket>[];
       addTearDown(() {
         for (final Socket client in clients) {
@@ -208,8 +207,14 @@ void main() {
   }
 
   test(
-    'unreachable proxy reports unavailable players instead of zero',
+    'unresponsive proxy reports unavailable players instead of zero',
     () async {
+      final ServerSocket server = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      addTearDown(server.close);
+      port = server.port;
       await create();
       runtime.running.add('test-proxy');
       final CapturedResult status = await command(<String>[
@@ -230,12 +235,13 @@ void main() {
   );
 
   test('stopped status and configuration checks do not ping players', () async {
-    await create();
     final ServerSocket server = await ServerSocket.bind(
       InternetAddress.loopbackIPv4,
-      port,
+      0,
     );
     addTearDown(server.close);
+    port = server.port;
+    await create();
     int connections = 0;
     server.listen((Socket client) {
       connections++;
@@ -694,22 +700,15 @@ void main() {
 
   test('occupied network port fails without reassignment', () async {
     await create();
-    final ServerSocket socket = await ServerSocket.bind(
-      InternetAddress.loopbackIPv4,
-      port,
-    );
-    try {
-      final CapturedResult result = await command(<String>[
-        'network',
-        'start',
-        'test',
-      ]);
-      expect(result.exitCode, 2, reason: result.stderr);
-      expect(result.stderr, contains('Port $port'));
-      expect(runtime.events, isEmpty);
-    } finally {
-      await socket.close();
-    }
+    occupiedPorts.add(port);
+    final CapturedResult result = await command(<String>[
+      'network',
+      'start',
+      'test',
+    ]);
+    expect(result.exitCode, 2, reason: result.stderr);
+    expect(result.stderr, contains('Port $port'));
+    expect(runtime.events, isEmpty);
   });
 
   test(

@@ -16,6 +16,7 @@ void main() {
   late ConsumerService consumers;
   late int java;
   late List<List<String>> tmuxCalls;
+  late Set<int> occupiedPorts;
 
   Future<CapturedResult> run(List<String> args) =>
       service.execute(args, stream: false);
@@ -34,10 +35,12 @@ void main() {
     consumers = ConsumerService(context);
     java = 25;
     tmuxCalls = <List<String>>[];
+    occupiedPorts = <int>{};
     service = NativeCommandService(
       context: context,
       consumerService: consumers,
       javaInspector: (String _) async => java,
+      portInUse: (int port) async => occupiedPorts.contains(port),
       processExecutor: (String executable, List<String> args) async {
         if (executable == 'tmux') tmuxCalls.add(args);
         return ProcessResult(
@@ -231,12 +234,7 @@ void main() {
       '--isolated',
     ]);
     expect(backend.exitCode, 0, reason: backend.stderr);
-    final ServerSocket reservation = await ServerSocket.bind(
-      InternetAddress.loopbackIPv4,
-      0,
-    );
-    final int port = reservation.port;
-    await reservation.close();
+    const int port = 28010;
     final CapturedResult created = await run(<String>[
       'network',
       'create',
@@ -301,11 +299,7 @@ void main() {
         expect(changed.exitCode, 2);
         expect(changed.stderr, contains('belongs to network'));
       }
-      final ServerSocket occupied = await ServerSocket.bind(
-        InternetAddress.loopbackIPv4,
-        port,
-      );
-      addTearDown(occupied.close);
+      occupiedPorts.add(port);
       final CapturedResult started = await run(<String>[
         'runtime',
         'start',

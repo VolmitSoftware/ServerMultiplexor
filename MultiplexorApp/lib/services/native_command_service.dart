@@ -65,12 +65,14 @@ class NativeCommandService {
     RecoveryRuntime? recoveryRuntime,
     Future<ProcessResult> Function(String, List<String>)? processExecutor,
     Future<int> Function(String)? javaInspector,
+    Future<bool> Function(int)? portInUse,
     this.contentResolverFactory,
     this.gameplayHarnessFactory,
     this.sessionHostLauncher,
   }) : _recoveryRuntimeOverride = recoveryRuntime,
        _processRunner = processRunner,
        _processExecutor = processExecutor,
+       _portInUse = portInUse,
        _javaInspector = javaInspector ?? inspectJavaRuntime;
 
   final RecoveryRuntime? _recoveryRuntimeOverride;
@@ -81,6 +83,7 @@ class NativeCommandService {
   final ConsumerService consumerService;
   final ProcessRunner _processRunner;
   final Future<int> Function(String) _javaInspector;
+  final Future<bool> Function(int)? _portInUse;
   final Future<ProcessResult> Function(String, List<String>)? _processExecutor;
   static final AsyncGate _runtimePortGate = AsyncGate();
   static final Set<int> _reservedRuntimePorts = <int>{};
@@ -8247,6 +8250,9 @@ class NativeCommandService {
   }
 
   Future<bool> _runtimeSocketPortInUse(int port) async {
+    if (_portInUse != null) {
+      return _portInUse(port);
+    }
     if (!await _runtimeCanBind(InternetAddress.anyIPv4, port)) {
       return true;
     }
