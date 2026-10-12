@@ -6,6 +6,7 @@ import { runScenario } from './runner.mjs'
 import { listScenarios } from './scenario_loader.mjs'
 import { parseSwarmConfiguration, parseSwarmOptions } from './swarm_config.mjs'
 import { runSwarm } from './swarm_runner.mjs'
+import { protocolCapability } from './protocol_capability.mjs'
 
 const parsed = parseArguments(process.argv.slice(2))
 const command = parsed.positionals[0] ?? 'doctor'
@@ -25,7 +26,8 @@ try {
 async function dispatch(command, args) {
   switch (command) {
     case 'doctor':
-      return doctor(args.flag('json'))
+      if (args.flag('version')) throw new Error('--version requires one Minecraft version')
+      return doctor(args.flag('json'), args.option('version'))
     case 'list':
       return list(args.flag('json'))
     case 'run':
@@ -127,7 +129,7 @@ async function swarm(tokens) {
   return report.status === 'passed' ? 0 : 1
 }
 
-async function doctor(json) {
+async function doctor(json, version) {
   const checks = []
   const nodeMajor = Number.parseInt(process.versions.node.split('.')[0], 10)
   checks.push({
@@ -179,12 +181,24 @@ async function doctor(json) {
     status: checks.some((check) => check.status === 'FAIL') ? 'failed' : 'passed',
     checks
   }
+  if (version !== undefined) {
+    result.dependencyStatus = result.status
+    result.protocolCapability = await protocolCapability(version)
+    if (result.protocolCapability.dependencyFailure) result.dependencyStatus = 'failed'
+    if (result.protocolCapability.status !== 'supported') result.status = 'failed'
+  }
   if (json) {
     process.stdout.write(`${JSON.stringify(result)}\n`)
   } else {
     process.stdout.write('Multiplexor Mineflayer doctor\n')
     for (const check of checks) {
       process.stdout.write(`[${check.status}] ${check.name}: ${check.detail}\n`)
+    }
+    if (result.protocolCapability) {
+      const capability = result.protocolCapability
+      process.stdout.write(`[${capability.status === 'supported' ? 'PASS' : 'FAIL'}] protocol ${version}: ${capability.status}; data=${capability.resolvedVersion ?? 'unavailable'}; protocol=${capability.protocolVersion ?? 'unavailable'}; Mineflayer tested=${capability.mineflayerTested}\n`)
+      for (const error of capability.errors) process.stdout.write(`  ${error}\n`)
+      process.stdout.write(`${capability.scope}\n`)
     }
   }
   return result.status === 'passed' ? 0 : 1

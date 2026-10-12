@@ -454,6 +454,7 @@ class NativeCommandService {
         );
         return harness.doctor(
           json: parsed.flag('json'),
+          version: parsed.option('version'),
           write: io.write,
           error: io.error,
         );

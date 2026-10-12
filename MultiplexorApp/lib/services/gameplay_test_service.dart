@@ -53,11 +53,16 @@ class GameplayTestService {
 
   Future<int> doctor({
     required bool json,
+    String? version,
     required void Function(String line) write,
     required void Function(String line) error,
   }) {
     return _runHarness(
-      <String>['doctor', if (json) '--json'],
+      <String>[
+        'doctor',
+        if (json) '--json',
+        if (version != null) ...<String>['--version', version],
+      ],
       write: write,
       error: error,
     );

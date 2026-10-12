@@ -208,7 +208,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
   ]),
   CommandHelpGroup('gameplay', <String>[
     'setup',
-    'doctor [--json]',
+    'doctor [--version <version>] [--json]',
     'list [--json]',
     'swarm-profiles [--json]',
     'sessions validate <profile.json> [--instance <name>] [--network <name>] [--prepare] [--json]',
