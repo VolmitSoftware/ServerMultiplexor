@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
 import 'project_files.dart';
+import 'project_gradle_cache.dart';
 import 'project_model.dart';
 import 'project_process.dart';
 import 'project_store.dart';
@@ -21,6 +23,8 @@ class ProjectWorker {
   final ProjectStore store;
   final Map<String, Object?> run;
   final Map<String, Future<void>> _running = <String, Future<void>>{};
+  final Map<String, String> _inputHashes = <String, String>{};
+  late final ProjectGradleCache cache;
   final Map<String, String> _sourceHashes = <String, String>{};
   final Map<String, String> _toolchain = <String, String>{};
   late final ProjectPlan plan;
@@ -59,6 +63,11 @@ class ProjectWorker {
       heartbeat = Timer.periodic(const Duration(seconds: 2), (_) => _save());
       await _capture();
       await _inspectTools();
+      cache = ProjectGradleCache(store, id, cancelled: () => cancelled);
+      if (!cancelled) await cache.prepare();
+      if (cache.dependencyCache != null) {
+        run['dependencyCache'] = cache.dependencyCache!.path;
+      }
       if (cancelled) {
         for (Map<String, Object?> job in jobs) {
           job['status'] = 'cancelled';
@@ -141,6 +150,34 @@ class ProjectWorker {
         throw StateError('Saved source snapshot changed: $sourceId');
       }
     }
+    Map<String, ProjectSourceInput> inputs = <String, ProjectSourceInput>{
+      for (String key in plan.keys)
+        for (ProjectSourceInput input in plan.inputsFor(
+          plan.projectFor(key).id,
+        ))
+          input.key: input,
+    };
+    for (ProjectSourceInput input in inputs.values) {
+      if (cancelled) return;
+      String snapshot = projectDigest(input.key);
+      String? retryOf = run['retryOf'] as String?;
+      String origin = retryOf == null
+          ? input.key
+          : p.join(store.runWork(retryOf).path, 'input-snapshot', snapshot);
+      _inputHashes[input.key] = await copyProjectSourceInput(
+        origin,
+        p.join(work.path, 'input-snapshot', snapshot),
+        boundary: retryOf == null
+            ? input.sourceRoot
+            : p.join(store.runWork(retryOf).path, 'input-snapshot'),
+      );
+      if (retryOf != null &&
+          projectObject(run['inputHashes'])[input.key] !=
+              _inputHashes[input.key]) {
+        throw StateError('Saved source input changed: ${input.relativePath}');
+      }
+    }
+    run['inputHashes'] = _inputHashes;
     run['sourceHashes'] = _sourceHashes;
     run['platform'] = '${Platform.operatingSystem}/${Platform.version}';
     _save();
@@ -310,7 +347,17 @@ class ProjectWorker {
     try {
       List<String> sources = plan.sourcesFor(project.id);
       sources.sort();
+      String packaging = run['packaging'] as String? ?? 'local';
+      if (!<String>{'local', 'compact'}.contains(packaging)) {
+        throw const FormatException('Packaging must be local or compact');
+      }
+      List<ProjectSourceInput> inputs = plan.inputsFor(project.id);
       String fingerprint = projectDigest(<String, Object?>{
+        'packaging': packaging,
+        'inputs': <String, String>{
+          for (ProjectSourceInput input in inputs)
+            input.relativePath: _inputHashes[input.key]!,
+        },
         'sources': <String, Object?>{
           for (String source in sources)
             source: <String, Object?>{
@@ -351,11 +398,20 @@ class ProjectWorker {
           Directory(p.join(sandbox.path, source.relativePath)),
         );
       }
+      for (ProjectSourceInput input in inputs) {
+        await copyProjectSourceInput(
+          p.join(work.path, 'input-snapshot', projectDigest(input.key)),
+          p.join(sandbox.path, input.relativePath),
+          boundary: p.join(work.path, 'input-snapshot'),
+        );
+      }
       String directory = p.join(sandbox.path, project.relativePath);
       List<String> args = <String>[
         ...target.tasks,
         ...target.arguments,
         '--no-daemon',
+        '--build-cache',
+        '-PcompactRelease=${packaging == 'compact'}',
         '--console=plain',
         '--max-workers=$workers',
         '--init-script',
@@ -384,31 +440,37 @@ class ProjectWorker {
       }
       job['status'] = 'running';
       _save();
-      ProjectProcessResult result = await runProjectProcess(
-        executable: p.join(
-          directory,
-          Platform.isWindows ? 'gradlew.bat' : 'gradlew',
-        ),
-        arguments: args,
-        directory: directory,
-        log: log,
-        cancelled: () => cancelled,
-        environment: <String, String>{
-          'MULTIPLEXOR_TEST_FORKS': '$workers',
-          'MULTIPLEXOR_SOURCE_HASH': projectDigest(<String, String>{
-            for (String source in sources) source: _sourceHashes[source]!,
-          }),
-          'GRADLE_USER_HOME': p.join(
-            store.workDirectory.path,
-            'gradle',
-            projectDigest(key).substring(0, 16),
+      ProjectProcessResult result = await cache.withHome(
+        key,
+        (Directory gradleHome) => runProjectProcess(
+          executable: p.join(
+            directory,
+            Platform.isWindows ? 'gradlew.bat' : 'gradlew',
           ),
-        },
-        onLine: (String line) {
-          if (line.startsWith('> Task ')) {
-            job['currentTask'] = line.substring(7);
-          }
-        },
+          arguments: args,
+          directory: directory,
+          log: log,
+          cancelled: () => cancelled,
+          environment: <String, String>{
+            'MULTIPLEXOR_TEST_FORKS': '$workers',
+            'MULTIPLEXOR_TASK_CACHE': cache.taskCache.path,
+            if (cache.dependencyCache != null)
+              'GRADLE_RO_DEP_CACHE': cache.dependencyCache!.path,
+            'MULTIPLEXOR_SOURCE_HASHES': jsonEncode(<String, String>{
+              for (String source in sources)
+                Directory(
+                  p.join(sandbox.path, plan.projects[source]!.relativePath),
+                ).resolveSymbolicLinksSync(): _sourceHashes[source]!,
+            }),
+            'GRADLE_USER_HOME': gradleHome.path,
+          },
+          removeEnvironment: const <String>{'GRADLE_RO_DEP_CACHE'},
+          onLine: (String line) {
+            if (line.startsWith('> Task ')) {
+              job['currentTask'] = line.substring(7);
+            }
+          },
+        ),
       );
       job['exitCode'] = result.exitCode;
       if (cancelled || result.exitCode == 130) {

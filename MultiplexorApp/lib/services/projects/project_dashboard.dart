@@ -68,6 +68,7 @@ class ProjectDashboard {
         loadCatalog: service.catalog,
         loadStatus: service.status,
         loadLimits: service.limits,
+        loadDestinations: service.destinations,
         command: service.command,
       );
 
@@ -76,6 +77,7 @@ class ProjectDashboard {
     required Map<String, Object?> Function() loadStatus,
     required ProjectDashboardCommand command,
     ProjectBuildLimits Function()? loadLimits,
+    List<Map<String, Object?>> Function()? loadDestinations,
     ProjectDashboardPrompt? prompt,
     ProjectDashboardTerminal? terminal,
     MonitorTheme? theme,
@@ -85,6 +87,7 @@ class ProjectDashboard {
   }) : _loadCatalog = loadCatalog,
        _loadStatus = loadStatus,
        _loadLimits = loadLimits ?? ProjectBuildLimits.defaults,
+       _loadDestinations = loadDestinations ?? (() => <Map<String, Object?>>[]),
        _command = command,
        _prompt = prompt ?? ProjectDashboardPrompts(command).request,
        _terminal = terminal ?? const DartProjectDashboardTerminal(),
@@ -96,6 +99,7 @@ class ProjectDashboard {
   final List<Map<String, Object?>> Function() _loadCatalog;
   final Map<String, Object?> Function() _loadStatus;
   final ProjectBuildLimits Function() _loadLimits;
+  final List<Map<String, Object?>> Function() _loadDestinations;
   final ProjectDashboardCommand _command;
   final ProjectDashboardPrompt _prompt;
   final ProjectDashboardTerminal _terminal;
@@ -110,6 +114,7 @@ class ProjectDashboard {
   final Set<String> _checked = <String>{};
   final Set<String> _collapsed = <String>{};
   ProjectBuildLimits _limits = ProjectBuildLimits.defaults();
+  List<Map<String, Object?>> _destinations = <Map<String, Object?>>[];
   String? _pressedCheckbox;
   String? _pressedButton;
   List<String> _logs = <String>[];
@@ -171,8 +176,10 @@ class ProjectDashboard {
       List<Map<String, Object?>> catalog = _loadCatalog();
       List<Map<String, Object?>> runs = projectMaps(_loadStatus()['runs']);
       ProjectBuildLimits limits = _loadLimits();
+      List<Map<String, Object?>> destinations = _loadDestinations();
       _catalog = catalog;
       _limits = limits;
+      _destinations = destinations;
       _runs = runs;
       _run = _runId == null
           ? runs.firstOrNull
@@ -470,6 +477,7 @@ class ProjectDashboard {
                 .map((ProjectDashboardRow row) => row.key),
           ),
           limits: _limits,
+          destinations: _destinations,
           run: _run,
           runs: _runs,
           catalog: _catalog,

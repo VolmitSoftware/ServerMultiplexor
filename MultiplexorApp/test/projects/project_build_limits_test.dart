@@ -170,6 +170,23 @@ void main() {
     },
   );
 
+  test('rejects invalid packaging before creating a run', () async {
+    projectAtomicJson(service.store.catalogFile, <String, Object?>{
+      'projects': <Object?>[_project(fixture.path, 'alpha')],
+    });
+    List<String> errors = <String>[];
+    expect(
+      await service.command(
+        <String>['build', 'alpha', '--packaging', 'fast'],
+        output: fail,
+        error: errors.add,
+      ),
+      2,
+    );
+    expect(errors.single, 'Packaging must be local or compact');
+    expect(service.store.runs(), isEmpty);
+  });
+
   test(
     'builds selected projects with saved limits, overrides, and stable retry limits',
     () async {
@@ -213,6 +230,7 @@ void main() {
       expect(first['jobsLimit'], 2);
       expect(first['memoryMiB'], 2048);
       expect(first['workers'], 3);
+      expect(first['packaging'], 'local');
 
       projectAtomicJson(
         service.store.limitsFile,
@@ -228,11 +246,14 @@ void main() {
       expect(retry['jobsLimit'], 2);
       expect(retry['memoryMiB'], 2048);
       expect(retry['workers'], 3);
+      expect(retry['packaging'], 'local');
 
       Map<String, Object?> overridden = await _runCli(service, <String>[
         'build',
         '--targets',
         'beta:plugin',
+        '--packaging',
+        'compact',
         '--jobs',
         '1',
         '--memory',
@@ -247,6 +268,15 @@ void main() {
       expect(overridden['jobsLimit'], 1);
       expect(overridden['memoryMiB'], 1024);
       expect(overridden['workers'], 2);
+      expect(overridden['packaging'], 'compact');
+      Map<String, Object?> compactRetry = await _runCli(service, <String>[
+        'retry',
+        overridden['id'] as String,
+        '--wait',
+        '--json',
+      ]);
+      expect(compactRetry['packaging'], 'compact');
+      expect(compactRetry['status'], 'succeeded');
       expect(service.limits().toJson(), <String, Object?>{
         'schema': 1,
         'jobs': 1,
