@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 
 import 'project_files.dart';
 import 'project_gradle_cache.dart';
+import 'project_java_homes.dart';
 import 'project_model.dart';
 import 'project_process.dart';
 import 'project_store.dart';
@@ -27,6 +28,7 @@ class ProjectWorker {
   late final ProjectGradleCache cache;
   final Map<String, String> _sourceHashes = <String, String>{};
   final Map<String, String> _toolchain = <String, String>{};
+  late final ProjectJavaHomes _javaHomes;
   late final ProjectPlan plan;
   late final List<Map<String, Object?>> jobs;
   late final Directory work;
@@ -196,24 +198,25 @@ class ProjectWorker {
       }
     }
     _toolchain['platform'] = '${Platform.operatingSystem}/${Platform.version}';
+    List<String> javaPaths = <String>[];
     if (Platform.isMacOS) {
       ProcessResult result = await Process.run(
         '/usr/libexec/java_home',
         <String>['-V'],
       );
-      _toolchain['javaInstallations'] = '${result.stdout}${result.stderr}';
+      javaPaths.addAll(projectMacJavaHomes('${result.stdout}${result.stderr}'));
     } else if (Platform.isLinux && Directory('/usr/lib/jvm').existsSync()) {
-      Map<String, String> releases = <String, String>{};
-      for (Directory directory in Directory(
-        '/usr/lib/jvm',
-      ).listSync().whereType<Directory>()) {
-        File release = File(p.join(directory.path, 'release'));
-        if (release.existsSync()) {
-          releases[directory.path] = release.readAsStringSync();
+      for (FileSystemEntity entry in Directory('/usr/lib/jvm').listSync()) {
+        if (Directory(entry.path).existsSync()) {
+          javaPaths.add(entry.path);
         }
       }
-      _toolchain['javaInstallations'] = projectDigest(releases);
     }
+    _javaHomes = await ProjectJavaHomes.capture(
+      discoveredHomes: javaPaths,
+      environment: Platform.environment,
+    );
+    _toolchain['javaInstallations'] = _javaHomes.fingerprint;
     List<String> environmentKeys =
         Platform.environment.keys
             .where(
@@ -234,6 +237,7 @@ class ProjectWorker {
                     'CFLAGS',
                     'CXXFLAGS',
                   }.contains(key) ||
+                  key.startsWith('JAVA_HOME_') ||
                   key.startsWith('ORG_GRADLE_PROJECT_') ||
                   key.startsWith('CARGO_'),
             )
@@ -453,6 +457,7 @@ class ProjectWorker {
           log: log,
           cancelled: () => cancelled,
           environment: <String, String>{
+            ..._javaHomes.environment,
             'MULTIPLEXOR_TEST_FORKS': '$workers',
             'MULTIPLEXOR_TASK_CACHE': cache.taskCache.path,
             if (cache.dependencyCache != null)
