@@ -280,6 +280,7 @@ const Map<String, int> _maximumPositionals = <String, int>{
   'projects list': 0,
   'projects plan': 1,
   'projects build': 1,
+  'projects limits': 0,
   'projects status': 1,
   'projects logs': 1,
   'projects cancel': 1,

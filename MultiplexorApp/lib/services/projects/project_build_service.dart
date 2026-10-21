@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
+import 'project_build_limits.dart';
 import 'project_deployment.dart';
 import 'project_files.dart';
 import 'project_model.dart';
@@ -17,6 +18,10 @@ class ProjectBuildService {
     : store = ProjectStore(rootDirectory);
 
   final ProjectStore store;
+
+  ProjectBuildLimits limits() => store.limitsFile.existsSync()
+      ? ProjectBuildLimits.fromJson(projectReadJson(store.limitsFile))
+      : ProjectBuildLimits.defaults();
 
   List<Map<String, Object?>> catalog() =>
       store.projects().map((BuildProject project) => project.toJson()).toList();
@@ -54,6 +59,10 @@ class ProjectBuildService {
     try {
       ProjectArguments args = ProjectArguments(arguments);
       switch (args.command) {
+        case 'limits':
+          ProjectBuildLimits configured = await _configureLimits(args);
+          _emit(configured.toJson(), args, output);
+          return 0;
         case 'scan':
           List<BuildProject> projects = await store.locked(
             () => store.scan(
@@ -178,12 +187,57 @@ class ProjectBuildService {
     }
   }
 
+  Future<ProjectBuildLimits> _configureLimits(ProjectArguments args) async {
+    if (<String>[
+      'jobs',
+      'memory',
+      'workers',
+    ].every((String name) => args.option(name) == null)) {
+      return limits();
+    }
+    return store.locked(() async {
+      ProjectBuildLimits current = limits();
+      ProjectBuildLimits configured = ProjectBuildLimits(
+        jobs: args.integer('jobs', current.jobs),
+        memoryMiB: args.integer('memory', current.memoryMiB),
+        workers: args.integer('workers', current.workers),
+      );
+      projectAtomicJson(store.limitsFile, configured.toJson());
+      return configured;
+    });
+  }
+
   ProjectPlan _plan(ProjectArguments args) {
     List<BuildProject> projects = store.projects();
     if (projects.isEmpty) {
       throw const FormatException(
         'Register projects with projects scan <source-directory>',
       );
+    }
+    Map<String, BuildProject> catalog = <String, BuildProject>{
+      for (BuildProject project in projects) project.id: project,
+    };
+    String? explicitTargets = args.option('targets');
+    if (explicitTargets != null) {
+      if (args.positions.isNotEmpty ||
+          args.flag('all') ||
+          args.option('target') != null ||
+          args.flag('all-targets')) {
+        throw const FormatException(
+          'Choose --targets or a project, --all, --target, or --all-targets',
+        );
+      }
+      List<String> keys = _targetSelection('targets', explicitTargets);
+      for (String key in keys) {
+        List<String> parts = key.split(':');
+        if (parts.length != 2 || parts.any((String part) => part.isEmpty)) {
+          throw const FormatException('--targets requires project:target IDs');
+        }
+        for (String part in parts) {
+          projectIdentifier(part);
+        }
+      }
+      return ProjectPlan(catalog, keys);
     }
     String? selection = args.positions.firstOrNull?.toLowerCase();
     if (args.flag('all') && selection != null) {
@@ -205,33 +259,33 @@ class ProjectBuildService {
     if (target != null && args.flag('all-targets')) {
       throw const FormatException('Choose --target or --all-targets');
     }
-    List<String>? targets = target
-        ?.split(',')
+    List<String>? targets = target == null
+        ? null
+        : _targetSelection('target', target);
+    return ProjectPlan(catalog, <String>[
+      for (BuildProject project in selected)
+        if (targets != null)
+          for (String id in targets) '${project.id}:${project.target(id).id}'
+        else
+          for (ProjectTarget target in project.targets)
+            '${project.id}:${target.id}',
+    ]);
+  }
+
+  List<String> _targetSelection(String option, String value) {
+    List<String> targets = value
+        .split(',')
         .map((String id) => id.trim())
         .toList();
-    if (targets != null) {
-      if (targets.any((String id) => id.isEmpty)) {
-        throw const FormatException(
-          '--target requires non-empty target IDs separated by commas',
-        );
-      }
-      if (targets.toSet().length != targets.length) {
-        throw const FormatException('--target contains duplicate target IDs');
-      }
+    if (targets.any((String id) => id.isEmpty)) {
+      throw FormatException(
+        '--$option requires non-empty target IDs separated by commas',
+      );
     }
-    return ProjectPlan(
-      <String, BuildProject>{
-        for (BuildProject project in projects) project.id: project,
-      },
-      <String>[
-        for (BuildProject project in selected)
-          if (targets != null)
-            for (String id in targets) '${project.id}:${project.target(id).id}'
-          else
-            for (ProjectTarget target in project.targets)
-              '${project.id}:${target.id}',
-      ],
-    );
+    if (targets.toSet().length != targets.length) {
+      throw FormatException('--$option contains duplicate target IDs');
+    }
+    return targets;
   }
 
   Future<String> _start(
@@ -245,18 +299,16 @@ class ProjectBuildService {
       );
     }
     await _recoverInterrupted();
-    int jobs = args.integer(
-      'jobs',
-      previous?['jobsLimit'] as int? ?? min(4, Platform.numberOfProcessors),
-    );
-    int memory = args.integer(
-      'memory',
-      previous?['memoryMiB'] as int? ?? projectDefaultMemory(),
-    );
-    int workers = args.integer(
-      'workers',
-      previous?['workers'] as int? ?? max(1, Platform.numberOfProcessors),
-    );
+    ProjectBuildLimits configured = previous == null
+        ? limits()
+        : ProjectBuildLimits(
+            jobs: previous['jobsLimit'] as int,
+            memoryMiB: previous['memoryMiB'] as int,
+            workers: previous['workers'] as int,
+          );
+    int jobs = args.integer('jobs', configured.jobs);
+    int memory = args.integer('memory', configured.memoryMiB);
+    int workers = args.integer('workers', configured.workers);
     for (String key in plan.keys) {
       if (plan.targetFor(key).memoryMiB > memory) {
         throw FormatException(
@@ -432,25 +484,6 @@ List<String> projectExecutableArguments(List<String> args) => <String>[
     Platform.script.toFilePath(),
   ...args,
 ];
-
-int projectDefaultMemory() {
-  int bytes = 0;
-  if (Platform.isMacOS) {
-    ProcessResult result = Process.runSync('sysctl', <String>[
-      '-n',
-      'hw.memsize',
-    ]);
-    if (result.exitCode == 0) {
-      bytes = int.tryParse('${result.stdout}'.trim()) ?? 0;
-    }
-  } else if (Platform.isLinux && File('/proc/meminfo').existsSync()) {
-    RegExpMatch? match = RegExp(
-      r'MemTotal:\s+(\d+)',
-    ).firstMatch(File('/proc/meminfo').readAsStringSync());
-    bytes = match == null ? 0 : int.parse(match[1]!) * 1024;
-  }
-  return bytes == 0 ? 8192 : max(4096, min(65536, bytes ~/ (1024 * 1024 * 2)));
-}
 
 class ProjectArguments {
   ProjectArguments(List<String> arguments)
