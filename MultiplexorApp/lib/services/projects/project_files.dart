@@ -294,6 +294,10 @@ gradle.projectsEvaluated {
 }
 ''';
 
+const Map<String, String> projectBuildProperties = <String, String>{
+  'paperweight.experimental.genSources': 'false',
+};
+
 const String projectBudgetInit = r'''
 import org.gradle.api.tasks.testing.Test
 gradle.settingsEvaluated { settings ->
