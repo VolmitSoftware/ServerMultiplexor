@@ -59,6 +59,7 @@ Future<String> copyProjectSources(
   String allowed = Directory(
     boundary ?? source.path,
   ).resolveSymbolicLinksSync();
+  Set<String> ignored = await _ignoredSourcePaths(source);
   Map<String, String> hashes = <String, String>{};
   List<String> executableFiles = <String>[];
   Future<void> visit(
@@ -66,6 +67,7 @@ Future<String> copyProjectSources(
     String relative,
     Set<String> ancestors,
   ) async {
+    if (ignored.contains(p.normalize(p.absolute(origin)))) return;
     FileSystemEntityType type = FileSystemEntity.typeSync(
       origin,
       followLinks: false,
@@ -137,6 +139,41 @@ Future<String> copyProjectSources(
     }
   }
   return projectDigest(hashes);
+}
+
+Future<Set<String>> _ignoredSourcePaths(Directory source) async {
+  Directory current = source.absolute;
+  while (FileSystemEntity.typeSync(p.join(current.path, '.git')) ==
+      FileSystemEntityType.notFound) {
+    if (current.parent.path == current.path) return <String>{};
+    current = current.parent;
+  }
+  ProcessResult result = await Process.run(
+    'git',
+    <String>[
+      'ls-files',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--directory',
+      '-z',
+    ],
+    workingDirectory: source.path,
+    environment: <String, String>{...Platform.environment}
+      ..remove('GIT_CONFIG_COUNT'),
+    includeParentEnvironment: false,
+  );
+  if (result.exitCode != 0) {
+    throw FileSystemException(
+      'Could not read ignored source paths: ${result.stderr}',
+      source.path,
+    );
+  }
+  return <String>{
+    for (String relative in (result.stdout as String).split('\u0000'))
+      if (relative.isNotEmpty)
+        p.normalize(p.absolute(p.join(source.path, relative))),
+  };
 }
 
 Future<String> projectDefinitionHash(Directory directory) async {

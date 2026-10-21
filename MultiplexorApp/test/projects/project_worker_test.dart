@@ -363,6 +363,57 @@ printf '> Task :assemble\\n'
     );
   }, skip: Platform.isWindows);
 
+  test(
+    'Git ignores generated runtimes while retaining tracked and untracked sources',
+    () async {
+      Directory source = Directory(p.join(fixture.path, 'git-source'))
+        ..createSync();
+      Map<String, String> environment = <String, String>{
+        ...Platform.environment,
+      }..remove('GIT_CONFIG_COUNT');
+      Future<void> git(List<String> arguments) async {
+        ProcessResult result = await Process.run(
+          'git',
+          arguments,
+          workingDirectory: source.path,
+          environment: environment,
+          includeParentEnvironment: false,
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+      }
+
+      await git(<String>['init', '-q']);
+      File(p.join(source.path, '.gitignore')).writeAsStringSync('run/\n');
+      Directory(p.join(source.path, 'run')).createSync();
+      File(
+        p.join(source.path, 'run/kept.txt'),
+      ).writeAsStringSync('tracked source');
+      await git(<String>['add', '-f', 'run/kept.txt']);
+      File(
+        p.join(source.path, 'untracked.txt'),
+      ).writeAsStringSync('new source');
+      Link(p.join(source.path, 'run/runtime')).createSync(fixture.parent.path);
+      Directory output = Directory(p.join(fixture.path, 'git-copy'));
+      await copyProjectSources(source, output);
+      expect(
+        File(p.join(output.path, 'run/kept.txt')).readAsStringSync(),
+        'tracked source',
+      );
+      expect(
+        File(p.join(output.path, 'untracked.txt')).readAsStringSync(),
+        'new source',
+      );
+      expect(
+        FileSystemEntity.typeSync(
+          p.join(output.path, 'run/runtime'),
+          followLinks: false,
+        ),
+        FileSystemEntityType.notFound,
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
   test('source symlinks cannot escape the registered source root', () async {
     Directory source = Directory(p.join(fixture.path, 'source'))..createSync();
     File outside = File(p.join(fixture.path, 'outside'))
