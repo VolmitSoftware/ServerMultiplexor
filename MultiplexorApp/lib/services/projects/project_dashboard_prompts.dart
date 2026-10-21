@@ -1,13 +1,16 @@
+import 'dart:convert';
 import 'dart:io';
 
 import '../../utils/user_prompt.dart';
 import 'project_build_limits.dart';
 import 'project_dashboard_model.dart';
+import 'project_destination_editor.dart';
 
 enum ProjectDashboardAction {
   actions,
   build,
   scan,
+  setup,
   history,
   retry,
   cancel,
@@ -73,6 +76,8 @@ class ProjectDashboardPrompts {
         return _locations(selection);
       case ProjectDashboardAction.scan:
         return _scan(selection);
+      case ProjectDashboardAction.setup:
+        return _setup();
       case ProjectDashboardAction.history:
         return _history(selection);
       case ProjectDashboardAction.retry:
@@ -126,6 +131,12 @@ class ProjectDashboardPrompts {
         'Scan source folder',
         value: 'scan',
         shortcut: 's',
+      ),
+      const MenuEntry<String>(
+        'Convert Gradle project',
+        value: 'setup',
+        shortcut: 'i',
+        detail: 'Add Multiplexor build targets to an existing Gradle project',
       ),
       MenuEntry<String>(
         'Build limits',
@@ -207,7 +218,7 @@ class ProjectDashboardPrompts {
             value: 'project',
           ),
         const MenuEntry<String>(
-          'Every registered project and target',
+          'Every listed project and target',
           value: 'all',
         ),
         MenuEntry<String>(
@@ -258,9 +269,13 @@ class ProjectDashboardPrompts {
         if (scope == 'checked') ...<String>[
           '--targets',
           selection.checkedTargets.join(','),
-        ] else if (scope == 'all')
-          '--all'
-        else
+        ] else if (scope == 'all') ...<String>[
+          '--targets',
+          projectDashboardRows(
+            selection.catalog,
+            null,
+          ).map((ProjectDashboardRow target) => target.key).join(','),
+        ] else
           selection.project!,
         if (_reuse) '--changed',
         '--packaging',
@@ -268,7 +283,7 @@ class ProjectDashboardPrompts {
         if (scope == 'target') ...<String>[
           '--target',
           row!.target,
-        ] else if (scope != 'checked')
+        ] else if (scope == 'project')
           '--all-targets',
         '--jobs',
         '${selection.limits.jobs}',
@@ -336,15 +351,86 @@ class ProjectDashboardPrompts {
         ),
       ];
 
+  Future<List<String>?> _setup() async {
+    stdout.writeln(Ui.theme.paint('CONVERT GRADLE PROJECT', Ui.theme.bold));
+    stdout.writeln(
+      'Choose the project root containing gradlew and build.gradle or build.gradle.kts.',
+    );
+    stdout.writeln(
+      'Review detected targets and file changes, then confirm to write them and scan the project.',
+    );
+    String path = await Ui.input(
+      'Project root folder',
+      validator: (String value) => value.trim().isNotEmpty,
+    );
+    List<String> output = <String>[];
+    List<String> errors = <String>[];
+    List<String> arguments = <String>['init', path, '--json'];
+    int code = await command(arguments, output: output.add, error: errors.add);
+    if (code != 0) {
+      for (String error in errors) {
+        stdout.writeln(Ui.theme.paint(projectText(error), Ui.theme.danger));
+      }
+      await Ui.pause();
+      return null;
+    }
+    Object? decoded = jsonDecode(output.join('\n'));
+    if (decoded is! Map<String, Object?>) {
+      throw const FormatException('Invalid project setup preview');
+    }
+    stdout.writeln(Ui.theme.paint('CONVERSION PREVIEW', Ui.theme.bold));
+    stdout.writeln(projectText(decoded['path']));
+    for (Map<String, Object?> target in projectMaps(decoded['targets'])) {
+      stdout.writeln(
+        '${projectText(target['id'])}: '
+        '${projectText(target['platform'] ?? 'library')} '
+        '(${projectText(target['projectDirectory'])})',
+      );
+    }
+    for (Map<String, Object?> file in projectMaps(decoded['files'])) {
+      stdout.writeln(
+        '\n${projectText(file['action'])}: ${projectText(file['path'])}',
+      );
+      stdout.writeln(projectOutputText(file['content']?.toString() ?? ''));
+    }
+    for (Object? warning
+        in decoded['warnings'] as List<Object?>? ?? <Object?>[]) {
+      stdout.writeln(Ui.theme.paint(projectText(warning), Ui.theme.warn));
+    }
+    if (!await Ui.confirm(
+      'Write this configuration and scan the project?',
+      defaultValue: false,
+    )) {
+      return null;
+    }
+    output.clear();
+    errors.clear();
+    code = await command(
+      <String>[...arguments, '--apply'],
+      output: output.add,
+      error: errors.add,
+    );
+    if (code != 0) {
+      for (String error in errors) {
+        stdout.writeln(Ui.theme.paint(projectText(error), Ui.theme.danger));
+      }
+      await Ui.pause();
+      return null;
+    }
+    return <String>['scan', path];
+  }
+
   Future<List<String>?> _history(ProjectDashboardSelection selection) async {
     if (selection.runs.isEmpty) return null;
+    DateTime now = DateTime.now();
     String id = await menuSelect<String>('Build runs', <MenuEntry<String>>[
       for (Map<String, Object?> run in selection.runs)
         MenuEntry<String>(
           projectText(run['id']),
           value: projectText(run['id']),
           detail:
-              '${projectText(run['status'])} / ${projectText(run['createdAt'])}',
+              '${projectText(run['status'])} / ${projectRunTiming(run, now)}'
+              ' / ${projectText(run['createdAt'])}',
         ),
       const MenuEntry<String>('Back', value: '', shortcut: 'q'),
     ]);
@@ -363,189 +449,32 @@ class ProjectDashboardPrompts {
         ' / Minecraft ${projectText(destination['minecraft'] ?? 'any')}';
   }
 
-  Future<List<String>?> _locations(ProjectDashboardSelection selection) async {
-    while (true) {
-      int chosen = await menuSelect<int>('Locations', <MenuEntry<int>>[
-        for (int index = 0; index < selection.destinations.length; index++)
-          MenuEntry<int>(
-            projectText(selection.destinations[index]['name']),
-            value: index,
-            detail: _destinationDetail(selection.destinations[index]),
-          ),
-        const MenuEntry<int>('Add destination', value: -1, shortcut: 'a'),
-        const MenuEntry<int>('Back', value: -2, shortcut: 'q'),
-      ]);
-      if (chosen == -2) return null;
-      try {
-        List<String>? command = chosen == -1
-            ? await _destination(selection)
-            : await _locationActions(selection, selection.destinations[chosen]);
-        if (command != null) return command;
-      } on PromptBackNavigation {
-        continue;
-      }
-    }
-  }
-
-  Future<List<String>?> _locationActions(
-    ProjectDashboardSelection selection,
-    Map<String, Object?> destination,
-  ) async {
-    String name = projectText(destination['name']);
-    while (true) {
-      String action;
-      try {
-        action = await menuSelect<String>(name, <MenuEntry<String>>[
-          const MenuEntry<String>('Edit destination', value: 'edit'),
-          if (selection.run != null)
-            const MenuEntry<String>(
-              'Preview delivery from current run',
-              value: 'deploy',
-            ),
-          MenuEntry<String>(
-            'Remove configuration',
-            value: 'remove',
-            labelColor: Ui.theme.danger,
-          ),
-          const MenuEntry<String>('Back', value: 'back', shortcut: 'q'),
-        ], footer: _destinationDetail(destination));
-      } on PromptBackNavigation {
-        return null;
-      }
-      if (action == 'back') return null;
-      try {
-        if (action == 'edit') {
-          return await _destination(selection, existing: destination);
-        }
-        if (action == 'deploy') {
-          List<String>? command = await _deploy(
-            selection,
-            destination: destination,
-          );
-          if (command != null) return command;
-        }
-        if (action == 'remove' &&
-            await Ui.confirm(
-              'Remove destination $name? Files at the destination stay unchanged.',
-              defaultValue: false,
-            )) {
-          return <String>['destination', name, '--remove'];
-        }
-      } on PromptBackNavigation {
-        continue;
-      }
-    }
-  }
-
-  Future<List<String>> _destination(
+  Future<List<String>?> _locations(
     ProjectDashboardSelection selection, {
-    Map<String, Object?>? existing,
+    bool newDestination = false,
   }) async {
-    String name = existing == null
-        ? await Ui.input(
-            'Destination name',
-            validator: (String value) =>
-                RegExp(r'^[a-z0-9][a-z0-9._-]*$').hasMatch(value) &&
-                !selection.destinations.any(
-                  (Map<String, Object?> item) => item['name'] == value,
-                ),
-            validationMessage:
-                'Use a unique lowercase name with letters, digits, dots, underscores, or hyphens.',
-          )
-        : projectText(existing['name']);
-    List<String> kinds = <String>[
-      'Export directory',
-      'Multiplexor instance',
-      'Shared dropins',
-    ];
-    int kindIndex = switch (existing?['kind']) {
-      'instance' => 1,
-      'dropins' => 2,
-      _ => 0,
-    };
-    String kind =
-        kinds[await _destinationChoice(
-          'Destination kind',
-          kinds,
-          initialIndex: kindIndex,
-        )];
-    String? path = kind == 'Export directory'
-        ? await Ui.input(
-            'Export directory',
-            defaultValue: existing?['kind'] == 'directory'
-                ? projectText(existing?['path'])
-                : null,
-            validator: (String value) => value.isNotEmpty,
-          )
-        : null;
-    String? instance = kind == 'Multiplexor instance'
-        ? await Ui.input(
-            'Instance name',
-            defaultValue: projectText(existing?['instance']),
-            validator: (String value) => value.isNotEmpty,
-          )
-        : null;
-    List<String> platforms = <String>[
-      if (path != null) 'any',
-      'plugin',
-      'fabric',
-      'forge',
-      'neoforge',
-      if (kind != 'Shared dropins') ...<String>['velocity', 'bungee'],
-    ];
-    int platformIndex = platforms.indexOf(
-      projectText(existing?['platform'] ?? 'any'),
+    ProjectDestinationEditor editor = ProjectDestinationEditor(
+      destinations: selection.destinations,
+      canPreview: selection.run != null,
+      newDestination: newDestination,
+      theme: Ui.theme,
     );
-    String platform =
-        platforms[await _destinationChoice(
-          'Accept artifacts for',
-          platforms,
-          initialIndex: platformIndex < 0 ? 0 : platformIndex,
-        )];
-    bool exactVersion = kind == 'Shared dropins';
-    if (!exactVersion) {
-      exactVersion =
-          await _destinationChoice('Minecraft compatibility', <String>[
-            instance == null
-                ? 'Any Minecraft version'
-                : 'Read instance metadata',
-            'Exact Minecraft version',
-          ], initialIndex: existing?['minecraft'] == null ? 0 : 1) ==
-          1;
+    while (true) {
+      ProjectDestinationEdit? edit = await editor.run();
+      if (edit == null) return null;
+      if (edit.action != ProjectDestinationEditAction.preview) {
+        return edit.arguments;
+      }
+      try {
+        List<String>? result = await _deploy(
+          selection,
+          destination: edit.destination,
+        );
+        if (result != null) return result;
+      } on PromptBackNavigation {
+        continue;
+      }
     }
-    String minecraft = exactVersion
-        ? await Ui.input(
-            'Exact Minecraft version',
-            defaultValue: projectText(existing?['minecraft']),
-            validator: (String value) =>
-                RegExp(r'^\d+(?:\.\d+)*$').hasMatch(value),
-            validationMessage:
-                'Enter an exact Minecraft version, such as 26.3.',
-          )
-        : '';
-    return <String>[
-      'destination',
-      name,
-      if (path != null) ...<String>['--path', path],
-      if (instance != null) ...<String>['--instance', instance],
-      if (kind == 'Shared dropins') '--dropins',
-      if (platform != 'any') ...<String>['--platform', platform],
-      if (minecraft.isNotEmpty) ...<String>['--mc', minecraft],
-    ];
-  }
-
-  Future<int> _destinationChoice(
-    String title,
-    List<String> choices, {
-    int initialIndex = 0,
-  }) async {
-    int chosen = await menuSelect<int>(title, <MenuEntry<int>>[
-      for (int index = 0; index < choices.length; index++)
-        MenuEntry<int>(choices[index], value: index),
-      const MenuEntry<int>('Back', value: -1, shortcut: 'q'),
-    ], initialIndex: initialIndex);
-    if (chosen == -1) throw const PromptBackNavigation();
-    return chosen;
   }
 
   Future<List<String>?> _deploy(
@@ -569,7 +498,7 @@ class ProjectDashboardPrompts {
         if (chosen == -2) return null;
         try {
           return chosen == -1
-              ? await _destination(selection)
+              ? await _locations(selection, newDestination: true)
               : await _deploy(
                   selection,
                   destination: selection.destinations[chosen],

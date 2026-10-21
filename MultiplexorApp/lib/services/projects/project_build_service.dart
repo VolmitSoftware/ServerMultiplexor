@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'project_build_limits.dart';
 import 'project_deployment.dart';
 import 'project_files.dart';
+import 'project_initializer.dart';
 import 'project_model.dart';
 import 'project_process.dart';
 import 'project_store.dart';
@@ -62,6 +63,16 @@ class ProjectBuildService {
     try {
       ProjectArguments args = ProjectArguments(arguments);
       switch (args.command) {
+        case 'init':
+          Map<String, Object?> initialized = ProjectInitializer().initialize(
+            args.requiredPosition(0),
+            id: args.option('id'),
+            name: args.option('name'),
+            java: args.option('java') == null ? null : args.integer('java', 25),
+            apply: args.flag('apply'),
+          );
+          _emit(initialized, args, output);
+          return 0;
         case 'limits':
           ProjectBuildLimits configured = await _configureLimits(args);
           _emit(configured.toJson(), args, output);
@@ -547,6 +558,7 @@ class ProjectArguments {
         'dropins',
         'changed',
         'remove',
+        'apply',
       }.contains(key)) {
         values[key] = 'true';
       } else {

@@ -204,6 +204,7 @@ const Set<String> _serverTypes = <String>{
 };
 
 const Set<String> _booleanOptions = <String>{
+  'apply',
   'all',
   'auto-build',
   'clean',
@@ -277,6 +278,7 @@ const Map<String, List<String>> _positionalOptions = <String, List<String>>{
 };
 
 const Map<String, int> _maximumPositionals = <String, int>{
+  'projects init': 1,
   'projects scan': 1,
   'projects list': 0,
   'projects plan': 1,
@@ -416,6 +418,7 @@ const Map<String, String> _commandAliases = <String, String>{
 };
 
 const Map<String, int> _minimumPositionals = <String, int>{
+  'projects init': 1,
   'projects scan': 1,
   'projects logs': 1,
   'projects cancel': 1,

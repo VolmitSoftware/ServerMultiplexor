@@ -97,7 +97,7 @@ void main() {
     List<Object?>? result = await prompt('actions', <String>[
       '1',
       '8',
-      '3',
+      'p',
       '4',
     ]);
     expect(result, <String>[

@@ -43,6 +43,18 @@ void main() {
 
   test('projects public actions and internal worker are accepted', () {
     for (List<String> arguments in <List<String>>[
+      <String>['init', '/source path', '--json'],
+      <String>[
+        'init',
+        '/source',
+        '--id',
+        'sample',
+        '--name',
+        'Sample',
+        '--java',
+        '25',
+        '--apply',
+      ],
       <String>['scan', '/source path', '--json'],
       <String>['list', '--json'],
       <String>['plan', '--all', '--all-targets', '--json'],
@@ -83,6 +95,9 @@ void main() {
 
   test('projects reject missing values and unexpected arguments', () {
     for (List<String> arguments in <List<String>>[
+      <String>['init'],
+      <String>['init', '/source', '/another'],
+      <String>['init', '/source', '--java'],
       <String>['scan'],
       <String>['list', 'iris'],
       <String>['build', 'iris', 'gloss'],
@@ -124,6 +139,7 @@ void main() {
     );
     String help = lines.join('\n');
     expect(help, contains('projects scan <path>'));
+    expect(help, contains('projects init <path>'));
     expect(help, contains('--all-targets'));
     expect(help, contains('--target <id,...>'));
     expect(help, contains('projects plan --targets <project:target,...>'));

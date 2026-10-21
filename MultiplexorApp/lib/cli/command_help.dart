@@ -83,6 +83,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'path',
   ]),
   CommandHelpGroup('projects', <String>[
+    'init <path> [--id <id>] [--name <name>] [--java <major>] [--apply] [--json]',
     'scan <path> [--json]',
     'list [--json]',
     'plan [project] [--all] [--target <id,...>] [--all-targets] [--json]',

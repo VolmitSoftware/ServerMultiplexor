@@ -1,3 +1,4 @@
+import 'package:multiplexor/services/projects/project_terminal.dart';
 import 'dart:async';
 import 'dart:collection';
 
@@ -43,6 +44,7 @@ void main() {
         },
       ).run();
       await _until(() => terminal.output.contains('Iris'));
+      terminal.input.add(const TermEvent(TermEventKind.arrowRight));
       terminal.input.add(const TermEvent(TermEventKind.arrowDown));
       terminal.input.add(const TermEvent(TermEventKind.char, char: 'b'));
       await _until(() => calls.isNotEmpty);
@@ -133,6 +135,7 @@ void main() {
             return null;
           },
     ).run();
+    terminal.input.add(const TermEvent(TermEventKind.arrowRight));
     terminal.input.add(
       const TermEvent(TermEventKind.mouseDown, row: 8, col: 110),
     );
@@ -192,7 +195,8 @@ void main() {
             (15, ProjectDashboardAction.build),
             (27, ProjectDashboardAction.limits),
             (40, ProjectDashboardAction.locations),
-            (55, ProjectDashboardAction.actions),
+            (55, ProjectDashboardAction.setup),
+            (69, ProjectDashboardAction.actions),
           ]) {
         int count = actions.length;
         terminal.input.add(
@@ -214,6 +218,36 @@ void main() {
         await _until(() => actions.length == count + 1);
         expect(actions.last, button.$2);
       }
+      terminal.input.add(const TermEvent(TermEventKind.escape));
+      await running;
+    },
+  );
+
+  test(
+    'conversion stays discoverable and opens by shortcut at 48 columns',
+    () async {
+      _Terminal terminal = _Terminal()
+        ..columns = 48
+        ..lines = 14;
+      List<ProjectDashboardAction> actions = <ProjectDashboardAction>[];
+      Future<void> running = _start(
+        _screen(
+          terminal,
+          prompt:
+              (
+                ProjectDashboardAction action,
+                ProjectDashboardSelection selection,
+              ) async {
+                actions.add(action);
+                return null;
+              },
+        ),
+        terminal,
+      );
+      await _until(() => terminal.output.contains('i convert'));
+      terminal.input.add(const TermEvent(TermEventKind.char, char: 'i'));
+      await _until(() => actions.isNotEmpty);
+      expect(actions.single, ProjectDashboardAction.setup);
       terminal.input.add(const TermEvent(TermEventKind.escape));
       await running;
     },
@@ -260,7 +294,7 @@ void main() {
         ],
       ]) {
         terminal.input.addAll(gesture);
-        terminal.input.add(const TermEvent(TermEventKind.enter));
+        terminal.input.add(const TermEvent(TermEventKind.char, char: 'm'));
         int count = actions.length;
         await _until(() => actions.length > count);
         expect(actions.length, count + 1);
@@ -306,6 +340,7 @@ void main() {
 
       ProjectDashboardSelection partial =
           await _capture(terminal, selections, <TermEvent>[
+            const TermEvent(TermEventKind.arrowRight),
             const TermEvent(TermEventKind.arrowDown),
             const TermEvent(TermEventKind.char, char: 'v'),
           ]);
@@ -487,6 +522,7 @@ void main() {
       );
       await _capture(terminal, selections, <TermEvent>[
         const TermEvent(TermEventKind.char, char: 'a'),
+        const TermEvent(TermEventKind.arrowRight),
         const TermEvent(TermEventKind.arrowDown),
       ]);
       catalog = <Map<String, Object?>>[
@@ -644,6 +680,124 @@ void main() {
     },
   );
 
+  test(
+    'library-only projects stay out of builds while their run history remains read-only',
+    () async {
+      _Terminal terminal = _Terminal();
+      List<ProjectDashboardSelection> selections =
+          <ProjectDashboardSelection>[];
+      List<Map<String, Object?>> catalog = <Map<String, Object?>>[
+        <String, Object?>{
+          'id': 'volmlib',
+          'name': 'VolmLib',
+          'targets': <Object?>[
+            for (String target in <String>['shared', 'native'])
+              <String, Object?>{
+                'id': target,
+                'artifacts': <Object?>[
+                  <String, Object?>{'role': 'library'},
+                ],
+              },
+          ],
+        },
+        <String, Object?>{
+          'id': 'mixed',
+          'name': 'Mixed',
+          'targets': <Object?>[
+            <String, Object?>{
+              'id': 'bukkit',
+              'artifacts': <Object?>[
+                <String, Object?>{'role': 'runtime'},
+              ],
+            },
+            <String, Object?>{
+              'id': 'api',
+              'artifacts': <Object?>[
+                <String, Object?>{'role': 'library'},
+              ],
+            },
+          ],
+        },
+      ];
+      Map<String, Object?> status = <String, Object?>{'runs': <Object?>[]};
+      Future<void> running = _start(
+        _screen(
+          terminal,
+          loadCatalog: () => catalog,
+          loadStatus: () => status,
+          prompt:
+              (
+                ProjectDashboardAction action,
+                ProjectDashboardSelection selection,
+              ) async {
+                selections.add(selection);
+                return null;
+              },
+        ),
+        terminal,
+      );
+      ProjectDashboardSelection selectable =
+          await _capture(terminal, selections, <TermEvent>[
+            const TermEvent(TermEventKind.char, char: 'a'),
+            const TermEvent(TermEventKind.end),
+          ]);
+      expect(selectable.node!.key, 'mixed:');
+      expect(selectable.registered, isTrue);
+      expect(
+        selectable.catalog.map((Map<String, Object?> p) => p['id']),
+        <String>['mixed'],
+      );
+      expect(selectable.checkedTargets, <String>['mixed:bukkit', 'mixed:api']);
+      expect(terminal.output, isNot(contains('VolmLib')));
+
+      for (String state in <String>['running', 'succeeded']) {
+        status = <String, Object?>{
+          'runs': <Object?>[
+            <String, Object?>{
+              'id': 'run-library',
+              'status': state,
+              'jobs': <Object?>[
+                <String, Object?>{
+                  'key': 'volmlib:shared',
+                  'project': 'volmlib',
+                  'target': 'shared',
+                  'status': state,
+                },
+              ],
+            },
+          ],
+        };
+        ProjectDashboardSelection history =
+            await _capture(terminal, selections, <TermEvent>[
+              const TermEvent(TermEventKind.char, char: 'R'),
+              const TermEvent(TermEventKind.end),
+              const TermEvent(TermEventKind.char, char: 'a'),
+              const TermEvent(TermEventKind.char, char: ' '),
+              const TermEvent(TermEventKind.char, char: 'v'),
+            ]);
+        expect(history.row!.key, 'volmlib:shared');
+        expect(history.projectName, 'VolmLib');
+        expect(history.row!.status, state);
+        expect(history.row!.registered, isFalse);
+        expect(history.registered, isFalse);
+        expect(history.checkedTargets, <String>['mixed:bukkit', 'mixed:api']);
+        expect(
+          history.catalog.map((Map<String, Object?> p) => p['id']),
+          <String>['mixed'],
+        );
+        ProjectDashboardSelection unchecked =
+            await _capture(terminal, selections, <TermEvent>[
+              const TermEvent(TermEventKind.char, char: 'x'),
+              const TermEvent(TermEventKind.char, char: ' '),
+              const TermEvent(TermEventKind.char, char: 'v'),
+            ]);
+        expect(unchecked.checkedTargets, isEmpty);
+      }
+      terminal.input.add(const TermEvent(TermEventKind.escape));
+      await running;
+    },
+  );
+
   test('checkbox mouse clicks require matching left-button release', () async {
     _Terminal terminal = _Terminal()..columns = 140;
     List<ProjectDashboardSelection> selections = <ProjectDashboardSelection>[];
@@ -661,19 +815,20 @@ void main() {
       ),
       terminal,
     );
+    terminal.input.add(const TermEvent(TermEventKind.arrowRight));
     for (List<TermEvent> gesture in <List<TermEvent>>[
-      <TermEvent>[const TermEvent(TermEventKind.mouseUp, row: 7, col: 4)],
+      <TermEvent>[const TermEvent(TermEventKind.mouseUp, row: 7, col: 10)],
       <TermEvent>[
-        const TermEvent(TermEventKind.mouseDown, row: 7, col: 4),
-        const TermEvent(TermEventKind.mouseUp, row: 8, col: 4),
+        const TermEvent(TermEventKind.mouseDown, row: 7, col: 10),
+        const TermEvent(TermEventKind.mouseUp, row: 8, col: 10),
       ],
       <TermEvent>[
-        const TermEvent(TermEventKind.mouseDown, row: 7, col: 4),
-        const TermEvent(TermEventKind.mouseUp, row: 7, col: 12),
+        const TermEvent(TermEventKind.mouseDown, row: 7, col: 10),
+        const TermEvent(TermEventKind.mouseUp, row: 7, col: 16),
       ],
       <TermEvent>[
-        const TermEvent(TermEventKind.mouseDown, row: 7, col: 4, button: 2),
-        const TermEvent(TermEventKind.mouseUp, row: 7, col: 4, button: 2),
+        const TermEvent(TermEventKind.mouseDown, row: 7, col: 10, button: 2),
+        const TermEvent(TermEventKind.mouseUp, row: 7, col: 10, button: 2),
       ],
     ]) {
       ProjectDashboardSelection selection = await _capture(
@@ -685,27 +840,27 @@ void main() {
     }
     ProjectDashboardSelection target =
         await _capture(terminal, selections, <TermEvent>[
-          const TermEvent(TermEventKind.mouseDown, row: 7, col: 4),
-          const TermEvent(TermEventKind.mouseUp, row: 7, col: 4),
+          const TermEvent(TermEventKind.mouseDown, row: 7, col: 10),
+          const TermEvent(TermEventKind.mouseUp, row: 7, col: 10),
         ]);
     expect(target.checkedTargets, <String>['iris:bukkit']);
     expect(target.row!.key, 'iris:bukkit');
     ProjectDashboardSelection parent =
         await _capture(terminal, selections, <TermEvent>[
-          const TermEvent(TermEventKind.mouseDown, row: 6, col: 4),
-          const TermEvent(TermEventKind.mouseUp, row: 6, col: 4),
+          const TermEvent(TermEventKind.mouseDown, row: 6, col: 7),
+          const TermEvent(TermEventKind.mouseUp, row: 6, col: 7),
         ]);
     expect(parent.checkedTargets, <String>['iris:bukkit', 'iris:fabric']);
     ProjectDashboardSelection cleared =
         await _capture(terminal, selections, <TermEvent>[
-          const TermEvent(TermEventKind.mouseDown, row: 5, col: 4),
-          const TermEvent(TermEventKind.mouseUp, row: 5, col: 4),
+          const TermEvent(TermEventKind.mouseDown, row: 5, col: 7),
+          const TermEvent(TermEventKind.mouseUp, row: 5, col: 7),
         ]);
     expect(cleared.checkedTargets, isEmpty);
     ProjectDashboardSelection all =
         await _capture(terminal, selections, <TermEvent>[
-          const TermEvent(TermEventKind.mouseDown, row: 5, col: 4),
-          const TermEvent(TermEventKind.mouseUp, row: 5, col: 4),
+          const TermEvent(TermEventKind.mouseDown, row: 5, col: 7),
+          const TermEvent(TermEventKind.mouseUp, row: 5, col: 7),
         ]);
     expect(all.checkedTargets, <String>['iris:bukkit', 'iris:fabric']);
     terminal.input.add(const TermEvent(TermEventKind.escape));
@@ -733,10 +888,11 @@ void main() {
         ),
         terminal,
       );
+      terminal.input.add(const TermEvent(TermEventKind.arrowRight));
       ProjectDashboardSelection collapsed =
           await _capture(terminal, selections, <TermEvent>[
-            const TermEvent(TermEventKind.mouseDown, row: 6, col: 10),
-            const TermEvent(TermEventKind.mouseUp, row: 6, col: 10),
+            const TermEvent(TermEventKind.mouseDown, row: 6, col: 5),
+            const TermEvent(TermEventKind.mouseUp, row: 6, col: 5),
           ]);
       expect(collapsed.node!.expanded, isFalse);
       expect(collapsed.checkedTargets, isEmpty);
@@ -835,6 +991,423 @@ void main() {
       await running;
     },
   );
+
+  test(
+    'projects start collapsed and singleton projects act as leaves',
+    () async {
+      _Terminal terminal = _Terminal();
+      List<ProjectDashboardSelection> selections =
+          <ProjectDashboardSelection>[];
+      List<ProjectDashboardAction> actions = <ProjectDashboardAction>[];
+      Future<void> running = _start(
+        _screen(
+          terminal,
+          loadCatalog: () => <Map<String, Object?>>[_grouped, _singleton],
+          loadStatus: () => <String, Object?>{'runs': <Object?>[]},
+          prompt:
+              (
+                ProjectDashboardAction action,
+                ProjectDashboardSelection selection,
+              ) async {
+                actions.add(action);
+                selections.add(selection);
+                return null;
+              },
+        ),
+        terminal,
+      );
+      ProjectDashboardSelection project = await _capture(
+        terminal,
+        selections,
+        <TermEvent>[],
+      );
+      expect(project.node!.key, 'iris:');
+      expect(project.node!.isBranch, isTrue);
+      expect(project.node!.expanded, isFalse);
+      ProjectDashboardSelection singleton =
+          await _capture(terminal, selections, <TermEvent>[
+            const TermEvent(TermEventKind.arrowDown),
+            const TermEvent(TermEventKind.char, char: ' '),
+            const TermEvent(TermEventKind.arrowRight),
+            const TermEvent(TermEventKind.arrowLeft),
+          ]);
+      expect(singleton.node!.key, 'tools:jar');
+      expect(singleton.node!.isBranch, isFalse);
+      expect(singleton.node!.depth, 0);
+      expect(singleton.node!.parentKey, isNull);
+      expect(singleton.checkedTargets, <String>['tools:jar']);
+      int previous = selections.length;
+      terminal.input.add(const TermEvent(TermEventKind.enter));
+      await _until(() => selections.length == previous + 1);
+      expect(actions.last, ProjectDashboardAction.actions);
+      expect(selections.last.row!.key, 'tools:jar');
+      terminal.input.add(const TermEvent(TermEventKind.escape));
+      await running;
+    },
+  );
+
+  test('nested branches navigate and check only their descendants', () async {
+    _Terminal terminal = _Terminal();
+    List<ProjectDashboardSelection> selections = <ProjectDashboardSelection>[];
+    List<ProjectDashboardAction> actions = <ProjectDashboardAction>[];
+    Future<void> running = _start(
+      _screen(
+        terminal,
+        loadCatalog: () => <Map<String, Object?>>[_grouped, _singleton],
+        loadStatus: () => <String, Object?>{'runs': <Object?>[]},
+        prompt:
+            (
+              ProjectDashboardAction action,
+              ProjectDashboardSelection selection,
+            ) async {
+              actions.add(action);
+              selections.add(selection);
+              return null;
+            },
+      ),
+      terminal,
+    );
+    ProjectDashboardSelection group =
+        await _capture(terminal, selections, <TermEvent>[
+          const TermEvent(TermEventKind.enter),
+          const TermEvent(TermEventKind.arrowRight),
+          const TermEvent(TermEventKind.arrowDown),
+          const TermEvent(TermEventKind.arrowDown),
+          const TermEvent(TermEventKind.char, char: ' '),
+        ]);
+    expect(selections, hasLength(1));
+    expect(group.node!.key, 'iris:@fabric');
+    expect(group.node!.group, 'fabric');
+    expect(group.node!.parentKey, 'iris:');
+    expect(group.node!.expanded, isFalse);
+    expect(group.checkedTargets, <String>[
+      'iris:fabric-26.2',
+      'iris:fabric-26.3',
+    ]);
+    ProjectDashboardSelection child =
+        await _capture(terminal, selections, <TermEvent>[
+          const TermEvent(TermEventKind.enter),
+          const TermEvent(TermEventKind.arrowRight),
+          const TermEvent(TermEventKind.char, char: ' '),
+        ]);
+    expect(selections, hasLength(2));
+    expect(child.row!.key, 'iris:fabric-26.2');
+    expect(child.node!.parentKey, 'iris:@fabric');
+    expect(child.node!.ancestors, <String>['iris:', 'iris:@fabric']);
+    expect(child.checkedTargets, <String>['iris:fabric-26.3']);
+    ProjectDashboardSelection parent = await _capture(
+      terminal,
+      selections,
+      <TermEvent>[const TermEvent(TermEventKind.arrowLeft)],
+    );
+    expect(parent.node!.key, 'iris:@fabric');
+    expect(parent.node!.expanded, isTrue);
+    expect(parent.node!.checkbox(parent.checkedTargets.toSet()), '[-]');
+    ProjectDashboardSelection collapsed = await _capture(
+      terminal,
+      selections,
+      <TermEvent>[const TermEvent(TermEventKind.arrowLeft)],
+    );
+    expect(collapsed.node!.expanded, isFalse);
+    expect(collapsed.checkedTargets, child.checkedTargets);
+    ProjectDashboardSelection root = await _capture(
+      terminal,
+      selections,
+      <TermEvent>[const TermEvent(TermEventKind.arrowLeft)],
+    );
+    expect(root.node!.key, 'iris:');
+    terminal.input.addAll(<TermEvent>[
+      const TermEvent(TermEventKind.end),
+      const TermEvent(TermEventKind.char, char: ' '),
+      const TermEvent(TermEventKind.char, char: 'b'),
+    ]);
+    await _until(() => selections.length == 6);
+    expect(actions.last, ProjectDashboardAction.build);
+    expect(selections.last.checkedTargets, <String>[
+      'iris:fabric-26.3',
+      'tools:jar',
+    ]);
+    terminal.input.add(const TermEvent(TermEventKind.escape));
+    await running;
+  });
+
+  test('expand and collapse all preserve checks and visible focus', () async {
+    _Terminal terminal = _Terminal();
+    List<ProjectDashboardSelection> selections = <ProjectDashboardSelection>[];
+    Future<void> running = _start(
+      _screen(
+        terminal,
+        loadCatalog: () => <Map<String, Object?>>[_grouped],
+        loadStatus: () => <String, Object?>{'runs': <Object?>[]},
+        prompt:
+            (
+              ProjectDashboardAction action,
+              ProjectDashboardSelection selection,
+            ) async {
+              selections.add(selection);
+              return null;
+            },
+      ),
+      terminal,
+    );
+    ProjectDashboardSelection leaf =
+        await _capture(terminal, selections, <TermEvent>[
+          const TermEvent(TermEventKind.char, char: 'e'),
+          const TermEvent(TermEventKind.end),
+          const TermEvent(TermEventKind.char, char: ' '),
+        ]);
+    expect(leaf.row!.key, 'iris:neoforge-26.3');
+    ProjectDashboardSelection collapsed = await _capture(
+      terminal,
+      selections,
+      <TermEvent>[const TermEvent(TermEventKind.char, char: 'z')],
+    );
+    expect(collapsed.node!.key, 'iris:');
+    expect(collapsed.node!.expanded, isFalse);
+    expect(collapsed.checkedTargets, leaf.checkedTargets);
+    ProjectDashboardSelection expanded =
+        await _capture(terminal, selections, <TermEvent>[
+          const TermEvent(TermEventKind.char, char: 'e'),
+          const TermEvent(TermEventKind.end),
+        ]);
+    expect(expanded.row!.key, leaf.row!.key);
+    expect(expanded.checkedTargets, leaf.checkedTargets);
+    terminal.input.add(const TermEvent(TermEventKind.escape));
+    await running;
+  });
+
+  test('checks survive a loader group shrinking to one target', () async {
+    _Terminal terminal = _Terminal();
+    Map<String, Object?> project = <String, Object?>{
+      'id': 'iris',
+      'name': 'Iris',
+      'targets': <Object?>[
+        <String, Object?>{'id': 'bukkit'},
+        <String, Object?>{'id': 'fabric-26.2'},
+        <String, Object?>{'id': 'fabric-26.3'},
+      ],
+    };
+    List<ProjectDashboardSelection> selections = <ProjectDashboardSelection>[];
+    Future<void> running = _start(
+      _screen(
+        terminal,
+        loadCatalog: () => <Map<String, Object?>>[project],
+        loadStatus: () => <String, Object?>{'runs': <Object?>[]},
+        prompt:
+            (
+              ProjectDashboardAction action,
+              ProjectDashboardSelection selection,
+            ) async {
+              selections.add(selection);
+              return null;
+            },
+      ),
+      terminal,
+    );
+    ProjectDashboardSelection initial =
+        await _capture(terminal, selections, <TermEvent>[
+          const TermEvent(TermEventKind.char, char: 'e'),
+          const TermEvent(TermEventKind.end),
+          const TermEvent(TermEventKind.char, char: ' '),
+        ]);
+    expect(initial.row!.key, 'iris:fabric-26.3');
+    expect(initial.node!.depth, 2);
+    project = <String, Object?>{
+      ...project,
+      'targets': <Object?>[
+        <String, Object?>{'id': 'fabric-26.3'},
+        <String, Object?>{'id': 'bukkit'},
+      ],
+    };
+    ProjectDashboardSelection singleton = await _capture(
+      terminal,
+      selections,
+      <TermEvent>[const TermEvent(TermEventKind.char, char: 'R')],
+    );
+    expect(singleton.row!.key, initial.row!.key);
+    expect(singleton.node!.depth, 1);
+    expect(singleton.node!.parentKey, 'iris:');
+    expect(singleton.checkedTargets, initial.checkedTargets);
+    project = <String, Object?>{
+      ...project,
+      'targets': <Object?>[
+        <String, Object?>{'id': 'fabric-26.3'},
+      ],
+    };
+    ProjectDashboardSelection rootLeaf =
+        await _capture(terminal, selections, <TermEvent>[
+          const TermEvent(TermEventKind.char, char: 'R'),
+          const TermEvent(TermEventKind.char, char: 'z'),
+        ]);
+    expect(rootLeaf.row!.key, initial.row!.key);
+    expect(rootLeaf.node!.depth, 0);
+    expect(rootLeaf.node!.isBranch, isFalse);
+    expect(rootLeaf.checkedTargets, initial.checkedTargets);
+    terminal.input.add(const TermEvent(TermEventKind.escape));
+    await running;
+  });
+
+  test(
+    'output is visible by default and hiding it stops reads while retaining checks',
+    () async {
+      _Terminal terminal = _Terminal();
+      List<String> reads = <String>[];
+      List<ProjectDashboardSelection> selections =
+          <ProjectDashboardSelection>[];
+      Future<void> running = _start(
+        _screen(
+          terminal,
+          logReader: (String path, int count) async {
+            reads.add(path);
+            return <String>['Output $path'];
+          },
+          prompt:
+              (
+                ProjectDashboardAction action,
+                ProjectDashboardSelection selection,
+              ) async {
+                selections.add(selection);
+                return null;
+              },
+        ),
+        terminal,
+      );
+      await _capture(terminal, selections, <TermEvent>[
+        const TermEvent(TermEventKind.arrowRight),
+        const TermEvent(TermEventKind.arrowRight),
+        const TermEvent(TermEventKind.char, char: ' '),
+      ]);
+      await _until(() => terminal.output.contains('Output /bukkit.log'));
+      expect(reads, contains('/bukkit.log'));
+      await _capture(terminal, selections, <TermEvent>[
+        const TermEvent(TermEventKind.char, char: 't'),
+      ]);
+      reads.clear();
+      ProjectDashboardSelection hidden =
+          await _capture(terminal, selections, <TermEvent>[
+            const TermEvent(TermEventKind.arrowDown),
+            const TermEvent(TermEventKind.char, char: 'R'),
+          ]);
+      expect(hidden.row!.key, 'iris:fabric');
+      expect(hidden.checkedTargets, <String>['iris:bukkit']);
+      expect(reads, isEmpty);
+      terminal.input.add(const TermEvent(TermEventKind.char, char: 't'));
+      await _until(() => terminal.output.contains('Output /fabric.log'));
+      expect(reads, contains('/fabric.log'));
+      ProjectDashboardSelection visible = await _capture(
+        terminal,
+        selections,
+        <TermEvent>[],
+      );
+      expect(visible.checkedTargets, hidden.checkedTargets);
+      terminal.input.add(const TermEvent(TermEventKind.escape));
+      await running;
+    },
+  );
+
+  test(
+    'nested mouse spans distinguish disclosure, checks, and row selection',
+    () async {
+      _Terminal terminal = _Terminal()..columns = 120;
+      List<ProjectDashboardSelection> selections =
+          <ProjectDashboardSelection>[];
+      Future<void> running = _start(
+        _screen(
+          terminal,
+          loadCatalog: () => <Map<String, Object?>>[_grouped],
+          loadStatus: () => <String, Object?>{'runs': <Object?>[]},
+          prompt:
+              (
+                ProjectDashboardAction action,
+                ProjectDashboardSelection selection,
+              ) async {
+                selections.add(selection);
+                return null;
+              },
+        ),
+        terminal,
+      );
+      await _capture(terminal, selections, <TermEvent>[
+        const TermEvent(TermEventKind.arrowRight),
+      ]);
+      int previous = selections.length;
+      terminal.input.addAll(<TermEvent>[
+        const TermEvent(TermEventKind.mouseDown, row: 9, col: 8),
+      ]);
+      await _until(() => terminal.input.isEmpty);
+      ProjectDashboardSelection pressed = await _capture(
+        terminal,
+        selections,
+        <TermEvent>[],
+      );
+      expect(pressed.node!.key, 'iris:@fabric');
+      expect(pressed.node!.expanded, isFalse);
+      expect(selections.length, previous + 1);
+      ProjectDashboardSelection expanded =
+          await _capture(terminal, selections, <TermEvent>[
+            const TermEvent(TermEventKind.mouseDown, row: 9, col: 8),
+            const TermEvent(TermEventKind.mouseUp, row: 9, col: 8),
+          ]);
+      expect(expanded.node!.expanded, isTrue);
+      expect(expanded.checkedTargets, isEmpty);
+      for (List<TermEvent> gesture in <List<TermEvent>>[
+        <TermEvent>[const TermEvent(TermEventKind.mouseUp, row: 10, col: 13)],
+        <TermEvent>[
+          const TermEvent(TermEventKind.mouseDown, row: 10, col: 13),
+          const TermEvent(TermEventKind.mouseUp, row: 11, col: 13),
+        ],
+        <TermEvent>[
+          const TermEvent(TermEventKind.mouseDown, row: 10, col: 13),
+          const TermEvent(TermEventKind.mouseUp, row: 10, col: 10),
+        ],
+        <TermEvent>[
+          const TermEvent(TermEventKind.mouseDown, row: 9, col: 8),
+          const TermEvent(TermEventKind.mouseUp, row: 9, col: 10),
+        ],
+      ]) {
+        ProjectDashboardSelection untouched = await _capture(
+          terminal,
+          selections,
+          gesture,
+        );
+        expect(untouched.checkedTargets, isEmpty);
+      }
+      ProjectDashboardSelection leaf =
+          await _capture(terminal, selections, <TermEvent>[
+            const TermEvent(TermEventKind.mouseDown, row: 10, col: 13),
+            const TermEvent(TermEventKind.mouseUp, row: 10, col: 13),
+          ]);
+      expect(leaf.row!.key, 'iris:fabric-26.2');
+      expect(leaf.checkedTargets, <String>['iris:fabric-26.2']);
+      ProjectDashboardSelection group =
+          await _capture(terminal, selections, <TermEvent>[
+            const TermEvent(TermEventKind.mouseDown, row: 9, col: 10),
+            const TermEvent(TermEventKind.mouseUp, row: 9, col: 10),
+          ]);
+      expect(group.checkedTargets, <String>[
+        'iris:fabric-26.2',
+        'iris:fabric-26.3',
+      ]);
+      previous = selections.length;
+      terminal.input.addAll(<TermEvent>[
+        for (int index = 0; index < 2; index++) ...<TermEvent>[
+          const TermEvent(TermEventKind.mouseDown, row: 10, col: 25),
+          const TermEvent(TermEventKind.mouseUp, row: 10, col: 25),
+        ],
+      ]);
+      await _until(() => terminal.input.isEmpty);
+      expect(selections.length, previous);
+      ProjectDashboardSelection selected = await _capture(
+        terminal,
+        selections,
+        <TermEvent>[],
+      );
+      expect(selected.row!.key, 'iris:fabric-26.2');
+      expect(selected.checkedTargets, group.checkedTargets);
+      terminal.input.add(const TermEvent(TermEventKind.escape));
+      await running;
+    },
+  );
 }
 
 ProjectDashboard _screen(
@@ -902,7 +1475,7 @@ final Map<String, Object?> _status = <String, Object?>{
   ],
 };
 
-class _Terminal implements ProjectDashboardTerminal {
+class _Terminal implements ProjectTerminal {
   final Queue<TermEvent> input = Queue<TermEvent>();
   final StringBuffer _output = StringBuffer();
   int restores = 0;
@@ -944,6 +1517,32 @@ final Map<String, Object?> _wormholes = <String, Object?>{
   ],
 };
 
+final Map<String, Object?> _grouped = <String, Object?>{
+  'id': 'iris',
+  'name': 'Iris',
+  'targets': <Object?>[
+    for (String target in <String>[
+      'bukkit',
+      'api',
+      'fabric-26.2',
+      'fabric-26.3',
+      'forge-1.21.1',
+      'forge-26.3',
+      'neoforge-26.2',
+      'neoforge-26.3',
+    ])
+      <String, Object?>{'id': target},
+  ],
+};
+
+final Map<String, Object?> _singleton = <String, Object?>{
+  'id': 'tools',
+  'name': 'Tools',
+  'targets': <Object?>[
+    <String, Object?>{'id': 'jar'},
+  ],
+};
+
 Future<void> _start(ProjectDashboard screen, _Terminal terminal) {
   Future<void> running = screen.run();
   addTearDown(() async {
@@ -961,7 +1560,7 @@ Future<ProjectDashboardSelection> _capture(
   int previous = selections.length;
   terminal.input.addAll(<TermEvent>[
     ...events,
-    const TermEvent(TermEventKind.enter),
+    const TermEvent(TermEventKind.char, char: 'm'),
   ]);
   await _until(() => selections.length > previous && terminal.input.isEmpty);
   return selections.last;

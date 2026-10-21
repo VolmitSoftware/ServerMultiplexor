@@ -18,6 +18,47 @@ String projectText(Object? value) => (value?.toString() ?? '')
 String projectOutputText(String value) =>
     value.split('\n').map(projectText).join('\n');
 
+String projectRunTiming(Map<String, Object?> run, DateTime now) {
+  DateTime? started =
+      DateTime.tryParse(projectText(run['createdAt'])) ??
+      DateTime.tryParse(projectText(run['startedAt']));
+  DateTime? finished = DateTime.tryParse(projectText(run['finishedAt']));
+  String status = projectText(run['status']);
+  bool active =
+      finished == null &&
+      <String>{'queued', 'preparing', 'running'}.contains(status);
+  DateTime? ended =
+      finished ??
+      (active
+          ? now
+          : status == 'interrupted'
+          ? DateTime.tryParse(projectText(run['heartbeatAt']))
+          : null);
+  String duration = started == null || ended == null
+      ? '-'
+      : formatCompactDuration(ended.difference(started));
+  return '${active ? 'Elapsed' : 'Total'} $duration';
+}
+
+List<Map<String, Object?>> projectDashboardCatalog(
+  List<Map<String, Object?>> catalog,
+) => catalog
+    .where((Map<String, Object?> project) {
+      List<Map<String, Object?>> targets = projectMaps(project['targets']);
+      return targets.isEmpty ||
+          !targets.every((Map<String, Object?> target) {
+            List<Map<String, Object?>> artifacts = projectMaps(
+              target['artifacts'],
+            );
+            return artifacts.isNotEmpty &&
+                artifacts.every(
+                  (Map<String, Object?> artifact) =>
+                      artifact['role'] == 'library',
+                );
+          });
+    })
+    .toList(growable: false);
+
 class ProjectDashboardRow {
   const ProjectDashboardRow({
     required this.project,
@@ -57,7 +98,7 @@ List<ProjectDashboardRow> projectDashboardRows(
   };
   List<ProjectDashboardRow> rows = <ProjectDashboardRow>[];
   Set<String> keys = <String>{};
-  for (Map<String, Object?> project in catalog) {
+  for (Map<String, Object?> project in projectDashboardCatalog(catalog)) {
     String id = projectText(project['id']);
     for (Map<String, Object?> target in projectMaps(project['targets'])) {
       String targetId = projectText(target['id']);
@@ -77,11 +118,14 @@ List<ProjectDashboardRow> projectDashboardRows(
   for (MapEntry<String, Map<String, Object?>> entry in jobs.entries) {
     if (!keys.add(entry.key)) continue;
     String project = projectText(entry.value['project']);
+    Map<String, Object?>? definition = catalog
+        .where((Map<String, Object?> item) => item['id'] == project)
+        .firstOrNull;
     rows.add(
       ProjectDashboardRow(
         project: project,
         target: projectText(entry.value['target']),
-        name: project,
+        name: projectText(definition?['name'] ?? project),
         job: entry.value,
         registered: false,
       ),
@@ -96,6 +140,9 @@ class ProjectDashboardNode {
     required this.name,
     required this.targets,
     this.target,
+    this.group,
+    this.ancestors = const <String>[],
+    this.ancestorLastChildren = const <bool>[],
     this.expanded = false,
     this.lastChild = false,
   });
@@ -104,11 +151,49 @@ class ProjectDashboardNode {
   final String name;
   final List<ProjectDashboardRow> targets;
   final ProjectDashboardRow? target;
+  final String? group;
+  final List<String> ancestors;
+  final List<bool> ancestorLastChildren;
   final bool expanded;
   final bool lastChild;
 
-  bool get isProject => target == null;
-  String get key => target?.key ?? '$project:';
+  bool get isBranch => target == null;
+  bool get isProject => isBranch && group == null;
+  int get depth => ancestors.length;
+  String? get parentKey => ancestors.lastOrNull;
+  String get key => target?.key ?? '$project:${group == null ? '' : '@$group'}';
+  String get displayLabel {
+    if (isProject) return name;
+    if (isBranch) {
+      return switch (group) {
+        'fabric' => 'Fabric',
+        'forge' => 'Forge',
+        'neoforge' => 'NeoForge',
+        _ => group!,
+      };
+    }
+    if (depth == 0) return '$name / ${target!.target}';
+    return group == null
+        ? target!.target
+        : target!.target.substring(group!.length + 1);
+  }
+
+  String treePrefix({required bool ascii}) {
+    if (depth == 0) return '';
+    return '${ancestorLastChildren.map((bool last) => last
+            ? '   '
+            : ascii
+            ? '|  '
+            : '│  ').join()}'
+        '${lastChild
+            ? ascii
+                  ? '`- '
+                  : '└─ '
+            : ascii
+            ? '|- '
+            : '├─ '}';
+  }
+
   String get status {
     if (target != null) return target!.status;
     Set<String> states = targets
@@ -140,7 +225,7 @@ class ProjectDashboardNode {
     return count == 0
         ? '[ ]'
         : count == keys.length
-        ? '[x]'
+        ? '[X]'
         : '[-]';
   }
 }
@@ -154,25 +239,132 @@ List<ProjectDashboardNode> projectDashboardTree(
   for (ProjectDashboardRow row in rows) {
     projects.putIfAbsent(row.project, () => <ProjectDashboardRow>[]).add(row);
   }
-  return <ProjectDashboardNode>[
-    for (MapEntry<String, List<ProjectDashboardRow>> entry
-        in projects.entries) ...<ProjectDashboardNode>[
+  List<ProjectDashboardNode> nodes = <ProjectDashboardNode>[];
+  for (MapEntry<String, List<ProjectDashboardRow>> entry in projects.entries) {
+    if (entry.value.length == 1) {
+      nodes.add(
+        ProjectDashboardNode(
+          project: entry.key,
+          name: entry.value.single.name,
+          targets: entry.value,
+          target: entry.value.single,
+        ),
+      );
+      continue;
+    }
+    String projectKey = '${entry.key}:';
+    nodes.add(
       ProjectDashboardNode(
         project: entry.key,
         name: entry.value.first.name,
         targets: entry.value,
-        expanded: !collapsed.contains(entry.key),
+        expanded: !collapsed.contains(projectKey),
       ),
-      if (!collapsed.contains(entry.key))
-        for (ProjectDashboardRow row in entry.value)
+    );
+    if (collapsed.contains(projectKey)) continue;
+    Map<String, List<ProjectDashboardRow>> platforms =
+        <String, List<ProjectDashboardRow>>{};
+    for (ProjectDashboardRow row in entry.value) {
+      String platform = row.target.split('-').first;
+      if (<String>{'fabric', 'forge', 'neoforge'}.contains(platform) &&
+          row.target.startsWith('$platform-')) {
+        platforms.putIfAbsent(platform, () => <ProjectDashboardRow>[]).add(row);
+      }
+    }
+    Set<String> emitted = <String>{};
+    List<(String?, List<ProjectDashboardRow>)> children =
+        <(String?, List<ProjectDashboardRow>)>[];
+    for (ProjectDashboardRow row in entry.value) {
+      String platform = row.target.split('-').first;
+      List<ProjectDashboardRow>? siblings = platforms[platform];
+      if (siblings != null && siblings.length > 1) {
+        if (emitted.add(platform)) children.add((platform, siblings));
+      } else {
+        children.add((null, <ProjectDashboardRow>[row]));
+      }
+    }
+    for (int index = 0; index < children.length; index++) {
+      (String?, List<ProjectDashboardRow>) child = children[index];
+      String? group = child.$1;
+      bool last = index == children.length - 1;
+      if (group == null) {
+        nodes.add(
+          ProjectDashboardNode(
+            project: entry.key,
+            name: child.$2.single.name,
+            targets: child.$2,
+            target: child.$2.single,
+            ancestors: <String>[projectKey],
+            lastChild: last,
+          ),
+        );
+        continue;
+      }
+      String groupKey = '${entry.key}:@$group';
+      nodes.add(
+        ProjectDashboardNode(
+          project: entry.key,
+          name: entry.value.first.name,
+          targets: child.$2,
+          group: group,
+          ancestors: <String>[projectKey],
+          expanded: !collapsed.contains(groupKey),
+          lastChild: last,
+        ),
+      );
+      if (collapsed.contains(groupKey)) continue;
+      for (ProjectDashboardRow row in child.$2) {
+        nodes.add(
           ProjectDashboardNode(
             project: entry.key,
             name: row.name,
             targets: <ProjectDashboardRow>[row],
             target: row,
-            lastChild: identical(row, entry.value.last),
+            group: group,
+            ancestors: <String>[projectKey, groupKey],
+            ancestorLastChildren: <bool>[last],
+            lastChild: identical(row, child.$2.last),
           ),
-    ],
+        );
+      }
+    }
+  }
+  return nodes;
+}
+
+List<int> projectTreeViewport(
+  List<ProjectDashboardNode> nodes,
+  int selected,
+  int capacity,
+) {
+  if (nodes.isEmpty || capacity <= 0) return <int>[];
+  int start = math.max(0, selected - capacity + 1);
+  List<int> parents = nodes[selected].ancestors
+      .map(
+        (String key) =>
+            nodes.indexWhere((ProjectDashboardNode node) => node.key == key),
+      )
+      .where((int index) => index >= 0)
+      .toList(growable: false);
+  List<int> pinned = <int>[];
+  while (true) {
+    pinned = parents
+        .where((int index) => index < start)
+        .toList(growable: false);
+    if (pinned.length >= capacity) {
+      pinned = pinned.sublist(pinned.length - capacity + 1);
+    }
+    if (selected < start + capacity - pinned.length) break;
+    start++;
+  }
+  return <int>[
+    ...pinned,
+    for (
+      int index = start;
+      index < math.min(nodes.length, start + capacity - pinned.length);
+      index++
+    )
+      index,
   ];
 }
 
@@ -182,6 +374,8 @@ class ProjectDashboardFrame {
     required this.targetRows,
     required this.targetColumns,
     this.selectAllRow,
+    this.checkboxes = const <int, ButtonSpan>{},
+    this.disclosures = const <int, ButtonSpan>{},
     this.buttons = const <int, List<ButtonSpan>>{},
   });
 
@@ -189,6 +383,8 @@ class ProjectDashboardFrame {
   final Map<int, int> targetRows;
   final int targetColumns;
   final int? selectAllRow;
+  final Map<int, ButtonSpan> checkboxes;
+  final Map<int, ButtonSpan> disclosures;
   final Map<int, List<ButtonSpan>> buttons;
 }
 
@@ -206,6 +402,7 @@ ProjectDashboardFrame renderProjectDashboard({
   required MonitorTheme theme,
   required DateTime now,
   String? pressedButton,
+  bool showOutput = true,
 }) {
   int width = math.max(1, columns);
   int height = math.max(1, lines);
@@ -220,6 +417,8 @@ ProjectDashboardFrame renderProjectDashboard({
   int targetColumns = 0;
   int? selectAllRow;
   Map<int, List<ButtonSpan>> buttons = <int, List<ButtonSpan>>{};
+  Map<int, ButtonSpan> checkboxes = <int, ButtonSpan>{};
+  Map<int, ButtonSpan> disclosures = <int, ButtonSpan>{};
   if (width < 48 || height < 14) {
     frame.addAll(<String>[
       'Use a terminal at least 48 columns by 14 rows.',
@@ -227,82 +426,91 @@ ProjectDashboardFrame renderProjectDashboard({
       'q / Esc: detach',
     ]);
   } else {
-    String runLabel = run == null
-        ? 'No build runs. Press b to build or s to scan sources.'
-        : '${projectText(run['id'])}  ${projectText(run['status']).toUpperCase()}';
+    String runLabel = 'No build runs. Press b to build or s to scan sources.';
+    if (run != null) {
+      String timing = projectRunTiming(run, now);
+      String identity =
+          '${projectText(run['status']).toUpperCase()}  ${projectText(run['id'])}';
+      runLabel = '${fit(identity, width - timing.length - 2)}  $timing';
+    }
     frame.add(runLabel);
     frame.add(
       'p Limits: ${limits.jobs} jobs  ${limits.memoryMiB} MiB'
       '  ${limits.workers} workers',
     );
     int bodyHeight = height - 6;
-    bool lateral = width >= 120;
-    int tableWidth = lateral ? (width * 0.58).floor() : width;
-    targetColumns = tableWidth;
-    int tableHeight = lateral ? bodyHeight : math.max(5, bodyHeight ~/ 2);
+    bool lateral = showOutput && width >= 120;
+    int tableHeight = !showOutput || lateral
+        ? bodyHeight
+        : math.min(
+            math.max(4, nodes.length + 3),
+            math.max(5, (bodyHeight * 0.65).floor()),
+          );
     int capacity = tableHeight - 3;
-    int start = nodes.isEmpty ? 0 : (selected ~/ capacity) * capacity;
-    int? parent;
-    if (nodes.isNotEmpty && !nodes[start].isProject) {
-      parent = nodes.lastIndexWhere(
-        (ProjectDashboardNode node) =>
-            node.isProject && node.project == nodes[start].project,
-        start,
+    List<int> visible = projectTreeViewport(nodes, selected, capacity);
+    int naturalIdentityWidth = 11;
+    for (int index in visible) {
+      ProjectDashboardNode node = nodes[index];
+      String label = node.isBranch
+          ? '${node.displayLabel} (${node.targets.length})'
+          : node.displayLabel;
+      naturalIdentityWidth = math.max(
+        naturalIdentityWidth,
+        8 + node.depth * 3 + Ansi.visibleLength(label),
       );
-      if (selected - parent < capacity) {
-        start = parent;
-        parent = null;
-      } else {
-        start = math.max(start, selected - capacity + 2);
-      }
     }
-    List<int> visible = <int>[
-      ?parent,
-      for (
-        int index = start;
-        index <
-            math.min(nodes.length, start + capacity - (parent == null ? 0 : 1));
-        index++
-      )
-        index,
-    ];
-    int identityWidth = math.max(24, (tableWidth - 4) ~/ 2);
+    int tableWidth = lateral
+        ? (naturalIdentityWidth + 23).clamp(48, width - 49)
+        : width;
+    targetColumns = tableWidth;
+    bool showAge = lateral || tableWidth >= 68;
+    bool showTask = !lateral && tableWidth >= 100;
+    int identityWidth = showTask
+        ? ((tableWidth - 4) * 0.6).floor()
+        : tableWidth - 4 - (showAge ? 19 : 11);
     List<ProjectDashboardRow> targets = nodes
-        .where((ProjectDashboardNode node) => node.isProject)
+        .where((ProjectDashboardNode node) => node.depth == 0)
         .expand((ProjectDashboardNode node) => node.targets)
         .toList(growable: false);
-    int buildable = targets
+    Set<String> buildableKeys = targets
         .where((ProjectDashboardRow row) => row.registered)
-        .length;
+        .map((ProjectDashboardRow row) => row.key)
+        .toSet();
+    int buildable = buildableKeys.length;
+    int checkedCount = buildableKeys.where(checked.contains).length;
     String allCheckbox = buildable == 0
         ? ' - '
-        : checked.isEmpty
+        : checkedCount == 0
         ? '[ ]'
-        : checked.length == buildable
-        ? '[x]'
+        : checkedCount == buildable
+        ? '[X]'
         : '[-]';
     selectAllRow = buildable == 0 ? null : 4;
+    if (buildable > 0) {
+      checkboxes[4] = const ButtonSpan(id: 'all', colStart: 6, colEnd: 9);
+    }
     List<String> table = <String>[
-      '${fit('$allCheckbox   PROJECT / TARGET', identityWidth)} ${fit('STATE', 10)}'
-          ' ${fit('AGE', 7)} TASK',
+      '${fit('    $allCheckbox ALL', identityWidth)} ${fit('STATE', 10)}'
+          '${showAge ? ' ${fit('AGE', 7)}' : ''}${showTask ? ' TASK' : ''}',
     ];
     for (int index in visible) {
       ProjectDashboardNode node = nodes[index];
       ProjectDashboardRow? row = node.target;
-      String branch = node.isProject
-          ? node.expanded
-                ? '[-]'
-                : '[+]'
-          : node.lastChild
+      String branch = node.treePrefix(ascii: theme.glyphs.isAscii);
+      String disclosure = !node.isBranch
+          ? ' '
+          : node.expanded
           ? theme.glyphs.isAscii
-                ? '`- '
-                : '└─ '
+                ? 'v'
+                : '▾'
           : theme.glyphs.isAscii
-          ? '|- '
-          : '├─ ';
-      String identity =
-          '${node.checkbox(checked)} ${index == selected ? '>' : ' '}'
-          ' $branch ${node.isProject ? '${node.name} (${node.targets.length})' : row!.target}';
+          ? '>'
+          : '▸';
+      String prefix = '${index == selected ? '>' : ' '} $branch';
+      String label = node.isBranch
+          ? '${node.displayLabel} (${node.targets.length})'
+          : node.displayLabel;
+      String identity = '$prefix$disclosure ${node.checkbox(checked)} $label';
       String state = node.status;
       String stateTone = switch (state) {
         'succeeded' => theme.ok,
@@ -313,63 +521,84 @@ ProjectDashboardFrame renderProjectDashboard({
       };
       String content =
           '${fit(identity, identityWidth)} '
-          '${theme.paint(fit(state, 10), stateTone)} '
-          '${fit(row?.elapsed(now) ?? '-', 7)} ${row?.task ?? ''}';
+          '${theme.paint(fit(state, 10), stateTone)}'
+          '${showAge ? ' ${fit(row?.elapsed(now) ?? '-', 7)}' : ''}'
+          '${showTask ? ' ${row?.task ?? ''}' : ''}';
       table.add(
-        index == selected || node.isProject
+        index == selected
+            ? theme.paint(content, '${theme.bold}${theme.textStrong}')
+            : node.isBranch
             ? theme.paint(content, theme.bold)
             : content,
       );
-      hitRows[4 + table.length - 1] = index;
+      int screenRow = 4 + table.length - 1;
+      int disclosureColumn = 2 + Ansi.visibleLength(prefix);
+      hitRows[screenRow] = index;
+      if (node.buildKeys.isNotEmpty) {
+        checkboxes[screenRow] = ButtonSpan(
+          id: node.key,
+          colStart: disclosureColumn + 2,
+          colEnd: disclosureColumn + 5,
+        );
+      }
+      if (node.isBranch) {
+        disclosures[screenRow] = ButtonSpan(
+          id: node.key,
+          colStart: disclosureColumn,
+          colEnd: disclosureColumn + 1,
+        );
+      }
     }
     if (nodes.isEmpty) {
-      table.add('No projects registered. Press s to scan a source folder.');
+      table.add('No projects. Press i to convert or s to scan.');
     }
     while (table.length < tableHeight - 2) {
       table.add('');
     }
     List<String> tablePanel = renderPanel(
       title: 'PROJECTS / ${targets.length} TARGETS',
-      badge: '${checked.length} checked',
+      badge: '$checkedCount checked',
       content: table,
       width: tableWidth,
       theme: theme,
       emphasis: PanelEmphasis.active,
     );
-    int logHeight = lateral ? bodyHeight : bodyHeight - tableHeight;
-    int logWidth = lateral ? width - tableWidth - 1 : width;
-    int logCapacity = math.max(0, logHeight - 2);
-    List<String> logLines = logs.isEmpty
-        ? <String>['Select a target to inspect its build output.']
-        : logs;
-    List<String> logContent = <String>[
-      ...logLines
-          .skip(math.max(0, logLines.length - logCapacity))
-          .map(projectText),
-    ];
-    while (logContent.length < logCapacity) {
-      logContent.add('');
-    }
-    List<String> logPanel = renderPanel(
-      title: nodes.isEmpty
-          ? 'OUTPUT'
-          : nodes[selected].isProject
-          ? 'PROJECT / ${nodes[selected].name}'
-          : 'OUTPUT / ${nodes[selected].name} / ${nodes[selected].target!.target}',
-      badge: nodes.isNotEmpty && !nodes[selected].isProject
-          ? 'l full log'
-          : null,
-      content: logContent,
-      width: logWidth,
-      theme: theme,
-    );
-    if (lateral) {
-      for (int index = 0; index < bodyHeight; index++) {
-        frame.add('${tablePanel[index]} ${logPanel[index]}');
+    if (showOutput) {
+      int logHeight = lateral ? bodyHeight : bodyHeight - tableHeight;
+      int logWidth = lateral ? width - tableWidth - 1 : width;
+      int logCapacity = math.max(0, logHeight - 2);
+      List<String> logLines = logs.isEmpty
+          ? <String>['Select a target to inspect its build output.']
+          : logs;
+      List<String> logContent = _projectOutputTail(
+        logLines,
+        logWidth - 4,
+        logCapacity,
+      );
+      while (logContent.length < logCapacity) {
+        logContent.add('');
+      }
+      ProjectDashboardNode? focused = nodes.isEmpty ? null : nodes[selected];
+      List<String> logPanel = renderPanel(
+        title: focused == null
+            ? 'OUTPUT'
+            : 'OUTPUT / ${focused.name}'
+                  '${focused.isProject ? '' : ' / ${focused.target?.target ?? focused.displayLabel}'}',
+        badge: 't hide',
+        content: logContent,
+        width: logWidth,
+        theme: theme,
+      );
+      if (lateral) {
+        for (int index = 0; index < bodyHeight; index++) {
+          frame.add('${tablePanel[index]} ${logPanel[index]}');
+        }
+      } else {
+        frame.addAll(tablePanel);
+        frame.addAll(logPanel);
       }
     } else {
       frame.addAll(tablePanel);
-      frame.addAll(logPanel);
     }
     frame.add(
       theme.paint(
@@ -388,6 +617,7 @@ ProjectDashboardFrame renderProjectDashboard({
         ),
         const ButtonSpec(id: 'limits', label: 'LIMITS', shortcut: 'p'),
         const ButtonSpec(id: 'locations', label: 'LOCATIONS', shortcut: 'o'),
+        const ButtonSpec(id: 'setup', label: 'CONVERT', shortcut: 'i'),
         const ButtonSpec(id: 'actions', label: 'MORE'),
       ],
       width: width,
@@ -400,8 +630,8 @@ ProjectDashboardFrame renderProjectDashboard({
     frame.add(actions.row);
     frame.add(
       width < 80
-          ? 'Space check  a all  x clear  Enter menu  s scan'
-          : 'Space check  a all  x clear  Left/Right tree  Enter menu  s scan  h runs  d deploy',
+          ? 'Space mark a/x all/none e/z tree t log i convert'
+          : 'Space check a all x clear e/z tree t output Enter open m menu s scan i convert',
     );
   }
   while (frame.length < height) {
@@ -415,6 +645,34 @@ ProjectDashboardFrame renderProjectDashboard({
     targetRows: hitRows,
     targetColumns: targetColumns,
     selectAllRow: selectAllRow,
+    checkboxes: checkboxes,
+    disclosures: disclosures,
     buttons: buttons,
   );
+}
+
+List<String> _projectOutputTail(List<String> logs, int width, int capacity) {
+  List<String> result = <String>[];
+  if (width <= 0 || capacity <= 0) return result;
+  for (String raw in logs.reversed) {
+    String line = projectText(raw);
+    List<String> wrapped = <String>[];
+    if (line.isEmpty) wrapped.add('');
+    int start = 0;
+    while (start < line.length) {
+      int end = math.min(line.length, start + width);
+      if (end < line.length) {
+        int boundary = line.lastIndexOf(' ', end);
+        if (boundary > start + width ~/ 2) end = boundary;
+      }
+      wrapped.add(line.substring(start, end));
+      start = end;
+      if (start < line.length && line[start] == ' ') start++;
+    }
+    for (String row in wrapped.reversed) {
+      result.add(row);
+      if (result.length == capacity) return result.reversed.toList();
+    }
+  }
+  return result.reversed.toList();
 }
