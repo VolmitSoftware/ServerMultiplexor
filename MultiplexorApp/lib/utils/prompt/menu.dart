@@ -501,6 +501,11 @@ Future<T> _menuLineFallback<T>(
   if (trimmed == 'esc' || trimmed == 'escape' || trimmed == 'b') {
     throw const PromptBackNavigation();
   }
+  for (final int index in selectable) {
+    if (entries[index].shortcut?.toLowerCase() == trimmed) {
+      return entries[index].value as T;
+    }
+  }
   final int numeric = int.tryParse(trimmed) ?? 1;
   final int position = numeric >= 1 && numeric <= selectable.length
       ? numeric - 1

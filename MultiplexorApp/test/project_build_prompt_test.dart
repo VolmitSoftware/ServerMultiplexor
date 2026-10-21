@@ -111,6 +111,23 @@ void main() {
     ]);
   });
 
+  test('q returns from each Projects menu without dispatching', () async {
+    for (String action in <String>['actions', 'build', 'limits', 'history']) {
+      expect(await prompt(action, <String>['q']), isNull, reason: action);
+    }
+  });
+
+  test('q returns one level and discards unsaved limits', () async {
+    expect(
+      await prompt('actions', <String>['1', 'q', 'p', '1', '7', 'q', 'p', '4']),
+      <String>['limits', '--jobs', '3', '--memory', '16384', '--workers', '6'],
+    );
+  });
+
+  test('q remains ordinary text in source folder input', () async {
+    expect(await prompt('scan', <String>['q']), <String>['scan', 'q']);
+  });
+
   test('Back from build dispatches nothing', () async {
     expect(await prompt('build', <String>['8']), isNull);
   });

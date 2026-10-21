@@ -170,7 +170,7 @@ class ProjectDashboardPrompts {
             labelColor: Ui.theme.danger,
           ),
       ],
-      const MenuEntry<String>('Back', value: 'back'),
+      const MenuEntry<String>('Back', value: 'back', shortcut: 'q'),
     ];
     while (true) {
       String selected = await menuSelect<String>('Projects', entries);
@@ -230,7 +230,7 @@ class ProjectDashboardPrompts {
           detail:
               '${selection.limits.jobs} jobs / ${selection.limits.memoryMiB} MiB / ${selection.limits.workers} workers',
         ),
-        const MenuEntry<String>('Back', value: 'back'),
+        const MenuEntry<String>('Back', value: 'back', shortcut: 'q'),
       ]);
       if (scope == 'back') return null;
       if (scope == 'reuse') {
@@ -297,7 +297,7 @@ class ProjectDashboardPrompts {
         for (String key in values.keys)
           MenuEntry<String>(labels[key]!, value: key, detail: '${values[key]}'),
         const MenuEntry<String>('Save limits', value: 'save'),
-        const MenuEntry<String>('Back', value: 'back'),
+        const MenuEntry<String>('Back', value: 'back', shortcut: 'q'),
       ], footer: 'Limits apply to new builds. Memory is a scheduling budget.');
       if (setting == 'back') return null;
       if (setting == 'save') {
@@ -346,7 +346,7 @@ class ProjectDashboardPrompts {
           detail:
               '${projectText(run['status'])} / ${projectText(run['createdAt'])}',
         ),
-      const MenuEntry<String>('Back', value: ''),
+      const MenuEntry<String>('Back', value: '', shortcut: 'q'),
     ]);
     return id.isEmpty ? null : <String>['view', id];
   }
@@ -373,7 +373,7 @@ class ProjectDashboardPrompts {
             detail: _destinationDetail(selection.destinations[index]),
           ),
         const MenuEntry<int>('Add destination', value: -1, shortcut: 'a'),
-        const MenuEntry<int>('Back', value: -2),
+        const MenuEntry<int>('Back', value: -2, shortcut: 'q'),
       ]);
       if (chosen == -2) return null;
       try {
@@ -407,7 +407,7 @@ class ProjectDashboardPrompts {
             value: 'remove',
             labelColor: Ui.theme.danger,
           ),
-          const MenuEntry<String>('Back', value: 'back'),
+          const MenuEntry<String>('Back', value: 'back', shortcut: 'q'),
         ], footer: _destinationDetail(destination));
       } on PromptBackNavigation {
         return null;
@@ -463,11 +463,12 @@ class ProjectDashboardPrompts {
       'dropins' => 2,
       _ => 0,
     };
-    String kind = await Ui.pick(
-      'Destination kind',
-      kinds,
-      initialIndex: kindIndex,
-    );
+    String kind =
+        kinds[await _destinationChoice(
+          'Destination kind',
+          kinds,
+          initialIndex: kindIndex,
+        )];
     String? path = kind == 'Export directory'
         ? await Ui.input(
             'Export directory',
@@ -495,15 +496,16 @@ class ProjectDashboardPrompts {
     int platformIndex = platforms.indexOf(
       projectText(existing?['platform'] ?? 'any'),
     );
-    String platform = await Ui.pick(
-      'Accept artifacts for',
-      platforms,
-      initialIndex: platformIndex < 0 ? 0 : platformIndex,
-    );
+    String platform =
+        platforms[await _destinationChoice(
+          'Accept artifacts for',
+          platforms,
+          initialIndex: platformIndex < 0 ? 0 : platformIndex,
+        )];
     bool exactVersion = kind == 'Shared dropins';
     if (!exactVersion) {
       exactVersion =
-          await Ui.choose('Minecraft compatibility', <String>[
+          await _destinationChoice('Minecraft compatibility', <String>[
             instance == null
                 ? 'Any Minecraft version'
                 : 'Read instance metadata',
@@ -532,6 +534,20 @@ class ProjectDashboardPrompts {
     ];
   }
 
+  Future<int> _destinationChoice(
+    String title,
+    List<String> choices, {
+    int initialIndex = 0,
+  }) async {
+    int chosen = await menuSelect<int>(title, <MenuEntry<int>>[
+      for (int index = 0; index < choices.length; index++)
+        MenuEntry<int>(choices[index], value: index),
+      const MenuEntry<int>('Back', value: -1, shortcut: 'q'),
+    ], initialIndex: initialIndex);
+    if (chosen == -1) throw const PromptBackNavigation();
+    return chosen;
+  }
+
   Future<List<String>?> _deploy(
     ProjectDashboardSelection selection, {
     Map<String, Object?>? destination,
@@ -548,7 +564,7 @@ class ProjectDashboardPrompts {
               detail: _destinationDetail(selection.destinations[index]),
             ),
           const MenuEntry<int>('Add destination', value: -1, shortcut: 'a'),
-          const MenuEntry<int>('Back', value: -2),
+          const MenuEntry<int>('Back', value: -2, shortcut: 'q'),
         ]);
         if (chosen == -2) return null;
         try {
