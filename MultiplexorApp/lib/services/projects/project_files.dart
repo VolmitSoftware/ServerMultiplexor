@@ -57,29 +57,50 @@ Future<String> copyProjectSources(
   Directory source,
   Directory destination, {
   String? boundary,
-}) => _copyProjectTree(
-  source.path,
-  destination.path,
-  boundary: boundary ?? source.path,
-  filterSources: true,
+}) async => projectDigest(
+  await _copyProjectTree(
+    source.path,
+    destination.path,
+    boundary: boundary ?? source.path,
+    filterSources: true,
+    capture: true,
+  ),
 );
 
 Future<String> copyProjectSourceInput(
   String source,
   String destination, {
   required String boundary,
-}) => _copyProjectTree(
-  source,
-  destination,
-  boundary: boundary,
-  filterSources: false,
+}) async => projectDigest(
+  await _copyProjectTree(
+    source,
+    destination,
+    boundary: boundary,
+    filterSources: false,
+    capture: true,
+  ),
 );
 
-Future<String> _copyProjectTree(
+Future<void> materializeProjectSnapshot(
+  String source,
+  String destination, {
+  required String boundary,
+}) async {
+  await _copyProjectTree(
+    source,
+    destination,
+    boundary: boundary,
+    filterSources: false,
+    capture: false,
+  );
+}
+
+Future<Map<String, String>> _copyProjectTree(
   String source,
   String destination, {
   required String boundary,
   required bool filterSources,
+  required bool capture,
 }) async {
   String allowed = Directory(boundary).resolveSymbolicLinksSync();
   String originRoot = File(source).resolveSymbolicLinksSync();
@@ -94,11 +115,15 @@ Future<String> _copyProjectTree(
       : <String>{};
   Map<String, String> hashes = <String, String>{};
   List<String> executableFiles = <String>[];
+  int visited = 0;
   Future<void> visit(
     String origin,
     String relative,
     Set<String> ancestors,
   ) async {
+    if (!capture && ++visited % 128 == 0) {
+      await Future<void>.delayed(Duration.zero);
+    }
     if (ignored.contains(p.normalize(p.absolute(origin)))) return;
     FileSystemEntityType type = FileSystemEntity.typeSync(
       origin,
@@ -119,7 +144,7 @@ Future<String> _copyProjectTree(
         throw FileSystemException('Cyclic source directory', origin);
       }
       Directory(p.join(destination, relative)).createSync(recursive: true);
-      if (!filterSources) {
+      if (capture && !filterSources) {
         hashes['$relative/'] = 'directory';
       }
       List<FileSystemEntity> entries =
@@ -144,17 +169,20 @@ Future<String> _copyProjectTree(
     File output = File(p.join(destination, relative));
     output.parent.createSync(recursive: true);
     await cloneProjectFile(File(resolved), output);
-    String hash = await projectFileHash(output);
+    String? hash = capture ? await projectFileHash(output) : null;
     FileStat after = FileStat.statSync(resolved);
     if (after.size != before.size ||
         after.modified != before.modified ||
-        hash != await projectFileHash(File(resolved))) {
+        output.lengthSync() != before.size ||
+        (capture && hash != await projectFileHash(File(resolved)))) {
       throw FileSystemException(
         'Source changed during capture; retry the build',
         origin,
       );
     }
-    hashes[relative] = '${before.mode & 0x49 == 0 ? 0 : 1}:$hash';
+    if (capture) {
+      hashes[relative] = '${before.mode & 0x49 == 0 ? 0 : 1}:$hash';
+    }
     if (!Platform.isWindows && before.mode & 0x49 != 0) {
       executableFiles.add(output.path);
     }
@@ -173,7 +201,7 @@ Future<String> _copyProjectTree(
       );
     }
   }
-  return projectDigest(hashes);
+  return hashes;
 }
 
 Future<Set<String>> _ignoredSourcePaths(Directory source) async {
