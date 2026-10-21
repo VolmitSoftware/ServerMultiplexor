@@ -178,6 +178,7 @@ const Map<String, String> _defaults = <String, String>{
   'addons': 'list',
   'gameplay': 'doctor',
   'network': 'list',
+  'projects': 'list',
 };
 
 const Set<String> _internal = <String>{
@@ -186,6 +187,7 @@ const Set<String> _internal = <String>{
   'runtime restart-worker',
   'plugins watch-daemon',
   'mods watch-daemon',
+  'projects worker',
 };
 
 const Set<String> _serverTypes = <String>{
@@ -229,6 +231,12 @@ const Set<String> _booleanOptions = <String>{
   'offline',
   'build-arena',
   'chat',
+  'all-targets',
+  'wait',
+  'follow',
+  'preview',
+  'dropins',
+  'changed',
 };
 
 const Map<String, List<String>> _positionalOptions = <String, List<String>>{
@@ -268,6 +276,17 @@ const Map<String, List<String>> _positionalOptions = <String, List<String>>{
 };
 
 const Map<String, int> _maximumPositionals = <String, int>{
+  'projects scan': 1,
+  'projects list': 0,
+  'projects plan': 1,
+  'projects build': 1,
+  'projects status': 1,
+  'projects logs': 1,
+  'projects cancel': 1,
+  'projects retry': 1,
+  'projects deploy': 1,
+  'projects destination': 1,
+  'projects dashboard': 0,
   'network list': 0,
   'network candidates': 0,
   'network recover': 0,
@@ -394,6 +413,12 @@ const Map<String, String> _commandAliases = <String, String>{
 };
 
 const Map<String, int> _minimumPositionals = <String, int>{
+  'projects scan': 1,
+  'projects logs': 1,
+  'projects cancel': 1,
+  'projects retry': 1,
+  'projects deploy': 1,
+  'projects destination': 1,
   'gameplay sessions validate': 1,
   'gameplay sessions start': 1,
   'gameplay sessions status': 1,

@@ -35,6 +35,8 @@ import 'monitor/monitor_update.dart';
 import 'monitor/trend_store.dart';
 import 'networks/network_definition.dart';
 import 'passthrough_service.dart';
+import 'projects/project_build_service.dart';
+import 'projects/project_dashboard.dart';
 import 'profiling/remote_profiler_models.dart';
 import 'pterodactyl/pterodactyl_console_protocol.dart';
 import 'pterodactyl/pterodactyl_console_session.dart';
@@ -1290,6 +1292,8 @@ class InteractiveWizard {
       return;
     }
     switch (action) {
+      case WorkspaceModalAction.projects:
+        await _projectsDashboard();
       case WorkspaceModalAction.diagnostics:
         await _shellRun(<String>['doctor']);
         await Ui.pause();
@@ -1465,6 +1469,7 @@ class InteractiveWizard {
       case WorkspaceModalAction.createMany:
         await _remoteCreateMany();
       case WorkspaceModalAction.buildTuning:
+      case WorkspaceModalAction.projects:
       case WorkspaceModalAction.diagnostics:
       case WorkspaceModalAction.networks:
       case WorkspaceModalAction.pullBuilds:
@@ -5058,6 +5063,10 @@ class InteractiveWizard {
 
   // ─── Build & tuning ──────────────────────────────────────────────────
 
+  Future<void> _projectsDashboard() => ProjectDashboard(
+    service: ProjectBuildService(rootDirectory: passthrough.context.rootDir),
+  ).run();
+
   Future<void> _buildAndTuningMenu() async {
     const List<String> heapOptions = <String>[
       '2G',
@@ -5103,6 +5112,12 @@ class InteractiveWizard {
 
       final List<MenuEntry<_BuildAct>> entries = <MenuEntry<_BuildAct>>[
         const MenuEntry<_BuildAct>.separator('build'),
+        const MenuEntry<_BuildAct>(
+          'Projects dashboard',
+          value: _BuildAct.projects,
+          shortcut: 'j',
+          detail: 'build plugin and mod targets',
+        ),
         const MenuEntry<_BuildAct>(
           'Build server jar',
           value: _BuildAct.build,
@@ -5167,6 +5182,9 @@ class InteractiveWizard {
       }
 
       switch (action) {
+        case _BuildAct.projects:
+          await _projectsDashboard();
+          break;
         case _BuildAct.build:
           await _buildServerArtifact();
           break;
@@ -5747,6 +5765,7 @@ class InteractiveWizard {
 }
 
 enum _BuildAct {
+  projects,
   build,
   pullAll,
   cache,
