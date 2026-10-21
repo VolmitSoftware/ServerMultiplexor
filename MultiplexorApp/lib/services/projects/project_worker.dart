@@ -393,13 +393,14 @@ class ProjectWorker {
       }
       for (String sourceId in sources) {
         BuildProject source = plan.projects[sourceId]!;
-        await copyProjectSources(
-          Directory(p.join(work.path, 'snapshot', sourceId)),
-          Directory(p.join(sandbox.path, source.relativePath)),
+        await materializeProjectSnapshot(
+          p.join(work.path, 'snapshot', sourceId),
+          p.join(sandbox.path, source.relativePath),
+          boundary: p.join(work.path, 'snapshot'),
         );
       }
       for (ProjectSourceInput input in inputs) {
-        await copyProjectSourceInput(
+        await materializeProjectSnapshot(
           p.join(work.path, 'input-snapshot', projectDigest(input.key)),
           p.join(sandbox.path, input.relativePath),
           boundary: p.join(work.path, 'input-snapshot'),
