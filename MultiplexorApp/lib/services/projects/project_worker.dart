@@ -358,6 +358,7 @@ class ProjectWorker {
       List<ProjectSourceInput> inputs = plan.inputsFor(project.id);
       String fingerprint = projectDigest(<String, Object?>{
         'packaging': packaging,
+        'buildProperties': projectBuildProperties,
         'inputs': <String, String>{
           for (ProjectSourceInput input in inputs)
             input.relativePath: _inputHashes[input.key]!,
@@ -413,6 +414,9 @@ class ProjectWorker {
       String directory = p.join(sandbox.path, project.relativePath);
       List<String> args = <String>[
         ...target.tasks,
+        for (MapEntry<String, String> property
+            in projectBuildProperties.entries)
+          '-P${property.key}=${property.value}',
         ...target.arguments,
         '--no-daemon',
         '--build-cache',

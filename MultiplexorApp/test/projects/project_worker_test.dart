@@ -545,6 +545,87 @@ printf '> Task :assemble\\n'
   );
 
   test(
+    'wrapper defaults allow target property overrides without reusing old artifacts',
+    () async {
+      BuildProject app = project('app', <Map<String, Object?>>[target('one')]);
+      File(p.join(app.directory, 'gradlew')).writeAsStringSync(r'''
+property=missing
+property_arguments=
+for argument do
+    case "$argument" in
+        -Ppaperweight.experimental.genSources=*)
+            property="${argument#*=}"
+            property_arguments="${property_arguments}${property_arguments:+,}${property}"
+            ;;
+    esac
+done
+printf '%s\n' "$property" > build/result.jar
+printf 'property-arguments=%s\n' "$property_arguments"
+''', mode: FileMode.append);
+      String output(Map<String, Object?> state) {
+        Map<String, Object?> job = projectObject(
+          (state['jobs'] as List<Object?>).single,
+        );
+        Map<String, Object?> artifact = projectObject(
+          (job['artifacts'] as List<Object?>).single,
+        );
+        return File(artifact['file'] as String).readAsStringSync();
+      }
+
+      Map<String, Object?> first = run(
+        'default-property',
+        <BuildProject>[app],
+        <String>['app:one'],
+      );
+      expect(await ProjectWorker(store, first).execute(), 0);
+      expect(output(first), 'false\n');
+
+      Map<String, Object?> unchanged = run(
+        'unchanged-property',
+        <BuildProject>[app],
+        <String>['app:one'],
+        changed: true,
+      );
+      expect(await ProjectWorker(store, unchanged).execute(), 0);
+      expect(
+        projectObject(
+          (unchanged['jobs'] as List<Object?>).single,
+        )['reusedFrom'],
+        'default-property',
+      );
+      expect(output(unchanged), 'false\n');
+
+      BuildProject configured = BuildProject.fromJson(<String, Object?>{
+        ...app.toJson(),
+        'targets': <Object?>[
+          <String, Object?>{
+            ...app.targets.single.toJson(),
+            'arguments': <String>['-Ppaperweight.experimental.genSources=true'],
+          },
+        ],
+      });
+      Map<String, Object?> overridden = run(
+        'overridden-property',
+        <BuildProject>[configured],
+        <String>['app:one'],
+        changed: true,
+      );
+      expect(await ProjectWorker(store, overridden).execute(), 0);
+      expect(overridden['sourceHashes'], first['sourceHashes']);
+      Map<String, Object?> overriddenJob = projectObject(
+        (overridden['jobs'] as List<Object?>).single,
+      );
+      expect(overriddenJob['reusedFrom'], isNull);
+      expect(output(overridden), 'true\n');
+      expect(
+        File(overriddenJob['logPath'] as String).readAsStringSync(),
+        contains('property-arguments=false,true\n'),
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
     'packaging participates in reuse and cache settings reach isolated Gradle homes',
     () async {
       BuildProject app = project('app', <Map<String, Object?>>[
