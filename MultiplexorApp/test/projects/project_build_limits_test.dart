@@ -1,4 +1,5 @@
 @Tags(<String>['project-cli'])
+@Timeout(Duration(minutes: 3))
 library;
 
 import 'dart:convert';
@@ -12,8 +13,28 @@ import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
+  late Directory buildRoot;
+  late String executable;
   late Directory fixture;
   late ProjectBuildService service;
+
+  setUpAll(() async {
+    if (Platform.isWindows) return;
+    buildRoot = Directory.systemTemp.createTempSync(
+      'multiplexor-limits-build-',
+    );
+    executable = p.join(buildRoot.path, 'multiplexor');
+    ProcessResult compile = await Process.run(
+      Platform.resolvedExecutable,
+      <String>['compile', 'exe', 'bin/main.dart', '-o', executable],
+    );
+    expect(compile.exitCode, 0, reason: '${compile.stdout}\n${compile.stderr}');
+  });
+
+  tearDownAll(() {
+    if (Platform.isWindows) return;
+    buildRoot.deleteSync(recursive: true);
+  });
 
   setUp(() {
     fixture = Directory(
@@ -217,7 +238,7 @@ void main() {
         service.store.limitsFile,
         ProjectBuildLimits(jobs: 2, memoryMiB: 2048, workers: 3).toJson(),
       );
-      Map<String, Object?> first = await _runCli(service, <String>[
+      Map<String, Object?> first = await _runCli(executable, service, <String>[
         'build',
         '--targets',
         'alpha:plugin,beta:plugin',
@@ -239,7 +260,7 @@ void main() {
         service.store.limitsFile,
         ProjectBuildLimits(jobs: 1, memoryMiB: 4096, workers: 4).toJson(),
       );
-      Map<String, Object?> retry = await _runCli(service, <String>[
+      Map<String, Object?> retry = await _runCli(executable, service, <String>[
         'retry',
         first['id'] as String,
         '--wait',
@@ -251,33 +272,33 @@ void main() {
       expect(retry['workers'], 3);
       expect(retry['packaging'], 'local');
 
-      Map<String, Object?> overridden = await _runCli(service, <String>[
-        'build',
-        '--targets',
-        'beta:plugin',
-        '--packaging',
-        'compact',
-        '--jobs',
-        '1',
-        '--memory',
-        '1024',
-        '--workers',
-        '2',
-        '--wait',
-        '--json',
-      ]);
+      Map<String, Object?> overridden =
+          await _runCli(executable, service, <String>[
+            'build',
+            '--targets',
+            'beta:plugin',
+            '--packaging',
+            'compact',
+            '--jobs',
+            '1',
+            '--memory',
+            '1024',
+            '--workers',
+            '2',
+            '--wait',
+            '--json',
+          ]);
       expect(overridden['status'], 'succeeded');
       expect(overridden['targets'], <String>['alpha:api', 'beta:plugin']);
       expect(overridden['jobsLimit'], 1);
       expect(overridden['memoryMiB'], 1024);
       expect(overridden['workers'], 2);
       expect(overridden['packaging'], 'compact');
-      Map<String, Object?> compactRetry = await _runCli(service, <String>[
-        'retry',
-        overridden['id'] as String,
-        '--wait',
-        '--json',
-      ]);
+      Map<String, Object?> compactRetry = await _runCli(
+        executable,
+        service,
+        <String>['retry', overridden['id'] as String, '--wait', '--json'],
+      );
       expect(compactRetry['packaging'], 'compact');
       expect(compactRetry['status'], 'succeeded');
       expect(service.limits().toJson(), <String, Object?>{
@@ -319,18 +340,13 @@ Map<String, Object?> _project(
 };
 
 Future<Map<String, Object?>> _runCli(
+  String executable,
   ProjectBuildService service,
   List<String> arguments,
 ) async {
   ProcessResult result = await Process.run(
-    Platform.resolvedExecutable,
-    <String>[
-      p.absolute('bin/main.dart'),
-      '--root',
-      service.store.workspace,
-      'projects',
-      ...arguments,
-    ],
+    executable,
+    <String>['--root', service.store.workspace, 'projects', ...arguments],
     environment: <String, String>{...Platform.environment}
       ..remove('GIT_CONFIG_COUNT'),
     includeParentEnvironment: false,
