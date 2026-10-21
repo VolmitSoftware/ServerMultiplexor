@@ -136,7 +136,7 @@ void main() {
     expect(File('${log.path}.process.json').existsSync(), isFalse);
   }, skip: Platform.isWindows);
 
-  test('recovery uses ownership token instead of a stale root pid', () async {
+  test('recovery checks full tokens after long environments', () async {
     String token = '0123456789abcdef0123456789abcdef';
     File script = File(p.join(directory.path, 'sleep.dart'))
       ..writeAsStringSync(
@@ -145,9 +145,18 @@ void main() {
     Process owned = await Process.start(
       Platform.resolvedExecutable,
       <String>[script.path],
-      environment: <String, String>{'MULTIPLEXOR_PROCESS_TOKEN': token},
+      environment: <String, String>{
+        'MULTIPLEXOR_PADDING': 'x' * 8192,
+        'MULTIPLEXOR_PROCESS_TOKEN': token,
+      },
     );
-    Process unrelated = await Process.start('/bin/sleep', <String>['60']);
+    Process unrelated = await Process.start(
+      Platform.resolvedExecutable,
+      <String>[script.path],
+      environment: <String, String>{
+        'MULTIPLEXOR_PROCESS_TOKEN': '${token}extra',
+      },
+    );
     File state = File('${log.path}.process.json')
       ..writeAsStringSync(
         jsonEncode(<String, Object?>{

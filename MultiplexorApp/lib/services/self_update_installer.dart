@@ -360,19 +360,21 @@ Future<void> _extractZip(File archive, File candidate, String name) async {
       throw const FormatException('Update zip must contain one executable.');
     }
     final ZipFileHeader header = directory.fileHeaders.single;
-    final ZipFile? entry = header.file;
     final int type = (header.externalFileAttributes >> 16) & 0xf000;
-    if (entry == null ||
-        header.filename != name ||
-        entry.filename != name ||
+    if (header.filename != name ||
         (type != 0 && type != 0x8000) ||
         (header.externalFileAttributes & 0x10) != 0 ||
         (header.generalPurposeBitFlag & 1) != 0 ||
-        (entry.flags & 1) != 0 ||
         (header.compressionMethod != 0 && header.compressionMethod != 8) ||
         header.localHeaderOffset != 0 ||
         header.uncompressedSize <= 0 ||
-        header.uncompressedSize > _maxExecutableBytes ||
+        header.uncompressedSize > _maxExecutableBytes) {
+      throw const FormatException('Invalid executable in update zip.');
+    }
+    input.setPosition(header.localHeaderOffset);
+    final ZipFile entry = ZipFile(header)..read(input);
+    if (entry.filename != name ||
+        (entry.flags & 1) != 0 ||
         header.uncompressedSize != entry.uncompressedSize ||
         header.compressedSize != entry.compressedSize ||
         header.crc32 != entry.crc32 ||

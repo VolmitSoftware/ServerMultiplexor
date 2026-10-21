@@ -107,8 +107,7 @@ class _ProjectProcessOwner {
       return _windowsOwned();
     }
     String output = await _processOutput('ps', <String>[
-      'eww',
-      '-x',
+      'ewwx',
       '-o',
       'pid=,ppid=,pgid=,lstart=,command=',
     ]);

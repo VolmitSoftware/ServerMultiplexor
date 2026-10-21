@@ -148,6 +148,49 @@ void main() {
     });
   }
 
+  test('installs an uncompressed zip executable', () async {
+    final File payload = await archive(<ArchiveFile>[
+      ArchiveFile.string('multiplexor', script)
+        ..compression = CompressionType.none,
+    ], 'zip');
+    expect(await install(payload), isFalse);
+    expect(await target.readAsString(), script);
+  }, skip: Platform.isWindows);
+
+  test('rejects bytes between the zip executable and directory', () async {
+    final File payload = await archive(<ArchiveFile>[
+      ArchiveFile.string('multiplexor', script),
+    ], 'zip');
+    final Uint8List bytes = await payload.readAsBytes();
+    final ByteData data = ByteData.sublistView(bytes);
+    final int central = data.getUint32(bytes.length - 6, Endian.little);
+    final Uint8List padded = Uint8List.fromList(<int>[
+      ...bytes.sublist(0, central),
+      ...List<int>.filled(16, 0),
+      ...bytes.sublist(central),
+    ]);
+    ByteData.sublistView(
+      padded,
+    ).setUint32(padded.length - 6, central + 16, Endian.little);
+    await payload.writeAsBytes(padded);
+    await expectLater(install(payload), throwsFormatException);
+    await unchanged();
+  });
+
+  test(
+    'rejects a zip local filename that differs from its directory',
+    () async {
+      final File payload = await archive(<ArchiveFile>[
+        ArchiveFile.string('multiplexor', script),
+      ], 'zip');
+      final Uint8List bytes = await payload.readAsBytes();
+      bytes[30] = 'x'.codeUnitAt(0);
+      await payload.writeAsBytes(bytes);
+      await expectLater(install(payload), throwsFormatException);
+      await unchanged();
+    },
+  );
+
   test(
     'installs the exact archive format produced by system tar',
     () async {
