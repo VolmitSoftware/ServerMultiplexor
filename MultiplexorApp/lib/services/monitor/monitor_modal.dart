@@ -78,6 +78,7 @@ enum InstanceModalAction {
 /// things you do *to* an existing workspace. It lives in this enum so the
 /// dispatcher has one vocabulary for both entry points.
 enum WorkspaceModalAction {
+  projects,
   buildTuning,
   pullBuilds,
   createMany,
@@ -182,6 +183,7 @@ String instanceModalActionHotkey(InstanceModalAction action) =>
 /// Single-key bindings for workspace-card actions.
 String workspaceModalActionHotkey(WorkspaceModalAction action) =>
     switch (action) {
+      WorkspaceModalAction.projects => 'j',
       WorkspaceModalAction.buildTuning ||
       WorkspaceModalAction.bulkActions => 'b',
       WorkspaceModalAction.pullBuilds => 'p',
@@ -523,6 +525,7 @@ List<List<ButtonSpec>> _instanceRows({
 List<List<ButtonSpec>> _workspaceRows({
   required bool networks,
 }) => <List<ButtonSpec>>[
+  <ButtonSpec>[_workspaceButton(WorkspaceModalAction.projects, 'PROJECTS')],
   <ButtonSpec>[
     _workspaceButton(WorkspaceModalAction.diagnostics, 'DIAGNOSTICS'),
   ],

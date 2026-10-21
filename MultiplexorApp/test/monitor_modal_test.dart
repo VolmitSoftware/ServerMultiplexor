@@ -213,6 +213,7 @@ void main() {
   group('WorkspaceModalAction', () {
     test('names every workspace action including the bar-only new', () {
       expect(WorkspaceModalAction.values, <WorkspaceModalAction>[
+        WorkspaceModalAction.projects,
         WorkspaceModalAction.buildTuning,
         WorkspaceModalAction.pullBuilds,
         WorkspaceModalAction.createMany,
@@ -890,8 +891,9 @@ void main() {
   });
 
   group('overlayModal workspace actions', () {
-    test('offers exactly the seven workspace card actions', () {
+    test('offers workspace actions including project builds', () {
       expect(buttonIds(workspaceOverlay()), <String>{
+        'wm:projects',
         'wm:diagnostics',
         'wm:buildTuning',
         'wm:pullBuilds',
@@ -1092,6 +1094,7 @@ void main() {
       final MonitorFrame frame = workspaceOverlay(columns: 41);
       expect(Ansi.visibleLength(frame.rows[12]), 41);
       expect(buttonIds(frame), <String>{
+        'wm:projects',
         'wm:diagnostics',
         'wm:buildTuning',
         'wm:pullBuilds',

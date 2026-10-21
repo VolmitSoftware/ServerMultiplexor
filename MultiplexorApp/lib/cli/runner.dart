@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import '../services/app_context.dart';
+import '../services/projects/project_build_service.dart';
+import '../services/projects/project_dashboard.dart';
 import 'command_help.dart';
 import 'local_command.dart';
 import 'handlers/monitor_handler.dart';
@@ -22,6 +24,12 @@ Future<int> runCli(List<String> args) async {
       return await handleRemote(args.sublist(1));
     }
     final LocalCommand command = LocalCommand.parse(args);
+    if (command.arguments.take(2).join(' ') == 'projects dashboard') {
+      await ProjectDashboard(
+        service: ProjectBuildService(rootDirectory: appContext.rootDir),
+      ).run();
+      return 0;
+    }
     if (command.arguments.take(2).join(' ') == 'runtime watch') {
       return await handleRuntimeWatch(command.arguments.sublist(2));
     }

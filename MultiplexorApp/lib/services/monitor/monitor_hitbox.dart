@@ -60,6 +60,7 @@ const String actMoreHitId = 'act:more';
 /// the empty-workspace body draws, so both routes dispatch the same way.
 const String wsNewHitId = 'ws:new';
 const String wsBuildsHitId = 'ws:builds';
+const String wsProjectsHitId = 'ws:projects';
 const String wsTuningHitId = 'ws:tuning';
 const String wsConsumerHitId = 'ws:consumer';
 const String wsConsolesHitId = 'ws:consoles';
@@ -89,6 +90,7 @@ const List<String> monitorBarHitIds = <String>[
   clearSelectionHitId,
   wsNewHitId,
   wsBuildsHitId,
+  wsProjectsHitId,
   wsTuningHitId,
   wsConsolesHitId,
   wsConnectHitId,
