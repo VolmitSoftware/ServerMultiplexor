@@ -1,8 +1,7 @@
 import 'dart:io';
-import 'dart:math' as math;
 
 import '../../utils/user_prompt.dart';
-import 'project_build_service.dart' show projectDefaultMemory;
+import 'project_build_limits.dart';
 import 'project_dashboard_model.dart';
 
 enum ProjectDashboardAction {
@@ -14,6 +13,8 @@ enum ProjectDashboardAction {
   cancel,
   deploy,
   logs,
+  limits,
+  locations,
 }
 
 typedef ProjectDashboardCommand =
@@ -29,21 +30,29 @@ class ProjectDashboardSelection {
     required this.run,
     required this.runs,
     required this.catalog,
+    required this.limits,
+    this.node,
+    this.checkedTargets = const <String>[],
   });
 
   final ProjectDashboardRow? row;
   final Map<String, Object?>? run;
   final List<Map<String, Object?>> runs;
   final List<Map<String, Object?>> catalog;
+  final ProjectBuildLimits limits;
+  final ProjectDashboardNode? node;
+  final List<String> checkedTargets;
+
+  String? get project => node?.project ?? row?.project;
+  String? get projectName => node?.name ?? row?.name;
+  bool get registered =>
+      node == null ? row?.registered ?? false : node!.buildKeys.isNotEmpty;
 }
 
 class ProjectDashboardPrompts {
   ProjectDashboardPrompts(this.command);
 
   final ProjectDashboardCommand command;
-  int jobs = math.min(4, Platform.numberOfProcessors);
-  int memoryMiB = projectDefaultMemory();
-  int workers = math.max(1, Platform.numberOfProcessors);
 
   Future<List<String>?> request(
     ProjectDashboardAction action,
@@ -54,6 +63,10 @@ class ProjectDashboardPrompts {
         return _actions(selection);
       case ProjectDashboardAction.build:
         return _build(selection);
+      case ProjectDashboardAction.limits:
+        return _limits(selection.limits);
+      case ProjectDashboardAction.locations:
+        return _destination();
       case ProjectDashboardAction.scan:
         return _scan(selection);
       case ProjectDashboardAction.history:
@@ -97,9 +110,11 @@ class ProjectDashboardPrompts {
 
   Future<List<String>?> _actions(ProjectDashboardSelection selection) async {
     List<MenuEntry<String>> entries = <MenuEntry<String>>[
-      if (selection.row != null)
+      if (selection.catalog.isNotEmpty)
         MenuEntry<String>(
-          'Build ${selection.row!.name}',
+          selection.checkedTargets.isNotEmpty
+              ? 'Build ${selection.checkedTargets.length} checked targets'
+              : 'Build targets',
           value: 'build',
           shortcut: 'b',
         ),
@@ -111,9 +126,15 @@ class ProjectDashboardPrompts {
       MenuEntry<String>(
         'Build limits',
         value: 'limits',
-        detail: '$jobs jobs / $memoryMiB MiB / $workers workers',
+        detail:
+            '${selection.limits.jobs} jobs / ${selection.limits.memoryMiB} MiB / ${selection.limits.workers} workers',
+        shortcut: 'p',
       ),
-      const MenuEntry<String>('Configure destination', value: 'destination'),
+      const MenuEntry<String>(
+        'Configure destination',
+        value: 'locations',
+        shortcut: 'o',
+      ),
       if (selection.runs.isNotEmpty)
         const MenuEntry<String>('Run history', value: 'history', shortcut: 'h'),
       if (selection.row?.logPath.isNotEmpty ?? false)
@@ -149,79 +170,109 @@ class ProjectDashboardPrompts {
     ];
     String selected = await menuSelect<String>('Projects', entries);
     if (selected == 'back') return null;
-    if (selected == 'limits') {
-      await _limits();
-      return null;
-    }
-    if (selected == 'destination') return _destination();
     return request(ProjectDashboardAction.values.byName(selected), selection);
   }
 
   Future<List<String>?> _build(ProjectDashboardSelection selection) async {
     if (selection.catalog.isEmpty) return _scan(selection);
     ProjectDashboardRow? row = selection.row;
-    String scope = await menuSelect<String>(
-      'Build targets',
-      <MenuEntry<String>>[
-        if (row != null) ...<MenuEntry<String>>[
-          MenuEntry<String>('${row.name} / ${row.target}', value: 'target'),
-          MenuEntry<String>('Every target in ${row.name}', value: 'project'),
-        ],
-        const MenuEntry<String>(
-          'Every registered project and target',
-          value: 'all',
-        ),
-        const MenuEntry<String>(
-          'Changed projects and targets',
-          value: 'changed',
-        ),
+    String
+    scope = await menuSelect<String>('Build targets', <MenuEntry<String>>[
+      if (selection.checkedTargets.isNotEmpty)
         MenuEntry<String>(
-          'Change build limits',
-          value: 'limits',
-          detail: '$jobs jobs / $memoryMiB MiB / $workers workers',
+          'Build ${selection.checkedTargets.length} checked targets',
+          value: 'checked',
+          detail: selection.checkedTargets.join(', '),
         ),
-        const MenuEntry<String>('Back', value: 'back'),
-      ],
-    );
+      if (row != null && row.registered)
+        MenuEntry<String>('${row.name} / ${row.target}', value: 'target'),
+      if (selection.registered)
+        MenuEntry<String>(
+          'Every target in ${selection.projectName}',
+          value: 'project',
+        ),
+      const MenuEntry<String>(
+        'Every registered project and target',
+        value: 'all',
+      ),
+      const MenuEntry<String>('Changed projects and targets', value: 'changed'),
+      MenuEntry<String>(
+        'Change build limits',
+        value: 'limits',
+        detail:
+            '${selection.limits.jobs} jobs / ${selection.limits.memoryMiB} MiB / ${selection.limits.workers} workers',
+      ),
+      const MenuEntry<String>('Back', value: 'back'),
+    ]);
     if (scope == 'back') return null;
     if (scope == 'limits') {
-      await _limits();
-      return _build(selection);
+      return _limits(selection.limits);
+    }
+    if (scope == 'checked' && selection.checkedTargets.isEmpty) {
+      throw StateError('No targets are checked');
     }
     return <String>[
       'build',
-      if (scope == 'all' || scope == 'changed') '--all' else row!.project,
+      if (scope == 'checked') ...<String>[
+        '--targets',
+        selection.checkedTargets.join(','),
+      ] else if (scope == 'all' || scope == 'changed')
+        '--all'
+      else
+        selection.project!,
       if (scope == 'changed') '--changed',
-      if (scope == 'target') ...<String>['--target', row!.target] else
+      if (scope == 'target') ...<String>[
+        '--target',
+        row!.target,
+      ] else if (scope != 'checked')
         '--all-targets',
       '--jobs',
-      '$jobs',
+      '${selection.limits.jobs}',
       '--memory',
-      '$memoryMiB',
+      '${selection.limits.memoryMiB}',
       '--workers',
-      '$workers',
+      '${selection.limits.workers}',
     ];
   }
 
-  Future<void> _limits() async {
-    String value = await Ui.input(
-      'Jobs, total memory MiB, total Gradle workers',
-      defaultValue: '$jobs $memoryMiB $workers',
-      validator: (String value) {
-        List<String> parts = value.trim().split(RegExp(r'\s+'));
-        return parts.length == 3 &&
-            parts.every((String part) => (int.tryParse(part) ?? 0) > 0);
-      },
-      validationMessage: 'Enter three positive integers, for example 2 8192 2.',
-    );
-    List<int> values = value
-        .trim()
-        .split(RegExp(r'\s+'))
-        .map(int.parse)
-        .toList();
-    jobs = values[0];
-    memoryMiB = values[1];
-    workers = values[2];
+  Future<List<String>?> _limits(ProjectBuildLimits limits) async {
+    Map<String, int> values = <String, int>{
+      'jobs': limits.jobs,
+      'memory': limits.memoryMiB,
+      'workers': limits.workers,
+    };
+    Map<String, String> labels = <String, String>{
+      'jobs': 'Parallel builds',
+      'memory': 'Total memory budget (MiB)',
+      'workers': 'Total Gradle workers',
+    };
+    while (true) {
+      String
+      setting = await menuSelect<String>('Build limits', <MenuEntry<String>>[
+        for (String key in values.keys)
+          MenuEntry<String>(labels[key]!, value: key, detail: '${values[key]}'),
+        const MenuEntry<String>('Save limits', value: 'save'),
+        const MenuEntry<String>('Back', value: 'back'),
+      ], footer: 'Limits apply to new builds. Memory is a scheduling budget.');
+      if (setting == 'back') return null;
+      if (setting == 'save') {
+        return <String>[
+          'limits',
+          for (MapEntry<String, int> value in values.entries) ...<String>[
+            '--${value.key}',
+            '${value.value}',
+          ],
+        ];
+      }
+      values[setting] = int.parse(
+        await Ui.input(
+          labels[setting]!,
+          defaultValue: '${values[setting]}',
+          validator: (String value) => (int.tryParse(value) ?? 0) > 0,
+          validationMessage: 'Enter a positive integer.',
+        ),
+      );
+    }
   }
 
   Future<List<String>> _scan(ProjectDashboardSelection selection) async =>
