@@ -346,6 +346,7 @@ Future<ProjectProcessResult> runProjectProcess({
   required String directory,
   required File log,
   Map<String, String> environment = const <String, String>{},
+  Set<String> removeEnvironment = const <String>{},
   bool Function()? cancelled,
   void Function(String)? onLine,
   Duration timeout = const Duration(hours: 2),
@@ -392,7 +393,8 @@ Future<ProjectProcessResult> runProjectProcess({
   }
 
   Map<String, String> variables = <String, String>{
-    ...Platform.environment,
+    for (MapEntry<String, String> entry in Platform.environment.entries)
+      if (!removeEnvironment.contains(entry.key)) entry.key: entry.value,
     ...environment,
     'MULTIPLEXOR_PROCESS_TOKEN': token,
   }..remove('GIT_CONFIG_COUNT');

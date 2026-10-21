@@ -85,6 +85,126 @@ void main() {
         minecraft: minecraft,
       );
 
+  test('listing an empty catalog creates no directories or output', () {
+    expect(deployment.destinations(), isEmpty);
+    expect(store.directory.existsSync(), isFalse);
+    expect(destination.existsSync(), isFalse);
+  });
+
+  test(
+    'listing returns saved locations without touching their directories',
+    () async {
+      await deployment.configure(
+        'z-export',
+        path: destination.path,
+        platform: 'fabric',
+        minecraft: '26.3',
+      );
+      await deployment.configure('a-export', path: p.join(root.path, 'other'));
+      String saved = store.destinationsFile.readAsStringSync();
+      List<Map<String, Object?>> locations = deployment.destinations();
+      expect(
+        locations.map((Map<String, Object?> item) => item['name']),
+        <String>['a-export', 'z-export'],
+      );
+      expect(locations.last['path'], destination.path);
+      expect(locations.last['platform'], 'fabric');
+      expect(locations.last['minecraft'], '26.3');
+      expect(store.destinationsFile.readAsStringSync(), saved);
+      expect(destination.existsSync(), isFalse);
+      expect(Directory(p.join(root.path, 'other')).existsSync(), isFalse);
+    },
+  );
+
+  test(
+    'removing configuration leaves deployed jars and ownership unchanged',
+    () async {
+      saveRun('one', <Map<String, Object?>>[
+        await artifact('one', 'iris', 'bukkit'),
+      ]);
+      await configure();
+      await deployment.configure('other', path: p.join(root.path, 'other'));
+      await deployment.deploy('one', 'exports');
+      Map<String, List<int>> before = <String, List<int>>{
+        for (File file in destination.listSync().whereType<File>())
+          p.basename(file.path): file.readAsBytesSync(),
+      };
+      Map<String, Object?> removed = await deployment.remove('exports');
+      expect(removed['name'], 'exports');
+      expect(
+        deployment.destinations().map(
+          (Map<String, Object?> item) => item['name'],
+        ),
+        <String>['other'],
+      );
+      expect(<String, List<int>>{
+        for (File file in destination.listSync().whereType<File>())
+          p.basename(file.path): file.readAsBytesSync(),
+      }, before);
+    },
+  );
+
+  test(
+    'removing a location does not resolve its changed output path',
+    () async {
+      await configure();
+      File destinationFile = File(destination.path)
+        ..writeAsStringSync('unrelated');
+      await deployment.remove('exports');
+      expect(destinationFile.readAsStringSync(), 'unrelated');
+      expect(deployment.destinations(), isEmpty);
+    },
+  );
+
+  test(
+    'unknown removals and invalid edits preserve saved configuration',
+    () async {
+      await configure(platform: 'plugin', minecraft: '26.3');
+      String saved = store.destinationsFile.readAsStringSync();
+      await expectLater(deployment.remove('missing'), throwsFormatException);
+      await expectLater(
+        deployment.configure(
+          'exports',
+          path: destination.path,
+          platform: 'invalid',
+        ),
+        throwsFormatException,
+      );
+      await expectLater(
+        deployment.configure('exports', dropins: true, platform: 'fabric'),
+        throwsFormatException,
+      );
+      File invalid = File(p.join(root.path, 'file'))
+        ..writeAsStringSync('untouched');
+      await expectLater(
+        deployment.configure('exports', path: invalid.path),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(store.destinationsFile.readAsStringSync(), saved);
+      expect(invalid.readAsStringSync(), 'untouched');
+      expect(destination.existsSync(), isFalse);
+    },
+  );
+
+  test(
+    'concurrent remove and configure preserve unrelated destination updates',
+    () async {
+      await configure();
+      await Future.wait(<Future<Map<String, Object?>>>[
+        deployment.remove('exports'),
+        ProjectDeployment(
+          store,
+        ).configure('other', path: p.join(root.path, 'other')),
+      ]);
+      expect(
+        deployment.destinations().map(
+          (Map<String, Object?> item) => item['name'],
+        ),
+        <String>['other'],
+      );
+    },
+  );
+
   test(
     'preview verifies selection without creating destination files',
     () async {

@@ -236,6 +236,7 @@ const Set<String> _booleanOptions = <String>{
   'follow',
   'preview',
   'dropins',
+  'remove',
   'changed',
 };
 
@@ -287,6 +288,7 @@ const Map<String, int> _maximumPositionals = <String, int>{
   'projects retry': 1,
   'projects deploy': 1,
   'projects destination': 1,
+  'projects destinations': 0,
   'projects dashboard': 0,
   'network list': 0,
   'network candidates': 0,

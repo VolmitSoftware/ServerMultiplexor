@@ -26,6 +26,9 @@ class ProjectBuildService {
   List<Map<String, Object?>> catalog() =>
       store.projects().map((BuildProject project) => project.toJson()).toList();
 
+  List<Map<String, Object?>> destinations() =>
+      ProjectDeployment(store).destinations();
+
   Map<String, Object?> status([String? id]) {
     List<Map<String, Object?>> runs = id == null
         ? store.runs()
@@ -152,7 +155,32 @@ class ProjectBuildService {
           return 0;
         case 'logs':
           return await _logs(args, output);
+        case 'destinations':
+          _emit(
+            <String, Object?>{'destinations': destinations()},
+            args,
+            output,
+          );
+          return 0;
         case 'destination':
+          if (args.flag('remove')) {
+            if (args.flag('dropins') ||
+                <String>[
+                  'path',
+                  'platform',
+                  'mc',
+                  'instance',
+                ].any((String name) => args.option(name) != null)) {
+              throw const FormatException(
+                'Choose --remove or destination settings',
+              );
+            }
+            Map<String, Object?> removed = await ProjectDeployment(
+              store,
+            ).remove(args.requiredPosition(0));
+            _emit(<String, Object?>{'removed': removed}, args, output);
+            return 0;
+          }
           Map<String, Object?> result = await ProjectDeployment(store)
               .configure(
                 args.requiredPosition(0),
@@ -309,6 +337,13 @@ class ProjectBuildService {
     int jobs = args.integer('jobs', configured.jobs);
     int memory = args.integer('memory', configured.memoryMiB);
     int workers = args.integer('workers', configured.workers);
+    String packaging =
+        args.option('packaging') ??
+        previous?['packaging'] as String? ??
+        'local';
+    if (!<String>{'local', 'compact'}.contains(packaging)) {
+      throw const FormatException('Packaging must be local or compact');
+    }
     for (String key in plan.keys) {
       if (plan.targetFor(key).memoryMiB > memory) {
         throw FormatException(
@@ -340,9 +375,11 @@ class ProjectBuildService {
       'jobsLimit': jobs,
       'memoryMiB': memory,
       'workers': workers,
+      'packaging': packaging,
       'changed': args.flag('changed'),
       if (previous != null) 'retryOf': previous['id'],
       if (previous != null) 'sourceHashes': previous['sourceHashes'],
+      if (previous != null) 'inputHashes': previous['inputHashes'],
     };
     projectAtomicJson(store.runFile(id), run);
     try {
@@ -509,6 +546,7 @@ class ProjectArguments {
         'preview',
         'dropins',
         'changed',
+        'remove',
       }.contains(key)) {
         values[key] = 'true';
       } else {

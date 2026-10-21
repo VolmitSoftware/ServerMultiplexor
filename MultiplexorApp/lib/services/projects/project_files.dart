@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
 import 'project_model.dart';
@@ -55,11 +57,41 @@ Future<String> copyProjectSources(
   Directory source,
   Directory destination, {
   String? boundary,
+}) => _copyProjectTree(
+  source.path,
+  destination.path,
+  boundary: boundary ?? source.path,
+  filterSources: true,
+);
+
+Future<String> copyProjectSourceInput(
+  String source,
+  String destination, {
+  required String boundary,
+}) => _copyProjectTree(
+  source,
+  destination,
+  boundary: boundary,
+  filterSources: false,
+);
+
+Future<String> _copyProjectTree(
+  String source,
+  String destination, {
+  required String boundary,
+  required bool filterSources,
 }) async {
-  String allowed = Directory(
-    boundary ?? source.path,
-  ).resolveSymbolicLinksSync();
-  Set<String> ignored = await _ignoredSourcePaths(source);
+  String allowed = Directory(boundary).resolveSymbolicLinksSync();
+  String originRoot = File(source).resolveSymbolicLinksSync();
+  if (originRoot != allowed && !p.isWithin(allowed, originRoot)) {
+    throw FileSystemException(
+      'Source input leaves the registered source root',
+      source,
+    );
+  }
+  Set<String> ignored = filterSources
+      ? await _ignoredSourcePaths(Directory(source))
+      : <String>{};
   Map<String, String> hashes = <String, String>{};
   List<String> executableFiles = <String>[];
   Future<void> visit(
@@ -86,14 +118,17 @@ Future<String> copyProjectSources(
       if (ancestors.contains(resolved)) {
         throw FileSystemException('Cyclic source directory', origin);
       }
-      Directory(p.join(destination.path, relative)).createSync(recursive: true);
+      Directory(p.join(destination, relative)).createSync(recursive: true);
+      if (!filterSources) {
+        hashes['$relative/'] = 'directory';
+      }
       List<FileSystemEntity> entries =
           Directory(resolved).listSync(followLinks: false)..sort(
             (FileSystemEntity a, FileSystemEntity b) =>
                 a.path.compareTo(b.path),
           );
       for (FileSystemEntity entry in entries) {
-        if (projectSourceEntry(p.basename(entry.path))) {
+        if (!filterSources || projectSourceEntry(p.basename(entry.path))) {
           await visit(
             entry.path,
             p.join(relative, p.basename(entry.path)),
@@ -106,9 +141,9 @@ Future<String> copyProjectSources(
     if (before.type != FileSystemEntityType.file) {
       throw FileSystemException('Unsupported source entry', origin);
     }
-    File output = File(p.join(destination.path, relative));
+    File output = File(p.join(destination, relative));
     output.parent.createSync(recursive: true);
-    await File(resolved).copy(output.path);
+    await cloneProjectFile(File(resolved), output);
     String hash = await projectFileHash(output);
     FileStat after = FileStat.statSync(resolved);
     if (after.size != before.size ||
@@ -125,7 +160,7 @@ Future<String> copyProjectSources(
     }
   }
 
-  await visit(source.resolveSymbolicLinksSync(), '.', <String>{});
+  await visit(originRoot, filterSources ? '.' : '', <String>{});
   for (int index = 0; index < executableFiles.length; index += 100) {
     ProcessResult result = await Process.run('chmod', <String>[
       '755',
@@ -134,7 +169,7 @@ Future<String> copyProjectSources(
     if (result.exitCode != 0) {
       throw FileSystemException(
         'Could not preserve executable source files',
-        source.path,
+        source,
       );
     }
   }
@@ -233,6 +268,18 @@ gradle.projectsEvaluated {
 
 const String projectBudgetInit = r'''
 import org.gradle.api.tasks.testing.Test
+gradle.settingsEvaluated { settings ->
+    String cache = System.getenv('MULTIPLEXOR_TASK_CACHE')
+    if (cache != null && !cache.isBlank()) {
+        settings.buildCache {
+            local {
+                directory = new File(cache)
+                enabled = true
+                push = true
+            }
+        }
+    }
+}
 gradle.projectsEvaluated {
     allprojects {
         tasks.withType(Test).configureEach {
@@ -241,3 +288,23 @@ gradle.projectsEvaluated {
     }
 }
 ''';
+
+Future<void> cloneProjectFile(File source, File destination) async {
+  if (Platform.isMacOS) {
+    Pointer<Utf8> origin = source.path.toNativeUtf8();
+    Pointer<Utf8> output = destination.path.toNativeUtf8();
+    try {
+      if (_cloneFile(origin, output, 0) == 0) return;
+    } finally {
+      calloc.free(origin);
+      calloc.free(output);
+    }
+  }
+  await source.copy(destination.path);
+}
+
+final int Function(Pointer<Utf8>, Pointer<Utf8>, int) _cloneFile =
+    DynamicLibrary.process().lookupFunction<
+      Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Uint32),
+      int Function(Pointer<Utf8>, Pointer<Utf8>, int)
+    >('clonefile');

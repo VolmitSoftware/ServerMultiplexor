@@ -142,6 +142,15 @@ class BuildProject {
       sandbox = json['sandbox'] as String,
       parallelTargets = json['parallelTargets'] as bool? ?? false,
       sourceDependencies = projectStrings(json['sourceDependencies']),
+      sourceInputs = projectStrings(json['sourceInputs']).map((String value) {
+        String path = p.posix.normalize(projectRelativePath(value));
+        if (path == '.') {
+          throw const FormatException(
+            'Source inputs must name a file or directory below the source root',
+          );
+        }
+        return path;
+      }).toList(),
       sourceRoot = json['sourceRoot'] as String,
       definitionHash = json['definitionHash'] as String? ?? '',
       relativePath = projectRelativePath(json['relativePath']),
@@ -151,6 +160,9 @@ class BuildProject {
     if (json['schema'] != 1 ||
         !<String>{'per-target', 'project'}.contains(sandbox)) {
       throw const FormatException('Invalid project schema or sandbox policy');
+    }
+    if (sourceInputs.toSet().length != sourceInputs.length) {
+      throw FormatException('Project $id requires unique source inputs');
     }
     if (targets.isEmpty ||
         targets.map((ProjectTarget t) => t.id).toSet().length !=
@@ -164,6 +176,7 @@ class BuildProject {
   final String sandbox;
   final bool parallelTargets;
   final List<String> sourceDependencies;
+  final List<String> sourceInputs;
   final String sourceRoot;
   final String definitionHash;
   final String relativePath;
@@ -181,6 +194,7 @@ class BuildProject {
     'sandbox': sandbox,
     'parallelTargets': parallelTargets,
     'sourceDependencies': sourceDependencies,
+    'sourceInputs': sourceInputs,
     'sourceRoot': sourceRoot,
     'relativePath': relativePath,
     'definitionHash': definitionHash,
@@ -195,6 +209,7 @@ class ProjectPlan {
     }
     for (String key in keys) {
       List<String> sources = sourcesFor(key.split(':').first);
+      inputsFor(key.split(':').first);
       for (int left = 0; left < sources.length; left++) {
         String first = p.normalize(projects[sources[left]]!.relativePath);
         for (int right = left + 1; right < sources.length; right++) {
@@ -239,6 +254,42 @@ class ProjectPlan {
     ];
   }
 
+  List<ProjectSourceInput> inputsFor(String id) {
+    List<BuildProject> sources = sourcesFor(
+      id,
+    ).map((String key) => projects[key]!).toList();
+    Map<String, ProjectSourceInput> inputs = <String, ProjectSourceInput>{};
+    for (BuildProject source in sources) {
+      for (String path in source.sourceInputs) {
+        ProjectSourceInput input = ProjectSourceInput(source.sourceRoot, path);
+        for (BuildProject project in sources) {
+          if (_overlaps(path, project.relativePath)) {
+            throw FormatException(
+              'Source input $path overlaps project ${project.id}',
+            );
+          }
+        }
+        for (ProjectSourceInput previous in inputs.values) {
+          if (path == previous.relativePath && input.key == previous.key) {
+            continue;
+          }
+          if (_overlaps(path, previous.relativePath)) {
+            throw FormatException(
+              'Source inputs overlap: $path and ${previous.relativePath}',
+            );
+          }
+        }
+        inputs[path] = input;
+      }
+    }
+    return inputs.values.toList();
+  }
+
+  static bool _overlaps(String first, String second) =>
+      p.equals(first, second) ||
+      p.isWithin(first, second) ||
+      p.isWithin(second, first);
+
   void _visit(String key, Set<String> visiting) {
     if (keys.contains(key)) return;
     if (!visiting.add(key)) {
@@ -254,4 +305,12 @@ class ProjectPlan {
     visiting.remove(key);
     keys.add(key);
   }
+}
+
+class ProjectSourceInput {
+  const ProjectSourceInput(this.sourceRoot, this.relativePath);
+
+  final String sourceRoot;
+  final String relativePath;
+  String get key => p.normalize(p.absolute(p.join(sourceRoot, relativePath)));
 }

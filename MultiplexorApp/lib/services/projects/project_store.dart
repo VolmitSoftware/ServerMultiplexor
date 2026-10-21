@@ -152,7 +152,12 @@ class ProjectStore {
             ),
           ),
           environment: <String, String>{
-            'MULTIPLEXOR_SOURCE_HASH': projectDigest(sourceHashes),
+            'MULTIPLEXOR_SOURCE_HASHES': jsonEncode(<String, String>{
+              for (String source in candidates)
+                Directory(
+                  p.join(sourceRoot, source),
+                ).resolveSymbolicLinksSync(): sourceHashes[source]!,
+            }),
           },
           timeout: const Duration(minutes: 15),
         );
@@ -185,11 +190,25 @@ class ProjectStore {
         }
         byId[project.id] = project;
       }
-      ProjectPlan(byId, <String>[
+      ProjectPlan plan = ProjectPlan(byId, <String>[
         for (BuildProject project in combined)
           for (ProjectTarget target in project.targets)
             '${project.id}:${target.id}',
       ]);
+      for (BuildProject project in discovered) {
+        for (ProjectSourceInput input in plan.inputsFor(project.id)) {
+          String resolved = File(input.key).resolveSymbolicLinksSync();
+          String boundary = Directory(
+            input.sourceRoot,
+          ).resolveSymbolicLinksSync();
+          if (!p.isWithin(boundary, resolved)) {
+            throw FileSystemException(
+              'Source input leaves the registered source root',
+              input.key,
+            );
+          }
+        }
+      }
       projectAtomicJson(catalogFile, <String, Object?>{
         'schema': 1,
         'scannedAt': DateTime.now().toUtc().toIso8601String(),

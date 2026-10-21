@@ -65,7 +65,7 @@ class ProjectDeployment {
     };
     destination = await _resolve(destination, checkRuntime: false);
     return store.locked(() async {
-      List<Map<String, Object?>> destinations = _destinations()
+      List<Map<String, Object?>> configured = destinations()
         ..removeWhere((Map<String, Object?> item) => item['name'] == name)
         ..add(destination)
         ..sort(
@@ -75,9 +75,27 @@ class ProjectDeployment {
       _safePath(store.destinationsFile.path);
       projectAtomicJson(store.destinationsFile, <String, Object?>{
         'schema': 1,
-        'destinations': destinations,
+        'destinations': configured,
       });
       return destination;
+    });
+  }
+
+  Future<Map<String, Object?>> remove(String name) async {
+    projectIdentifier(name);
+    return store.locked(() async {
+      List<Map<String, Object?>> configured = destinations();
+      int index = configured.indexWhere(
+        (Map<String, Object?> item) => item['name'] == name,
+      );
+      if (index < 0) throw FormatException('Unknown destination: $name');
+      Map<String, Object?> removed = configured.removeAt(index);
+      _safePath(store.destinationsFile.path);
+      projectAtomicJson(store.destinationsFile, <String, Object?>{
+        'schema': 1,
+        'destinations': configured,
+      });
+      return removed;
     });
   }
 
@@ -88,7 +106,7 @@ class ProjectDeployment {
     bool preview = false,
   }) async {
     projectIdentifier(runId);
-    Map<String, Object?> configured = _destinations().firstWhere(
+    Map<String, Object?> configured = destinations().firstWhere(
       (Map<String, Object?> item) => item['name'] == destination,
       orElse: () => throw FormatException('Unknown destination: $destination'),
     );
@@ -134,7 +152,7 @@ class ProjectDeployment {
     });
   }
 
-  List<Map<String, Object?>> _destinations() {
+  List<Map<String, Object?>> destinations() {
     _regularFileOrMissing(store.destinationsFile.path);
     if (!store.destinationsFile.existsSync()) return <Map<String, Object?>>[];
     Map<String, Object?> saved = projectReadJson(store.destinationsFile);
