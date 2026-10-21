@@ -53,6 +53,7 @@ void main() {
     String id,
     List<Map<String, Object?>> targets, {
     List<String> sources = const <String>[],
+    List<String> inputs = const <String>[],
     bool parallel = true,
   }) {
     Directory directory = Directory(p.join(fixture.path, 'sources', id))
@@ -78,6 +79,7 @@ printf '> Task :assemble\\n'
       'sandbox': 'per-target',
       'parallelTargets': parallel,
       'sourceDependencies': sources,
+      'sourceInputs': inputs,
       'sourceRoot': p.join(fixture.path, 'sources'),
       'relativePath': id,
       'targets': targets,
@@ -201,6 +203,91 @@ printf '> Task :assemble\\n'
   );
 
   test(
+    'source stamps identify each copied project independently of its consumer',
+    () async {
+      BuildProject library = project('library', <Map<String, Object?>>[
+        target('one'),
+      ]);
+      BuildProject app = project(
+        'app',
+        <Map<String, Object?>>[target('one')],
+        sources: <String>['library'],
+        inputs: <String>['docs/app'],
+      );
+      BuildProject other = project(
+        'other',
+        <Map<String, Object?>>[target('one')],
+        sources: <String>['library'],
+      );
+      File docs = File(p.join(fixture.path, 'sources/docs/app/reference.md'));
+      docs.parent.createSync(recursive: true);
+      docs.writeAsStringSync('first documentation');
+      List<BuildProject> projects = <BuildProject>[library, app, other];
+      for (BuildProject project in projects) {
+        File wrapper = File(p.join(project.directory, 'gradlew'));
+        wrapper.writeAsStringSync(
+          "${wrapper.readAsStringSync()}\nprintf '%s\\n' \"\$MULTIPLEXOR_SOURCE_HASHES\" > build/source-hashes.json\n",
+        );
+      }
+      Map<String, Object?> first = run('first-stamps', projects, <String>[
+        'library:one',
+        'app:one',
+        'other:one',
+      ]);
+      expect(await ProjectWorker(store, first).execute(), 0);
+      Map<String, Object?> stamps(String runId, BuildProject project) {
+        Directory sandbox = Directory(
+          p.join(store.runWork(runId).path, 'sandboxes', project.id, 'one'),
+        );
+        Map<String, Object?> result = projectReadJson(
+          File(
+            p.join(
+              sandbox.path,
+              project.relativePath,
+              'build/source-hashes.json',
+            ),
+          ),
+        );
+        expect(result.keys.toSet(), <String>{
+          for (String source in <String>[
+            project.id,
+            ...project.sourceDependencies,
+          ])
+            Directory(p.join(sandbox.path, source)).resolveSymbolicLinksSync(),
+        });
+        return <String, Object?>{
+          for (MapEntry<String, Object?> entry in result.entries)
+            p.basename(entry.key): entry.value,
+        };
+      }
+
+      String libraryHash =
+          projectObject(first['sourceHashes'])['library'] as String;
+      for (BuildProject project in projects) {
+        expect(stamps('first-stamps', project)['library'], libraryHash);
+      }
+      File(
+        p.join(app.directory, 'input.txt'),
+      ).writeAsStringSync('edited consumer');
+      docs.writeAsStringSync('edited documentation');
+      Map<String, Object?> second = run('second-stamps', projects, <String>[
+        'library:one',
+        'app:one',
+        'other:one',
+      ]);
+      expect(await ProjectWorker(store, second).execute(), 0);
+      for (BuildProject project in projects) {
+        expect(stamps('second-stamps', project)['library'], libraryHash);
+      }
+      expect(
+        stamps('second-stamps', app)['app'],
+        isNot(stamps('first-stamps', app)['app']),
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
     'failed prerequisites block dependents while independent targets finish',
     () async {
       BuildProject app = project('app', <Map<String, Object?>>[
@@ -307,6 +394,259 @@ printf '> Task :assemble\\n'
       isNull,
     );
   }, skip: Platform.isWindows);
+
+  test(
+    'auxiliary inputs are isolated, invalidate reuse, and remain frozen on retry',
+    () async {
+      BuildProject app = project(
+        'app',
+        <Map<String, Object?>>[target('one')],
+        inputs: <String>['docs/app'],
+      );
+      File docs = File(p.join(fixture.path, 'sources/docs/app/reference.txt'));
+      docs.parent.createSync(recursive: true);
+      docs.writeAsStringSync('first documentation');
+      File unrelated = File(
+        p.join(fixture.path, 'sources/docs/other/reference.txt'),
+      );
+      unrelated.parent.createSync(recursive: true);
+      unrelated.writeAsStringSync('not an input');
+      File wrapper = File(p.join(app.directory, 'gradlew'));
+      wrapper.writeAsStringSync(
+        '\ncat ../docs/app/reference.txt > build/result.jar\n',
+        mode: FileMode.append,
+      );
+      Map<String, Object?> first = run(
+        'inputs-first',
+        <BuildProject>[app],
+        <String>['app:one'],
+      );
+      expect(await ProjectWorker(store, first).execute(), 0);
+      String sandbox = p.join(
+        store.runWork('inputs-first').path,
+        'sandboxes/app/one',
+      );
+      expect(
+        File(p.join(sandbox, 'docs/app/reference.txt')).readAsStringSync(),
+        'first documentation',
+      );
+      expect(Directory(p.join(sandbox, 'docs/other')).existsSync(), isFalse);
+      docs.writeAsStringSync('edited documentation');
+      Map<String, Object?> second = run(
+        'inputs-second',
+        <BuildProject>[app],
+        <String>['app:one'],
+        changed: true,
+      );
+      expect(await ProjectWorker(store, second).execute(), 0);
+      Map<String, Object?> secondJob = projectObject(
+        (second['jobs'] as List<Object?>).single,
+      );
+      expect(secondJob['reusedFrom'], isNull);
+      expect(
+        File(
+          projectObject(
+                (secondJob['artifacts'] as List<Object?>).single,
+              )['file']
+              as String,
+        ).readAsStringSync(),
+        'edited documentation',
+      );
+      Map<String, Object?> firstJob = projectObject(
+        (first['jobs'] as List<Object?>).single,
+      );
+      File(
+        projectObject((firstJob['artifacts'] as List<Object?>).single)['file']
+            as String,
+      ).writeAsStringSync('invalid artifact');
+      Map<String, Object?> retry = run(
+        'inputs-retry',
+        <BuildProject>[app],
+        <String>['app:one'],
+      );
+      retry['retryOf'] = 'inputs-first';
+      retry['sourceHashes'] = first['sourceHashes'];
+      retry['inputHashes'] = first['inputHashes'];
+      expect(await ProjectWorker(store, retry).execute(), 0);
+      Map<String, Object?> retryJob = projectObject(
+        (retry['jobs'] as List<Object?>).single,
+      );
+      expect(retryJob['reusedFrom'], isNull);
+      expect(
+        File(
+          projectObject((retryJob['artifacts'] as List<Object?>).single)['file']
+              as String,
+        ).readAsStringSync(),
+        'first documentation',
+      );
+      expect(retry['inputHashes'], first['inputHashes']);
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
+    'file inputs preserve exact content outside project source filters',
+    () async {
+      BuildProject app = project(
+        'app',
+        <Map<String, Object?>>[target('one')],
+        inputs: <String>['docs/version.txt'],
+      );
+      File docs = File(p.join(fixture.path, 'sources/docs/version.txt'));
+      docs.parent.createSync(recursive: true);
+      docs.writeAsStringSync('document version');
+      Map<String, Object?> state = run(
+        'file-input',
+        <BuildProject>[app],
+        <String>['app:one'],
+      );
+      expect(await ProjectWorker(store, state).execute(), 0);
+      expect(
+        File(
+          p.join(
+            store.runWork('file-input').path,
+            'sandboxes/app/one/docs/version.txt',
+          ),
+        ).readAsStringSync(),
+        'document version',
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
+    'missing and escaping auxiliary inputs fail before target launch',
+    () async {
+      for (bool escape in <bool>[false, true]) {
+        BuildProject app = project(
+          'app',
+          <Map<String, Object?>>[target('one')],
+          inputs: <String>['docs/app'],
+        );
+        Directory docs = Directory(p.join(fixture.path, 'sources/docs'))
+          ..createSync(recursive: true);
+        if (escape) {
+          Link(p.join(docs.path, 'app')).createSync(fixture.parent.path);
+        }
+        Map<String, Object?> state = run(
+          escape ? 'escape-input' : 'missing-input',
+          <BuildProject>[app],
+          <String>['app:one'],
+        );
+        expect(await ProjectWorker(store, state).execute(), 1);
+        expect(state['error'], isNotNull);
+        expect(
+          projectObject((state['jobs'] as List<Object?>).single)['logPath'],
+          isNull,
+        );
+      }
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
+    'packaging participates in reuse and cache settings reach isolated Gradle homes',
+    () async {
+      BuildProject app = project('app', <Map<String, Object?>>[
+        target('one'),
+        target('two'),
+      ]);
+      File wrapper = File(p.join(app.directory, 'gradlew'));
+      wrapper.writeAsStringSync(r'''
+printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
+''', mode: FileMode.append);
+      Map<String, Object?> first = run(
+        'pack-local',
+        <BuildProject>[app],
+        <String>['app:one', 'app:two'],
+      );
+      expect(await ProjectWorker(store, first).execute(), 0);
+      List<Map<String, Object?>> jobs = (first['jobs'] as List<Object?>)
+          .map(projectObject)
+          .toList();
+      List<String> environments = <String>[];
+      for (Map<String, Object?> job in jobs) {
+        String log = File(job['logPath'] as String).readAsStringSync();
+        expect(log, contains('--build-cache'));
+        expect(log, contains('-PcompactRelease=false'));
+        environments.add(
+          log
+              .split('\n')
+              .singleWhere((String line) => line.startsWith('cache=')),
+        );
+      }
+      expect(
+        environments.map((String line) => line.split(' home=').first).toSet(),
+        hasLength(1),
+      );
+      expect(
+        environments.map((String line) => line.split(' home=').last).toSet(),
+        hasLength(2),
+      );
+      expect(
+        File(
+          p.join(store.runWork('pack-local').path, 'budget.init.gradle'),
+        ).readAsStringSync(),
+        contains('settings.buildCache'),
+      );
+      Map<String, Object?> compact = run(
+        'pack-compact',
+        <BuildProject>[app],
+        <String>['app:one'],
+        changed: true,
+      );
+      compact['packaging'] = 'compact';
+      expect(await ProjectWorker(store, compact).execute(), 0);
+      Map<String, Object?> job = projectObject(
+        (compact['jobs'] as List<Object?>).single,
+      );
+      expect(job['reusedFrom'], isNull);
+      expect(
+        File(job['logPath'] as String).readAsStringSync(),
+        contains('-PcompactRelease=true'),
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
+  test('source inputs reject traversal and overlapping materializations', () {
+    BuildProject app = project('app', <Map<String, Object?>>[target('one')]);
+    for (List<String> inputs in <List<String>>[
+      <String>['../docs'],
+      <String>['/docs'],
+      <String>['.'],
+      <String>['docs/app', 'docs/app'],
+      <String>['app'],
+      <String>['app/config'],
+      <String>['docs', 'docs/app'],
+    ]) {
+      expect(() {
+        BuildProject configured = BuildProject.fromJson(<String, Object?>{
+          ...app.toJson(),
+          'sourceInputs': inputs,
+        });
+        ProjectPlan(
+          <String, BuildProject>{'app': configured},
+          <String>['app:one'],
+        );
+      }, throwsFormatException);
+    }
+    BuildProject lib = project(
+      'lib',
+      <Map<String, Object?>>[target('one')],
+      inputs: <String>['docs/shared'],
+    );
+    BuildProject consumer = BuildProject.fromJson(<String, Object?>{
+      ...app.toJson(),
+      'sourceDependencies': <String>['lib'],
+      'sourceInputs': <String>['docs/shared'],
+    });
+    ProjectPlan plan = ProjectPlan(
+      <String, BuildProject>{'app': consumer, 'lib': lib},
+      <String>['app:one'],
+    );
+    expect(plan.inputsFor('app').single.relativePath, 'docs/shared');
+  });
 
   test('hyphenated keys have distinct work and artifact paths', () async {
     BuildProject first = project('one-two', <Map<String, Object?>>[
@@ -466,13 +806,21 @@ printf '> Task :assemble\\n'
         p.join(app.directory, 'gradle/multiplexor.gradle'),
       ).writeAsStringSync('ext.multiplexor = [:]');
       String metadata = jsonEncode(app.toJson());
+      File observed = File(p.join(fixture.path, 'scan-source-hashes.json'));
       File(p.join(app.directory, 'gradlew')).writeAsStringSync(
-        '#!/bin/sh\nmkdir -p build\nprintf \'%s\\n\' \'MULTIPLEXOR_PROJECT=$metadata\'\n',
+        '#!/bin/sh\nmkdir -p build\nprintf \'%s\\n\' "\$MULTIPLEXOR_SOURCE_HASHES" > \'${observed.path}\'\nprintf \'%s\\n\' \'MULTIPLEXOR_PROJECT=$metadata\'\n',
       );
       List<BuildProject> results = await store.scan(
         p.join(fixture.path, 'sources'),
         (_) {},
       );
+      Map<String, Object?> sourceHashes = projectReadJson(observed);
+      expect(
+        sourceHashes.keys.single,
+        startsWith(store.workDirectory.resolveSymbolicLinksSync()),
+      );
+      expect(sourceHashes.keys.single, endsWith('/sources/app'));
+      expect(sourceHashes.values.single, matches(RegExp(r'^[0-9a-f]{64}$')));
       expect(results.single.id, 'app');
       expect(store.projects().single.targets.single.id, 'one');
       expect(Directory(p.join(app.directory, 'build')).existsSync(), isFalse);

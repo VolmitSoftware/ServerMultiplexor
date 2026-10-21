@@ -52,12 +52,16 @@ void main() {
       <String>['build', '--targets', 'iris:bukkit,gloss:api'],
       <String>['build', '--all', '--all-targets'],
       <String>['build', '--all', '--all-targets', '--changed'],
+      <String>['build', '--targets', 'iris:bukkit', '--packaging', 'local'],
       <String>['limits', '--json'],
       <String>['limits', '--jobs', '3', '--memory', '12288', '--workers', '6'],
       <String>['status', 'run-1', '--json'],
       <String>['logs', 'run-1', '--target', 'iris:bukkit', '--follow'],
       <String>['cancel', 'run-1'],
       <String>['retry', 'run-1', '--wait', '--json'],
+      <String>['retry', 'run-1', '--packaging', 'compact'],
+      <String>['destinations', '--json'],
+      <String>['destination', 'exports', '--remove', '--json'],
       <String>['deploy', 'run-1', '--to', 'exports', '--preview', '--json'],
       <String>[
         'destination',
@@ -95,6 +99,8 @@ void main() {
       <String>['retry'],
       <String>['deploy'],
       <String>['destination'],
+      <String>['destinations', 'exports'],
+      <String>['build', '--packaging'],
       <String>['dashboard', '--json'],
       <String>['dashboard', 'iris'],
     ]) {
@@ -126,6 +132,9 @@ void main() {
     expect(help, contains('--workers <total-count>'));
     expect(help, contains('projects deploy <run> --to <name>'));
     expect(help, contains('projects dashboard'));
+    expect(help, contains('--packaging <local|compact>'));
+    expect(help, contains('projects destinations [--json]'));
+    expect(help, contains('destination <name> --remove'));
     expect(help, isNot(contains('projects worker')));
   });
 }
