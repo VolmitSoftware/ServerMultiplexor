@@ -1089,6 +1089,8 @@ class MonitorScreen {
         return _runWorkspaceAction(WorkspaceModalAction.newInstance);
       case wsBuildsHitId:
         return _runWorkspaceAction(WorkspaceModalAction.pullBuilds);
+      case wsProjectsHitId:
+        return _runWorkspaceAction(WorkspaceModalAction.projects);
       case wsTuningHitId:
         return _runWorkspaceAction(WorkspaceModalAction.buildTuning);
       case wsConsumerHitId:

@@ -41,6 +41,7 @@ import 'networks/network_store.dart';
 import 'networks/velocity_download.dart';
 import 'proxy_runtime_control.dart';
 import 'rcon_client.dart';
+import 'projects/project_build_service.dart';
 import 'recovery_snapshot.dart';
 import 'recovery_runtime.dart';
 import '../models/backup_summary.dart';
@@ -281,6 +282,12 @@ class NativeCommandService {
         return _dispatchConfig(rest, io);
       case 'build':
         return _dispatchBuild(rest, io);
+      case 'projects':
+        return ProjectBuildService(rootDirectory: context.rootDir).command(
+          rest,
+          output: io.write,
+          error: io.error,
+        );
       case 'repos':
         return _dispatchRepos(rest, io);
       default:

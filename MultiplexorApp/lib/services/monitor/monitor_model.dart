@@ -136,6 +136,7 @@ const List<ButtonSpec> _blockedRemoteLiveButtons = <ButtonSpec>[
 /// rather than on whichever server happens to be selected.
 const List<ButtonSpec> _workspaceButtons = <ButtonSpec>[
   newInstanceButton,
+  ButtonSpec(id: wsProjectsHitId, label: 'PROJECTS'),
   ButtonSpec(id: wsBuildsHitId, label: 'BUILDS'),
   ButtonSpec(id: wsTuningHitId, label: 'TUNING'),
   ButtonSpec(id: wsConsolesHitId, label: 'CONSOLES'),
