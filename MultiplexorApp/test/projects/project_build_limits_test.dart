@@ -1,3 +1,6 @@
+@Tags(<String>['project-cli'])
+library;
+
 import 'dart:convert';
 import 'dart:io';
 

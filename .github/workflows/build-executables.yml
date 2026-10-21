@@ -150,7 +150,11 @@ jobs:
 
       - name: Test
         working-directory: MultiplexorApp
-        run: dart test
+        run: dart test --exclude-tags project-cli
+
+      - name: Test project CLI lifecycle
+        working-directory: MultiplexorApp
+        run: dart test --tags project-cli --concurrency 1
 
       - name: Compile Unix executable
         if: runner.os != 'Windows'

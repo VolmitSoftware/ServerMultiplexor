@@ -1,1 +1,3 @@
 concurrency: 4
+tags:
+  project-cli:
