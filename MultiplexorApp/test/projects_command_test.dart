@@ -47,9 +47,13 @@ void main() {
       <String>['list', '--json'],
       <String>['plan', '--all', '--all-targets', '--json'],
       <String>['plan', 'iris', '--target', 'bukkit,fabric-26.3', '--json'],
+      <String>['plan', '--targets', 'iris:bukkit,gloss:api', '--json'],
       <String>['build', 'iris', '--target', 'bukkit,fabric-26.3'],
+      <String>['build', '--targets', 'iris:bukkit,gloss:api'],
       <String>['build', '--all', '--all-targets'],
       <String>['build', '--all', '--all-targets', '--changed'],
+      <String>['limits', '--json'],
+      <String>['limits', '--jobs', '3', '--memory', '12288', '--workers', '6'],
       <String>['status', 'run-1', '--json'],
       <String>['logs', 'run-1', '--target', 'iris:bukkit', '--follow'],
       <String>['cancel', 'run-1'],
@@ -80,6 +84,12 @@ void main() {
       <String>['build', 'iris', 'gloss'],
       <String>['build', 'iris', '--jobs'],
       <String>['build', 'iris', '--sandbox'],
+      <String>['build', '--targets'],
+      <String>['build', '--targets', ''],
+      <String>['build', '--targets', 'iris:bukkit', '--targets', 'gloss:api'],
+      <String>['limits', 'iris'],
+      <String>['limits', '--jobs'],
+      <String>['limits', '--all'],
       <String>['logs'],
       <String>['cancel'],
       <String>['retry'],
@@ -110,6 +120,9 @@ void main() {
     expect(help, contains('projects scan <path>'));
     expect(help, contains('--all-targets'));
     expect(help, contains('--target <id,...>'));
+    expect(help, contains('projects plan --targets <project:target,...>'));
+    expect(help, contains('projects build --targets <project:target,...>'));
+    expect(help, contains('projects limits [--jobs <count>]'));
     expect(help, contains('--workers <total-count>'));
     expect(help, contains('projects deploy <run> --to <name>'));
     expect(help, contains('projects dashboard'));

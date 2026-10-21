@@ -5,10 +5,12 @@ import 'dart:math' as math;
 import '../../utils/terminal/frame_patch.dart';
 import '../../utils/terminal/term_events.dart';
 import '../../utils/terminal/term_io.dart';
+import '../../utils/terminal/button.dart';
 import '../../utils/terminal/theme.dart';
 import '../../utils/user_prompt.dart' show PromptBackNavigation;
 import '../monitor/log_tail.dart';
 import 'project_build_service.dart';
+import 'project_build_limits.dart';
 import 'project_dashboard_model.dart';
 import 'project_dashboard_prompts.dart';
 
@@ -65,6 +67,7 @@ class ProjectDashboard {
     : this.withCallbacks(
         loadCatalog: service.catalog,
         loadStatus: service.status,
+        loadLimits: service.limits,
         command: service.command,
       );
 
@@ -72,6 +75,7 @@ class ProjectDashboard {
     required List<Map<String, Object?>> Function() loadCatalog,
     required Map<String, Object?> Function() loadStatus,
     required ProjectDashboardCommand command,
+    ProjectBuildLimits Function()? loadLimits,
     ProjectDashboardPrompt? prompt,
     ProjectDashboardTerminal? terminal,
     MonitorTheme? theme,
@@ -80,6 +84,7 @@ class ProjectDashboard {
     Duration yieldInterval = const Duration(milliseconds: 10),
   }) : _loadCatalog = loadCatalog,
        _loadStatus = loadStatus,
+       _loadLimits = loadLimits ?? ProjectBuildLimits.defaults,
        _command = command,
        _prompt = prompt ?? ProjectDashboardPrompts(command).request,
        _terminal = terminal ?? const DartProjectDashboardTerminal(),
@@ -90,6 +95,7 @@ class ProjectDashboard {
 
   final List<Map<String, Object?>> Function() _loadCatalog;
   final Map<String, Object?> Function() _loadStatus;
+  final ProjectBuildLimits Function() _loadLimits;
   final ProjectDashboardCommand _command;
   final ProjectDashboardPrompt _prompt;
   final ProjectDashboardTerminal _terminal;
@@ -100,6 +106,12 @@ class ProjectDashboard {
   List<Map<String, Object?>> _catalog = <Map<String, Object?>>[];
   List<Map<String, Object?>> _runs = <Map<String, Object?>>[];
   List<ProjectDashboardRow> _rows = <ProjectDashboardRow>[];
+  List<ProjectDashboardNode> _nodes = <ProjectDashboardNode>[];
+  final Set<String> _checked = <String>{};
+  final Set<String> _collapsed = <String>{};
+  ProjectBuildLimits _limits = ProjectBuildLimits.defaults();
+  String? _pressedCheckbox;
+  String? _pressedButton;
   List<String> _logs = <String>[];
   Map<String, Object?>? _run;
   ProjectDashboardFrame? _frame;
@@ -158,7 +170,9 @@ class ProjectDashboard {
     try {
       List<Map<String, Object?>> catalog = _loadCatalog();
       List<Map<String, Object?>> runs = projectMaps(_loadStatus()['runs']);
+      ProjectBuildLimits limits = _loadLimits();
       _catalog = catalog;
+      _limits = limits;
       _runs = runs;
       _run = _runId == null
           ? runs.firstOrNull
@@ -166,13 +180,13 @@ class ProjectDashboard {
                 .where((Map<String, Object?> run) => run['id'] == _runId)
                 .firstOrNull;
       _rows = projectDashboardRows(_catalog, _run);
-      int matched = _rows.indexWhere(
-        (ProjectDashboardRow row) => row.key == _selectedKey,
+      _checked.retainAll(
+        _rows
+            .where((ProjectDashboardRow row) => row.registered)
+            .map((ProjectDashboardRow row) => row.key),
       );
-      _selected = matched >= 0
-          ? matched
-          : math.min(_selected, math.max(0, _rows.length - 1));
-      _selectedKey = _rows.isEmpty ? null : _rows[_selected].key;
+      _collapsed.retainAll(_rows.map((ProjectDashboardRow row) => row.project));
+      _rebuildTree();
       if (_stale) _notice = 'Project state refreshed.';
       _stale = false;
     } catch (error) {
@@ -181,15 +195,48 @@ class ProjectDashboard {
     }
   }
 
+  void _rebuildTree() {
+    _nodes = projectDashboardTree(_rows, _collapsed);
+    int matched = _nodes.indexWhere(
+      (ProjectDashboardNode node) => node.key == _selectedKey,
+    );
+    if (matched < 0 && _selectedKey != null) {
+      matched = _nodes.indexWhere(
+        (ProjectDashboardNode node) =>
+            node.key == '${_selectedKey!.split(':').first}:',
+      );
+    }
+    _selected = matched >= 0
+        ? matched
+        : math.min(_selected, math.max(0, _nodes.length - 1));
+    String? nextKey = _nodes.isEmpty ? null : _nodes[_selected].key;
+    if (nextKey != _selectedKey) {
+      _logs = <String>[];
+      _lastLogRead = null;
+      _logOffset = 0;
+    }
+    _selectedKey = nextKey;
+  }
+
   void _readLogs() {
-    if (_readingLogs || _rows.isEmpty) return;
+    if (_readingLogs || _nodes.isEmpty) return;
     DateTime now = DateTime.now();
     if (_lastLogRead != null &&
         now.difference(_lastLogRead!) < _refreshInterval) {
       return;
     }
     _lastLogRead = now;
-    ProjectDashboardRow row = _rows[_selected];
+    ProjectDashboardNode node = _nodes[_selected];
+    if (node.isProject) {
+      _logs = <String>[
+        '${node.name}: ${node.buildKeys.where(_checked.contains).length}'
+            ' / ${node.buildKeys.length} targets checked',
+        for (ProjectDashboardRow row in node.targets)
+          '${row.target}: ${row.status}${row.task.isEmpty ? '' : ' / ${row.task}'}',
+      ];
+      return;
+    }
+    ProjectDashboardRow row = node.target!;
     if (row.logPath.isEmpty) {
       _logs = <String>[
         row.error.isEmpty ? 'No output recorded for ${row.key}.' : row.error,
@@ -205,7 +252,7 @@ class ProjectDashboard {
       List<String> logs = await _logReader(row.logPath, 500);
       if (_active &&
           row.key == _selectedKey &&
-          _rows[_selected].logPath == row.logPath) {
+          _nodes[_selected].target?.logPath == row.logPath) {
         _logs = logs.map(projectText).toList(growable: false);
       }
     } catch (error) {
@@ -218,14 +265,82 @@ class ProjectDashboard {
   }
 
   void _select(int index) {
-    if (_rows.isEmpty) return;
-    int selected = index.clamp(0, _rows.length - 1);
+    if (_nodes.isEmpty) return;
+    int selected = index.clamp(0, _nodes.length - 1);
     if (selected == _selected) return;
     _selected = selected;
-    _selectedKey = _rows[_selected].key;
+    _selectedKey = _nodes[_selected].key;
     _logs = <String>[];
     _logOffset = 0;
     _lastLogRead = null;
+  }
+
+  void _toggleChecked(ProjectDashboardNode node) {
+    List<String> keys = node.buildKeys;
+    if (keys.isEmpty) {
+      _notice =
+          'This target is only in run history. Scan its source to build it.';
+      return;
+    }
+    if (keys.every(_checked.contains)) {
+      _checked.removeAll(keys);
+    } else {
+      _checked.addAll(keys);
+    }
+    _lastLogRead = null;
+  }
+
+  void _selectAll({bool toggle = false}) {
+    List<String> keys = _rows
+        .where((ProjectDashboardRow row) => row.registered)
+        .map((ProjectDashboardRow row) => row.key)
+        .toList(growable: false);
+    if (toggle && keys.every(_checked.contains)) {
+      _checked.clear();
+    } else {
+      _checked.addAll(keys);
+    }
+    _lastLogRead = null;
+  }
+
+  void _expand(bool expanded) {
+    if (_nodes.isEmpty) return;
+    ProjectDashboardNode node = _nodes[_selected];
+    if (!node.isProject) {
+      if (!expanded) {
+        _select(
+          _nodes.indexWhere(
+            (ProjectDashboardNode item) =>
+                item.isProject && item.project == node.project,
+          ),
+        );
+      }
+      return;
+    }
+    if (expanded && node.expanded) {
+      if (node.targets.isNotEmpty) _select(_selected + 1);
+      return;
+    }
+    expanded ? _collapsed.remove(node.project) : _collapsed.add(node.project);
+    _rebuildTree();
+  }
+
+  String? _checkboxAt(TermEvent event) {
+    if (event.col < 3 || event.col > 5) return null;
+    if (event.row - 1 == _frame?.selectAllRow) return 'all';
+    int? row = _frame?.targetRows[event.row - 1];
+    if (row == null || _nodes[row].buildKeys.isEmpty) return null;
+    return _nodes[row].key;
+  }
+
+  String? _buttonAt(TermEvent event) {
+    for (ButtonSpan button
+        in _frame?.buttons[event.row - 1] ?? const <ButtonSpan>[]) {
+      if (event.col - 1 >= button.colStart && event.col - 1 < button.colEnd) {
+        return button.id;
+      }
+    }
+    return null;
   }
 
   Future<void> _handleEvent(TermEvent event) async {
@@ -242,7 +357,11 @@ class ProjectDashboard {
       case TermEventKind.home:
         _select(0);
       case TermEventKind.end:
-        _select(_rows.length - 1);
+        _select(_nodes.length - 1);
+      case TermEventKind.arrowLeft:
+        _expand(false);
+      case TermEventKind.arrowRight:
+        _expand(true);
       case TermEventKind.pageUp:
         _logOffset = math.min(math.max(0, _logs.length - 1), _logOffset + 10);
       case TermEventKind.pageDown:
@@ -250,16 +369,53 @@ class ProjectDashboard {
       case TermEventKind.enter:
         await _action(ProjectDashboardAction.actions);
       case TermEventKind.mouseDown:
+        _pressedCheckbox = null;
+        _pressedButton = event.button == 0 ? _buttonAt(event) : null;
+        if (_pressedButton != null) break;
+        _pressedCheckbox = event.button == 0 ? _checkboxAt(event) : null;
+        if (_pressedCheckbox != null) {
+          int? row = _frame?.targetRows[event.row - 1];
+          if (row != null) _select(row);
+          break;
+        }
         if (event.button == 0 &&
             event.col > 0 &&
             event.col <= (_frame?.targetColumns ?? 0)) {
           int? row = _frame?.targetRows[event.row - 1];
           if (row != null) {
-            if (row == _selected) {
+            if (_nodes[row].isProject && event.col >= 9 && event.col <= 11) {
+              _select(row);
+              _expand(!_nodes[row].expanded);
+            } else if (row == _selected) {
               await _action(ProjectDashboardAction.actions);
             } else {
               _select(row);
             }
+          }
+        }
+      case TermEventKind.mouseUp:
+        String? button = _pressedButton;
+        _pressedButton = null;
+        if (event.button == 0 && button != null && button == _buttonAt(event)) {
+          if (button == 'back') {
+            _active = false;
+          } else {
+            await _action(ProjectDashboardAction.values.byName(button));
+          }
+        }
+        String? pressed = _pressedCheckbox;
+        _pressedCheckbox = null;
+        if (event.button == 0 &&
+            pressed != null &&
+            pressed == _checkboxAt(event)) {
+          if (pressed == 'all') {
+            _selectAll(toggle: true);
+          } else {
+            _toggleChecked(
+              _nodes.firstWhere(
+                (ProjectDashboardNode node) => node.key == pressed,
+              ),
+            );
           }
         }
       case TermEventKind.char:
@@ -271,9 +427,19 @@ class ProjectDashboard {
           'c' => ProjectDashboardAction.cancel,
           'd' => ProjectDashboardAction.deploy,
           'l' => ProjectDashboardAction.logs,
+          'p' => ProjectDashboardAction.limits,
+          'o' => ProjectDashboardAction.locations,
           _ => null,
         };
         if (event.char == 'q') _active = false;
+        if ((event.char == ' ' || event.char == 'v') && _nodes.isNotEmpty) {
+          _toggleChecked(_nodes[_selected]);
+        }
+        if (event.char == 'a') _selectAll();
+        if (event.char == 'x') {
+          _checked.clear();
+          _lastLogRead = null;
+        }
         if (event.char == 'R') {
           _lastRefresh = null;
           _previousFrame = null;
@@ -296,7 +462,14 @@ class ProjectDashboard {
       command = await _prompt(
         action,
         ProjectDashboardSelection(
-          row: _rows.isEmpty ? null : _rows[_selected],
+          row: _nodes.isEmpty ? null : _nodes[_selected].target,
+          node: _nodes.isEmpty ? null : _nodes[_selected],
+          checkedTargets: List<String>.unmodifiable(
+            _rows
+                .where((ProjectDashboardRow row) => _checked.contains(row.key))
+                .map((ProjectDashboardRow row) => row.key),
+          ),
+          limits: _limits,
           run: _run,
           runs: _runs,
           catalog: _catalog,
@@ -361,7 +534,9 @@ class ProjectDashboard {
     _frame = renderProjectDashboard(
       columns: _terminal.columns,
       lines: _terminal.lines,
-      rows: _rows,
+      nodes: _nodes,
+      checked: _checked,
+      limits: _limits,
       selected: _selected,
       run: _run,
       logs: _logs
@@ -371,6 +546,7 @@ class ProjectDashboard {
       stale: _stale,
       theme: _theme,
       now: now,
+      pressedButton: _pressedButton,
     );
     String next = _frame!.lines.join('\n');
     String patch = renderTerminalPatch(previous: _previousFrame, next: next);

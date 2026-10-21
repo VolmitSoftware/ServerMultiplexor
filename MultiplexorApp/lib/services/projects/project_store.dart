@@ -21,6 +21,7 @@ class ProjectStore {
   final Directory directory;
   final Directory workDirectory;
   File get catalogFile => File(p.join(directory.path, 'catalog.json'));
+  File get limitsFile => File(p.join(directory.path, 'limits.json'));
   File get destinationsFile =>
       File(p.join(directory.path, 'destinations.json'));
   File runFile(String id) =>
