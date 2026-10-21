@@ -29,7 +29,9 @@ Future<void> main(List<String> arguments) async {
           registered: true,
         ),
         run: null,
-        runs: const <Map<String, Object?>>[],
+        runs: const <Map<String, Object?>>[
+          <String, Object?>{'id': 'run-one', 'status': 'succeeded'},
+        ],
         catalog: const <Map<String, Object?>>[
           <String, Object?>{'id': 'wormholes'},
         ],

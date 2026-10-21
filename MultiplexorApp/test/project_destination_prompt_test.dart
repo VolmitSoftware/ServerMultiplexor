@@ -184,6 +184,88 @@ void main() {
     },
   );
 
+  test('q returns from destination menus without a command', () async {
+    for (String action in <String>['locations', 'deploy']) {
+      _PromptResult result = await _prompt(action, <String>['q']);
+      expect(result.data['result'], isNull);
+      expect(result.data['calls'], isEmpty);
+    }
+    _PromptResult nested = await _prompt('locations', <String>['1', 'q', 'q']);
+    expect(nested.data['result'], isNull);
+    expect(nested.data['calls'], isEmpty);
+    expect(RegExp(r'\? Locations').allMatches(nested.output), hasLength(2));
+  });
+
+  test('destination choice Back discards the form at every choice', () async {
+    List<({List<String> input, String back, String title})> choices =
+        <({List<String> input, String back, String title})>[
+          (input: <String>[], back: '4', title: 'Destination kind'),
+          (
+            input: <String>['1', '/tmp/new-exports'],
+            back: '8',
+            title: 'Accept artifacts for',
+          ),
+          (
+            input: <String>['1', '/tmp/new-exports', '1'],
+            back: '3',
+            title: 'Minecraft compatibility',
+          ),
+        ];
+    for (({List<String> input, String back, String title}) choice in choices) {
+      for (String back in <String>[choice.back, 'q', 'esc']) {
+        _PromptResult result = await _prompt('locations', <String>[
+          '2',
+          'new-place',
+          ...choice.input,
+          back,
+          'q',
+        ]);
+        expect(result.output, contains('? ${choice.title}'));
+        expect(result.output, contains('${choice.back}) Back'));
+        expect(result.data['result'], isNull);
+        expect(result.data['calls'], isEmpty);
+        expect(RegExp(r'\? Locations').allMatches(result.output), hasLength(2));
+      }
+      _PromptResult edit = await _prompt('locations', <String>[
+        '1',
+        '1',
+        ...choice.input,
+        choice.back,
+        'q',
+        'q',
+      ]);
+      expect(edit.data['result'], isNull);
+      expect(edit.data['calls'], isEmpty);
+      expect(RegExp(r'\? exports').allMatches(edit.output), hasLength(2));
+      _PromptResult delivery = await _prompt('deploy', <String>[
+        '2',
+        'new-place',
+        ...choice.input,
+        choice.back,
+        'q',
+      ]);
+      expect(delivery.data['result'], isNull);
+      expect(delivery.data['calls'], isEmpty);
+      expect(
+        RegExp(r'\? Deliver to').allMatches(delivery.output),
+        hasLength(2),
+      );
+    }
+  });
+
+  test('q remains ordinary text in destination fields', () async {
+    _PromptResult result = await _prompt('locations', <String>[
+      '2',
+      'q',
+      '1',
+      'q',
+      '1',
+      '1',
+    ]);
+    expect(result.data['result'], <String>['destination', 'q', '--path', 'q']);
+    expect(result.data['calls'], isEmpty);
+  });
+
   test('failed preview cannot return a deploy command', () async {
     _PromptResult result = await _prompt(
       'deploy',
