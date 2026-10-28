@@ -19,3 +19,5 @@ All documentation is maintained in the [Volmit docs](https://github.com/VolmitSo
 - [Workspace and source builds](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor/10-workspace-and-source.md)
 - [Scenario suites](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor/11-scenario-suites.md)
 - [Session observer](https://github.com/VolmitSoftware/docs/blob/master/servermultiplexor/12-session-observer.md)
+
+Mineflayer setup applies version-checked inventory fixes after dependency installation. Server cursor updates keep the open menu and player inventory in sync; closing a container retains its current cursor and item component changes. Smithing uses the template slot on protocols that support it. Clicking an empty crafting result sends the click without waiting for an unchanged result slot; populated results still wait for the server update.
