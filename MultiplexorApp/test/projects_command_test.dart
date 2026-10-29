@@ -149,6 +149,8 @@ void main() {
     expect(help, contains('projects deploy <run> --to <name>'));
     expect(help, contains('projects dashboard'));
     expect(help, contains('--packaging <local|compact>'));
+    expect(help, contains('Build packaging defaults to compact'));
+    expect(help, contains('Retry preserves the saved packaging mode'));
     expect(help, contains('projects destinations [--json]'));
     expect(help, contains('destination <name> --remove'));
     expect(help, isNot(contains('projects worker')));

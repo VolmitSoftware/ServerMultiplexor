@@ -5,18 +5,15 @@ import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
+import 'project_build_limits.dart';
+import 'project_deployment.dart';
 import 'project_files.dart';
 import 'project_gradle_cache.dart';
 import 'project_java_homes.dart';
 import 'project_model.dart';
 import 'project_process.dart';
+import 'project_schedule.dart';
 import 'project_store.dart';
-
-const Set<String> projectActiveStates = <String>{
-  'queued',
-  'preparing',
-  'running',
-};
 
 class ProjectWorker {
   ProjectWorker(this.store, this.run);
@@ -28,8 +25,9 @@ class ProjectWorker {
   late final ProjectGradleCache cache;
   final Map<String, String> _sourceHashes = <String, String>{};
   final Map<String, String> _toolchain = <String, String>{};
+  final Map<String, Object> _declarationFailures = <String, Object>{};
   late final ProjectJavaHomes _javaHomes;
-  late final ProjectPlan plan;
+  late ProjectPlan plan;
   late final List<Map<String, Object?>> jobs;
   late final Directory work;
   late final File budgetInit;
@@ -58,6 +56,7 @@ class ProjectWorker {
       };
       plan = ProjectPlan(projects, projectStrings(run['targets']));
       jobs = (run['jobs'] as List<Object?>).map(projectObject).toList();
+      run['jobs'] = jobs;
       run['status'] = 'preparing';
       run['startedAt'] = DateTime.now().toUtc().toIso8601String();
       run['workerPid'] = pid;
@@ -65,11 +64,7 @@ class ProjectWorker {
       heartbeat = Timer.periodic(const Duration(seconds: 2), (_) => _save());
       await _capture();
       await _inspectTools();
-      cache = ProjectGradleCache(store, id, cancelled: () => cancelled);
-      if (!cancelled) await cache.prepare();
-      if (cache.dependencyCache != null) {
-        run['dependencyCache'] = cache.dependencyCache!.path;
-      }
+      cache = ProjectGradleCache(store)..prepare();
       if (cancelled) {
         for (Map<String, Object?> job in jobs) {
           job['status'] = 'cancelled';
@@ -83,10 +78,19 @@ class ProjectWorker {
       run['status'] = cancelled
           ? 'cancelled'
           : jobs.every(
-              (Map<String, Object?> job) => job['status'] == 'succeeded',
+              (Map<String, Object?> job) =>
+                  job['status'] == 'succeeded' && job['deliveryError'] == null,
             )
           ? 'succeeded'
           : 'failed';
+      List<String> deliveryFailures = <String>[
+        for (Map<String, Object?> job in jobs)
+          if (job['deliveryError'] != null) job['key'] as String,
+      ];
+      if (deliveryFailures.isNotEmpty) {
+        run['error'] =
+            'Artifact delivery failed for ${deliveryFailures.join(', ')}; see target logs';
+      }
       return run['status'] == 'succeeded' ? 0 : 1;
     } catch (error, trace) {
       if (!ownsRun) return 1;
@@ -108,8 +112,21 @@ class ProjectWorker {
       if (ownsRun) {
         run['finishedAt'] = DateTime.now().toUtc().toIso8601String();
         _save();
+        await _cleanStorage(store.retainRuns);
       }
       ownership.closeSync();
+      if (ownsRun) await _cleanStorage(store.emptyTrash);
+    }
+  }
+
+  Future<void> _cleanStorage(FutureOr<void> Function() action) async {
+    try {
+      await action();
+    } catch (error, trace) {
+      File(p.join(work.path, 'worker.log')).writeAsStringSync(
+        'Build storage cleanup failed: $error\n$trace\n',
+        mode: FileMode.append,
+      );
     }
   }
 
@@ -119,38 +136,65 @@ class ProjectWorker {
   }
 
   Future<void> _capture() async {
-    Set<String> sources = <String>{
-      for (String key in plan.keys) ...plan.sourcesFor(plan.projectFor(key).id),
+    List<String> requested = plan.keys.toList();
+    Map<String, BuildProject> projects = <String, BuildProject>{
+      ...plan.projects,
     };
-    for (String sourceId in sources) {
-      if (cancelled) return;
-      BuildProject source = plan.projects[sourceId]!;
-      Directory output = Directory(p.join(work.path, 'snapshot', sourceId));
-      if (output.existsSync()) {
-        throw StateError('Source snapshot already exists: $sourceId');
-      }
-      String? retryOf = run['retryOf'] as String?;
-      Directory input = retryOf == null
-          ? Directory(source.directory)
-          : Directory(
-              p.join(store.runWork(retryOf).path, 'snapshot', sourceId),
+    Map<String, String> previousHashes = <String, String>{};
+    Directory declarations = Directory(
+      p.join(work.path, 'declarations', 'sources'),
+    );
+    try {
+      while (true) {
+        plan = _replan(projects, requested);
+        List<String> pending = <String>{
+          for (String key in plan.keys)
+            ...plan.sourcesFor(plan.projectFor(key).id),
+        }.where((String id) => !_sourceHashes.containsKey(id)).toList();
+        if (pending.isEmpty) break;
+        List<String> stale = <String>[];
+        for (String sourceId in pending) {
+          if (cancelled) return;
+          if (await _snapshot(projects[sourceId]!)) stale.add(sourceId);
+        }
+        for (String sourceId in stale) {
+          if (cancelled) return;
+          try {
+            BuildProject declared = await _declare(
+              projects[sourceId]!,
+              projects,
             );
-      _sourceHashes[sourceId] = await copyProjectSources(
-        input,
-        output,
-        boundary: retryOf == null ? source.sourceRoot : input.path,
-      );
-      if (source.definitionHash.isNotEmpty &&
-          source.definitionHash != await projectDefinitionHash(output)) {
-        throw StateError(
-          'Build definitions changed for $sourceId; run projects scan again',
-        );
+            previousHashes[sourceId] = projects[sourceId]!.definitionHash;
+            projects[sourceId] = declared;
+          } catch (error, trace) {
+            _declarationFailures[sourceId] = error;
+            File log = _declarationLog(sourceId);
+            log.parent.createSync(recursive: true);
+            log.writeAsStringSync('$error\n$trace\n', mode: FileMode.append);
+          }
+        }
       }
-      if (retryOf != null &&
-          projectObject(run['sourceHashes'])[sourceId] !=
-              _sourceHashes[sourceId]) {
-        throw StateError('Saved source snapshot changed: $sourceId');
-      }
+    } finally {
+      if (declarations.existsSync()) await declarations.delete(recursive: true);
+    }
+    if (previousHashes.isNotEmpty) {
+      run['projects'] = <Object?>[
+        for (BuildProject project in projects.values) project.toJson(),
+      ];
+      await _registerDeclarations(previousHashes, <BuildProject>[
+        for (String id in previousHashes.keys) projects[id]!,
+      ]);
+    }
+    run['targets'] = plan.keys;
+    for (String key in plan.keys) {
+      if (jobs.any((Map<String, Object?> job) => job['key'] == key)) continue;
+      jobs.add(<String, Object?>{
+        'key': key,
+        'project': plan.projectFor(key).id,
+        'target': plan.targetFor(key).id,
+        'status': 'queued',
+        'artifacts': <Object?>[],
+      });
     }
     Map<String, ProjectSourceInput> inputs = <String, ProjectSourceInput>{
       for (String key in plan.keys)
@@ -183,6 +227,132 @@ class ProjectWorker {
     run['sourceHashes'] = _sourceHashes;
     run['platform'] = '${Platform.operatingSystem}/${Platform.version}';
     _save();
+  }
+
+  Future<bool> _snapshot(BuildProject source) async {
+    Directory output = Directory(p.join(work.path, 'snapshot', source.id));
+    if (output.existsSync()) {
+      throw StateError('Source snapshot already exists: ${source.id}');
+    }
+    String? retryOf = run['retryOf'] as String?;
+    Directory input = retryOf == null
+        ? Directory(source.directory)
+        : Directory(p.join(store.runWork(retryOf).path, 'snapshot', source.id));
+    _sourceHashes[source.id] = await copyProjectSources(
+      input,
+      output,
+      boundary: retryOf == null ? source.sourceRoot : input.path,
+    );
+    if (retryOf != null &&
+        projectObject(run['sourceHashes'])[source.id] !=
+            _sourceHashes[source.id]) {
+      throw StateError('Saved source snapshot changed: ${source.id}');
+    }
+    return source.definitionHash.isNotEmpty &&
+        source.definitionHash != await projectDefinitionHash(output);
+  }
+
+  Future<BuildProject> _declare(
+    BuildProject source,
+    Map<String, BuildProject> projects,
+  ) async {
+    Directory declarations = Directory(p.join(work.path, 'declarations'))
+      ..createSync(recursive: true);
+    String sources = p.join(declarations.path, 'sources');
+    for (String id in _sourceHashes.keys) {
+      String destination = p.join(sources, projects[id]!.relativePath);
+      if (Directory(destination).existsSync()) continue;
+      await materializeProjectSnapshot(
+        p.join(work.path, 'snapshot', id),
+        destination,
+        boundary: p.join(work.path, 'snapshot'),
+      );
+    }
+    File init = File(p.join(declarations.path, 'metadata.init.gradle'));
+    if (!init.existsSync()) init.writeAsStringSync(projectMetadataInit);
+    BuildProject declared = await readProjectDeclaration(
+      sources: sources,
+      relativePath: source.relativePath,
+      sourceRoot: source.sourceRoot,
+      init: init,
+      log: _declarationLog(source.id),
+      sourceHashes: <String, String>{
+        for (String id in _sourceHashes.keys)
+          Directory(
+            p.join(sources, projects[id]!.relativePath),
+          ).resolveSymbolicLinksSync(): _sourceHashes[id]!,
+      },
+      cancelled: () => cancelled,
+    );
+    if (declared.id != source.id) {
+      throw StateError(
+        '${source.relativePath} now declares project ${declared.id}; run projects scan to register it',
+      );
+    }
+    return declared;
+  }
+
+  File _declarationLog(String id) =>
+      File(p.join(work.path, 'declarations', '$id.log'));
+
+  ProjectPlan _replan(
+    Map<String, BuildProject> projects,
+    List<String> requested,
+  ) {
+    List<String> declared = <String>[];
+    for (String key in requested) {
+      String projectId = key.split(':').first;
+      String targetId = key.split(':').last;
+      Object? failure = _declarationFailures[projectId];
+      if (failure != null) {
+        _reject(key, '$failure', _declarationLog(projectId));
+      } else if (!projects[projectId]!.targets.any(
+        (ProjectTarget target) => target.id == targetId,
+      )) {
+        _reject(key, '$projectId no longer declares target $targetId');
+      } else {
+        try {
+          ProjectPlan(projects, <String>[key]);
+          declared.add(key);
+        } on FormatException catch (error) {
+          _reject(key, 'Cannot plan $key: ${error.message}');
+        }
+      }
+    }
+    return ProjectPlan(projects, declared);
+  }
+
+  void _reject(String key, String error, [File? log]) {
+    Map<String, Object?> job = jobs.firstWhere(
+      (Map<String, Object?> job) => job['key'] == key,
+    );
+    if (job['status'] == 'failed') return;
+    job['status'] = 'failed';
+    job['error'] = error;
+    if (log != null) job['logPath'] = log.path;
+    job['finishedAt'] = DateTime.now().toUtc().toIso8601String();
+  }
+
+  Future<void> _registerDeclarations(
+    Map<String, String> previousHashes,
+    List<BuildProject> declared,
+  ) async {
+    for (int attempt = 1; ; attempt++) {
+      try {
+        await store.registerDeclarations(previousHashes, declared);
+        return;
+      } on FileSystemException catch (error, trace) {
+        if (attempt < 40) {
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+          continue;
+        }
+        File(p.join(work.path, 'worker.log')).writeAsStringSync(
+          'Catalog declarations were not updated: $error\n$trace\n',
+          mode: FileMode.append,
+        );
+        return;
+      }
+    }
   }
 
   Future<void> _inspectTools() async {
@@ -250,15 +420,26 @@ class ProjectWorker {
   }
 
   Future<void> _schedule() async {
-    int limit = run['jobsLimit'] as int;
-    int memory = run['memoryMiB'] as int;
-    int workers = run['workers'] as int;
+    ProjectBuildLimits budget = ProjectBuildLimits(
+      jobs: run['jobsLimit'] as int,
+      memoryMiB: run['memoryMiB'] as int,
+      workers: run['workers'] as int,
+    );
+    int memory = budget.memoryMiB;
     Map<String, Map<String, Object?>> byKey = <String, Map<String, Object?>>{
       for (Map<String, Object?> job in jobs) job['key'] as String: job,
     };
-    while (jobs.any(
-      (Map<String, Object?> job) => projectActiveStates.contains(job['status']),
-    )) {
+    Map<String, Duration> estimates = projectDurationEstimates(
+      store.runs(),
+      plan.keys,
+    );
+    Map<String, Duration> priorities = projectCriticalPaths(plan, estimates);
+    Map<String, DateTime> started = <String, DateTime>{};
+    while (_running.isNotEmpty ||
+        jobs.any(
+          (Map<String, Object?> job) =>
+              projectActiveStates.contains(job['status']),
+        )) {
       if (cancelled) {
         for (Map<String, Object?> job in jobs.where(
           (Map<String, Object?> job) => job['status'] == 'queued',
@@ -266,18 +447,11 @@ class ProjectWorker {
           job['status'] = 'cancelled';
         }
       }
-      int reservedMemory = 0;
-      int reservedWorkers = 0;
-      Set<String> activeProjects = <String>{};
-      for (String key in _running.keys) {
-        reservedMemory += plan.targetFor(key).memoryMiB;
-        reservedWorkers += min(plan.targetFor(key).workers, workers);
-        activeProjects.add(plan.projectFor(key).id);
-      }
+      DateTime now = DateTime.now();
+      List<ProjectScheduleEntry> ready = <ProjectScheduleEntry>[];
       for (Map<String, Object?> job in jobs) {
         if (job['status'] != 'queued' || cancelled) continue;
         String key = job['key'] as String;
-        BuildProject project = plan.projectFor(key);
         ProjectTarget target = plan.targetFor(key);
         Set<String> dependencies = <String>{
           ...target.dependsOn,
@@ -305,19 +479,35 @@ class ProjectWorker {
               'Target reserves ${target.memoryMiB} MiB; run budget is $memory MiB';
           continue;
         }
-        int requestedWorkers = min(target.workers, workers);
-        if (_running.length >= limit ||
-            reservedMemory + target.memoryMiB > memory ||
-            reservedWorkers + requestedWorkers > workers ||
-            ((project.sandbox != 'per-target' || !project.parallelTargets) &&
-                activeProjects.contains(project.id))) {
-          continue;
-        }
+        ready.add(_scheduleEntry(key, estimates[key]!, priorities[key]!));
+      }
+      List<ProjectScheduleEntry> running = <ProjectScheduleEntry>[
+        for (String key in _running.keys)
+          _scheduleEntry(
+            key,
+            _remaining(estimates[key]!, now.difference(started[key]!)),
+            Duration.zero,
+          ),
+      ];
+      for (String key in projectScheduleStarts(
+        budget: budget,
+        running: running,
+        ready: ready,
+      )) {
+        Map<String, Object?> job = byKey[key]!;
+        ProjectTarget target = plan.targetFor(key);
         job['status'] = 'preparing';
-        reservedMemory += target.memoryMiB;
-        reservedWorkers += requestedWorkers;
-        activeProjects.add(project.id);
-        _running[key] = _build(job, project, target, requestedWorkers, byKey);
+        started[key] = now;
+        _running[key] =
+            _build(
+              job,
+              plan.projectFor(key),
+              target,
+              min(target.workers, budget.workers),
+              byKey,
+            ).whenComplete(() {
+              _running.remove(key);
+            });
       }
       _save();
       if (_running.isEmpty) {
@@ -327,12 +517,29 @@ class ProjectWorker {
         break;
       }
       await Future.any(_running.values);
-      _running.removeWhere(
-        (String key, Future<void> value) =>
-            !projectActiveStates.contains(byKey[key]!['status']),
-      );
     }
   }
+
+  ProjectScheduleEntry _scheduleEntry(
+    String key,
+    Duration duration,
+    Duration priority,
+  ) {
+    BuildProject project = plan.projectFor(key);
+    ProjectTarget target = plan.targetFor(key);
+    return ProjectScheduleEntry(
+      key: key,
+      project: project.id,
+      memoryMiB: target.memoryMiB,
+      workers: min(target.workers, run['workers'] as int),
+      exclusive: project.sandbox != 'per-target' || !project.parallelTargets,
+      duration: duration,
+      priority: priority,
+    );
+  }
+
+  Duration _remaining(Duration estimate, Duration elapsed) =>
+      elapsed >= estimate ? Duration.zero : estimate - elapsed;
 
   Future<void> _build(
     Map<String, Object?> job,
@@ -341,7 +548,6 @@ class ProjectWorker {
     int workers,
     Map<String, Map<String, Object?>> byKey,
   ) async {
-    String key = job['key'] as String;
     Directory sandbox = Directory(
       p.join(work.path, 'sandboxes', project.id, target.id),
     );
@@ -351,7 +557,7 @@ class ProjectWorker {
     try {
       List<String> sources = plan.sourcesFor(project.id);
       sources.sort();
-      String packaging = run['packaging'] as String? ?? 'local';
+      String packaging = run['packaging'] as String? ?? 'compact';
       if (!<String>{'local', 'compact'}.contains(packaging)) {
         throw const FormatException('Packaging must be local or compact');
       }
@@ -449,38 +655,32 @@ class ProjectWorker {
       }
       job['status'] = 'running';
       _save();
-      ProjectProcessResult result = await cache.withHome(
-        key,
-        (Directory gradleHome) => runProjectProcess(
-          executable: p.join(
-            directory,
-            Platform.isWindows ? 'gradlew.bat' : 'gradlew',
-          ),
-          arguments: args,
-          directory: directory,
-          log: log,
-          cancelled: () => cancelled,
-          environment: <String, String>{
-            ..._javaHomes.environment,
-            'MULTIPLEXOR_TEST_FORKS': '$workers',
-            'MULTIPLEXOR_TASK_CACHE': cache.taskCache.path,
-            if (cache.dependencyCache != null)
-              'GRADLE_RO_DEP_CACHE': cache.dependencyCache!.path,
-            'MULTIPLEXOR_SOURCE_HASHES': jsonEncode(<String, String>{
-              for (String source in sources)
-                Directory(
-                  p.join(sandbox.path, plan.projects[source]!.relativePath),
-                ).resolveSymbolicLinksSync(): _sourceHashes[source]!,
-            }),
-            'GRADLE_USER_HOME': gradleHome.path,
-          },
-          removeEnvironment: const <String>{'GRADLE_RO_DEP_CACHE'},
-          onLine: (String line) {
-            if (line.startsWith('> Task ')) {
-              job['currentTask'] = line.substring(7);
-            }
-          },
+      ProjectProcessResult result = await runProjectProcess(
+        executable: p.join(
+          directory,
+          Platform.isWindows ? 'gradlew.bat' : 'gradlew',
         ),
+        arguments: args,
+        directory: directory,
+        log: log,
+        cancelled: () => cancelled,
+        environment: <String, String>{
+          ..._javaHomes.environment,
+          'MULTIPLEXOR_TEST_FORKS': '$workers',
+          'MULTIPLEXOR_TASK_CACHE': cache.taskCache.path,
+          'MULTIPLEXOR_SOURCE_HASHES': jsonEncode(<String, String>{
+            for (String source in sources)
+              Directory(
+                p.join(sandbox.path, plan.projects[source]!.relativePath),
+              ).resolveSymbolicLinksSync(): _sourceHashes[source]!,
+          }),
+          'GRADLE_USER_HOME': cache.home.path,
+        },
+        onLine: (String line) {
+          if (line.startsWith('> Task ')) {
+            job['currentTask'] = line.substring(7);
+          }
+        },
       );
       job['exitCode'] = result.exitCode;
       if (cancelled || result.exitCode == 130) {
@@ -525,9 +725,75 @@ class ProjectWorker {
       log.parent.createSync(recursive: true);
       log.writeAsStringSync('$error\n$trace\n', mode: FileMode.append);
     } finally {
+      if (job['status'] == 'succeeded' && !cancelled) {
+        _save();
+        await _deliver(job, log);
+      }
       job['finishedAt'] = DateTime.now().toUtc().toIso8601String();
       _save();
     }
+  }
+
+  Future<void> _deliver(Map<String, Object?> job, File log) async {
+    List<Map<String, Object?>> deliveries = <Map<String, Object?>>[];
+    job['deliveries'] = deliveries;
+    job['deliveryStatus'] = 'running';
+    ProjectDeployment deployment = ProjectDeployment(store);
+    try {
+      for (Map<String, Object?> destination in deployment.destinations()) {
+        if (cancelled) break;
+        if (destination['kind'] != 'directory' &&
+            destination['kind'] != 'dropins') {
+          continue;
+        }
+        String name = destination['name'] as String;
+        job['currentTask'] = 'Delivering to $name';
+        try {
+          Map<String, Object?> result = await deployment.deploy(
+            id,
+            name,
+            target: job['key'] as String,
+            automatic: true,
+          );
+          deliveries.add(<String, Object?>{'status': 'succeeded', ...result});
+          log.writeAsStringSync(
+            'Delivery to $name: ${result['status'] ?? 'succeeded'}\n',
+            mode: FileMode.append,
+          );
+        } catch (error, trace) {
+          deliveries.add(<String, Object?>{
+            'destination': name,
+            'status': 'failed',
+            'error': '$error',
+          });
+          job['deliveryError'] = 'Delivery to $name failed: $error';
+          log.writeAsStringSync(
+            '${job['deliveryError']}\n$trace\n',
+            mode: FileMode.append,
+          );
+        }
+        _save();
+      }
+    } catch (error, trace) {
+      job['deliveryError'] = 'Automatic delivery failed: $error';
+      log.parent.createSync(recursive: true);
+      log.writeAsStringSync(
+        '${job['deliveryError']}\n$trace\n',
+        mode: FileMode.append,
+      );
+    }
+    job['deliveryStatus'] = job['deliveryError'] != null
+        ? 'failed'
+        : deliveries.any(
+            (Map<String, Object?> item) => item['status'] == 'succeeded',
+          )
+        ? 'succeeded'
+        : 'skipped';
+    job['currentTask'] = switch (job['deliveryStatus']) {
+      'failed' => 'Delivery failed',
+      'succeeded' => 'Build and delivery complete',
+      _ => 'Build complete',
+    };
   }
 
   Future<bool> _reuse(Map<String, Object?> job, String fingerprint) async {

@@ -15,7 +15,7 @@ import 'project_store.dart';
 
 class ProjectDeployment {
   ProjectDeployment(this.store, {void Function(File, String)? moveFile})
-    : _moveFile = moveFile ?? _rename;
+    : _moveFile = moveFile ?? moveProjectFile;
 
   final ProjectStore store;
   final void Function(File, String) _moveFile;
@@ -104,12 +104,22 @@ class ProjectDeployment {
     String destination, {
     String? target,
     bool preview = false,
+    bool automatic = false,
   }) async {
     projectIdentifier(runId);
     Map<String, Object?> configured = destinations().firstWhere(
       (Map<String, Object?> item) => item['name'] == destination,
       orElse: () => throw FormatException('Unknown destination: $destination'),
     );
+    if (automatic && !_selectAutomatic(runId, configured, target)) {
+      return <String, Object?>{
+        'runId': runId,
+        'destination': destination,
+        'status': 'skipped',
+        'reason': 'No compatible runtime artifacts',
+        'actions': <Object?>[],
+      };
+    }
     Map<String, Object?> resolved = await _resolve(
       configured,
       checkRuntime: true,
@@ -134,7 +144,7 @@ class ProjectDeployment {
         if (resolved['path'] != directory) {
           throw StateError('Destination changed while deployment was starting');
         }
-        stage = Directory(directory).createTempSync('.multiplexor-stage-');
+        stage = Directory.systemTemp.createTempSync('multiplexor-stage-');
         return await _prepare(runId, resolved, target, stage, preview: false);
       } on _DeploymentRecoveryFailure {
         preserveStage = true;
@@ -160,6 +170,74 @@ class ProjectDeployment {
       throw const FormatException('Invalid project destinations');
     }
     return (saved['destinations'] as List<Object?>).map(projectObject).toList();
+  }
+
+  bool _selectAutomatic(
+    String runId,
+    Map<String, Object?> destination,
+    String? target,
+  ) {
+    if (destination['kind'] != 'directory' &&
+        destination['kind'] != 'dropins') {
+      throw StateError(
+        'Automatic delivery requires an export directory or dropins',
+      );
+    }
+    if (target == null) {
+      throw const FormatException('Automatic delivery requires one target');
+    }
+    File runFile = store.runFile(runId);
+    _regularFileOrMissing(runFile.path);
+    Map<String, Object?> run = projectReadJson(runFile);
+    Map<String, Object?> job = (run['jobs'] as List<Object?>)
+        .map(projectObject)
+        .firstWhere((Map<String, Object?> item) => item['key'] == target);
+    if (job['status'] != 'succeeded' ||
+        !(job['artifacts'] as List<Object?>)
+            .map(projectObject)
+            .any(
+              (Map<String, Object?> artifact) =>
+                  _matches(destination, artifact),
+            )) {
+      return false;
+    }
+    if (destination['kind'] == 'dropins') {
+      Set<String> selected = projectStrings(run['targets']).toSet();
+      for (Object? raw in run['projects'] as List<Object?>) {
+        BuildProject project = BuildProject.fromJson(projectObject(raw));
+        if (!target.startsWith('${project.id}:')) continue;
+        for (ProjectTarget candidate in project.targets) {
+          String key = '${project.id}:${candidate.id}';
+          if (key != target &&
+              selected.contains(key) &&
+              candidate.artifacts.any(
+                (ProjectArtifact artifact) =>
+                    _matches(destination, artifact.toJson()),
+              )) {
+            throw StateError(
+              'Multiple compatible targets for ${project.id}; deliver one project:target manually',
+            );
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  bool _matches(
+    Map<String, Object?> destination,
+    Map<String, Object?> artifact,
+  ) {
+    String? platform = destination['platform'] as String?;
+    String? minecraft = destination['minecraft'] as String?;
+    return artifact['role'] == 'runtime' &&
+        (platform == null ||
+            projectStrings(artifact['platforms']).contains(platform)) &&
+        (minecraft == null ||
+            _compatible(
+              minecraft,
+              projectStrings(artifact['minecraftVersions']),
+            ));
   }
 
   Future<Map<String, Object?>> _resolve(
@@ -322,8 +400,12 @@ class ProjectDeployment {
     Map<String, Object?> run = projectReadJson(runFile);
     String directory = destination['path'] as String;
     bool runtime = destination['kind'] != 'directory';
-    String? platform = destination['platform'] as String?;
-    String? minecraft = destination['minecraft'] as String?;
+    File manifest = File(p.join(directory, _manifestName));
+    _regularFileOrMissing(manifest.path);
+    String? originalManifest = manifest.existsSync()
+        ? manifest.readAsStringSync()
+        : null;
+    List<Map<String, Object?>> previous = _readManifest(manifest);
     List<Map<String, Object?>> selected = <Map<String, Object?>>[];
     List<Map<String, Object?>> skipped = <Map<String, Object?>>[];
     Set<String> projects = <String>{};
@@ -335,13 +417,7 @@ class ProjectDeployment {
       for (Object? raw in job['artifacts'] as List<Object?>? ?? <Object?>[]) {
         Map<String, Object?> artifact = projectObject(raw);
         if (artifact['role'] != 'runtime') continue;
-        if ((platform != null &&
-                !projectStrings(artifact['platforms']).contains(platform)) ||
-            (minecraft != null &&
-                !_compatible(
-                  minecraft,
-                  projectStrings(artifact['minecraftVersions']),
-                ))) {
+        if (!_matches(destination, artifact)) {
           skipped.add(<String, Object?>{
             'target': job['key'],
             'file': artifact['file'],
@@ -365,7 +441,19 @@ class ProjectDeployment {
             await projectFileHash(file) != _hash(artifact['sha256'])) {
           throw StateError('Build artifact changed: $source');
         }
-        String filename = _filename(p.basename(source));
+        String filename = p.basename(source);
+        if (destination['kind'] == 'dropins') {
+          filename =
+              previous
+                      .where(
+                        (Map<String, Object?> entry) =>
+                            entry['project'] == project,
+                      )
+                      .firstOrNull?['file']
+                  as String? ??
+              '$project.jar';
+        }
+        filename = _filename(filename);
         if (!filenames.add(filename.toLowerCase())) {
           throw StateError('Deployment filename collision: $filename');
         }
@@ -384,12 +472,6 @@ class ProjectDeployment {
     if (selected.isEmpty) {
       throw StateError('No successful compatible runtime artifacts selected');
     }
-    File manifest = File(p.join(directory, _manifestName));
-    _regularFileOrMissing(manifest.path);
-    String? originalManifest = manifest.existsSync()
-        ? manifest.readAsStringSync()
-        : null;
-    List<Map<String, Object?>> previous = _readManifest(manifest);
     Map<String, Map<String, Object?>> owned = <String, Map<String, Object?>>{
       for (Map<String, Object?> entry in previous)
         (entry['file'] as String).toLowerCase(): entry,
@@ -702,8 +784,6 @@ class ProjectDeployment {
     }
     return false;
   }
-
-  static void _rename(File source, String target) => source.renameSync(target);
 }
 
 class _DeploymentRecoveryFailure implements Exception {

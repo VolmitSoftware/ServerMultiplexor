@@ -32,6 +32,10 @@ void main() {
     String id, {
     List<String> dependencies = const <String>[],
     String command = 'pass',
+    String artifactPath = 'build/result.jar',
+    String role = 'runtime',
+    List<String> platforms = const <String>['plugin'],
+    List<String> minecraftVersions = const <String>[],
   }) => <String, Object?>{
     'id': id,
     'tasks': <String>[command],
@@ -42,9 +46,10 @@ void main() {
     'dependsOn': dependencies,
     'artifacts': <Object?>[
       <String, Object?>{
-        'path': 'build/result.jar',
-        'role': 'runtime',
-        'platforms': <String>['plugin'],
+        'path': artifactPath,
+        'role': role,
+        'platforms': platforms,
+        'minecraftVersions': minecraftVersions,
       },
     ],
   };
@@ -226,7 +231,7 @@ printf '> Task :assemble\\n'
       for (BuildProject project in projects) {
         File wrapper = File(p.join(project.directory, 'gradlew'));
         wrapper.writeAsStringSync(
-          "${wrapper.readAsStringSync()}\nprintf '%s\\n' \"\$MULTIPLEXOR_SOURCE_HASHES\" > build/source-hashes.json\n",
+          "${wrapper.readAsStringSync()}\nprintf 'source-hashes=%s\\n' \"\$MULTIPLEXOR_SOURCE_HASHES\"\n",
         );
       }
       Map<String, Object?> first = run('first-stamps', projects, <String>[
@@ -236,24 +241,27 @@ printf '> Task :assemble\\n'
       ]);
       expect(await ProjectWorker(store, first).execute(), 0);
       Map<String, Object?> stamps(String runId, BuildProject project) {
-        Directory sandbox = Directory(
-          p.join(store.runWork(runId).path, 'sandboxes', project.id, 'one'),
+        String sandbox = p.join(
+          store.runWork(runId).resolveSymbolicLinksSync(),
+          'sandboxes',
+          project.id,
+          'one',
         );
-        Map<String, Object?> result = projectReadJson(
-          File(
-            p.join(
-              sandbox.path,
-              project.relativePath,
-              'build/source-hashes.json',
-            ),
-          ),
+        String line =
+            File(
+              p.join(store.runWork(runId).path, 'logs', project.id, 'one.log'),
+            ).readAsLinesSync().singleWhere(
+              (String line) => line.startsWith('source-hashes='),
+            );
+        Map<String, Object?> result = projectObject(
+          jsonDecode(line.substring('source-hashes='.length)),
         );
         expect(result.keys.toSet(), <String>{
           for (String source in <String>[
             project.id,
             ...project.sourceDependencies,
           ])
-            Directory(p.join(sandbox.path, source)).resolveSymbolicLinksSync(),
+            p.join(sandbox, source),
         });
         return <String, Object?>{
           for (MapEntry<String, Object?> entry in result.entries)
@@ -396,6 +404,320 @@ printf '> Task :assemble\\n'
   }, skip: Platform.isWindows);
 
   test(
+    'fresh and reused builds deliver to exports and dropins while instances stay manual',
+    () async {
+      BuildProject app = project('app', <Map<String, Object?>>[target('one')]);
+      ProjectDeployment deployment = ProjectDeployment(store);
+      Directory export = Directory(p.join(fixture.path, 'export'));
+      await deployment.configure('export', path: export.path);
+      Map<String, Object?> dropins = await deployment.configure(
+        'shared',
+        dropins: true,
+        platform: 'plugin',
+        minecraft: '26.3',
+      );
+      Directory instance = Directory(
+        p.join(store.workspace, 'consumers/plugin-consumers/instances/demo'),
+      )..createSync(recursive: true);
+      File(
+        p.join(instance.path, '.server-source'),
+      ).writeAsStringSync('type=paper\nmc=26.3\n');
+      await deployment.configure(
+        'server',
+        instance: 'demo',
+        platform: 'plugin',
+      );
+      Map<Directory, String> outputs = <Directory, String>{
+        export: 'result.jar',
+        Directory(dropins['path'] as String): 'app.jar',
+      };
+      for (String id in <String>['delivery-first', 'delivery-reused']) {
+        Map<String, Object?> state = run(
+          id,
+          <BuildProject>[app],
+          <String>['app:one'],
+          changed: id == 'delivery-reused',
+        );
+        expect(await ProjectWorker(store, state).execute(), 0);
+        expect(state['status'], 'succeeded');
+        Map<String, Object?> job = projectObject(
+          (state['jobs'] as List<Object?>).single,
+        );
+        if (id == 'delivery-reused') {
+          expect(job['reusedFrom'], 'delivery-first');
+        }
+        List<Map<String, Object?>> deliveries =
+            (job['deliveries'] as List<Object?>).map(projectObject).toList();
+        expect(
+          deliveries.map((Map<String, Object?> item) => item['destination']),
+          unorderedEquals(<String>['export', 'shared']),
+        );
+        expect(
+          deliveries.map((Map<String, Object?> item) => item['status']),
+          everyElement('succeeded'),
+        );
+        for (MapEntry<Directory, String> output in outputs.entries) {
+          File jar = File(p.join(output.key.path, output.value));
+          expect(jar.readAsStringSync(), 'captured input');
+          Map<String, Object?> manifest = projectReadJson(
+            File(
+              p.join(output.key.path, '.multiplexor-project-artifacts.json'),
+            ),
+          );
+          expect(
+            projectObject(
+              (manifest['artifacts'] as List<Object?>).single,
+            )['runId'],
+            id,
+          );
+          jar.deleteSync();
+        }
+        expect(
+          Directory(p.join(instance.path, 'plugins')).existsSync(),
+          isFalse,
+        );
+      }
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
+    'non-runtime and incompatible artifacts leave saved destinations untouched',
+    () async {
+      ProjectDeployment deployment = ProjectDeployment(store);
+      Directory export = Directory(p.join(fixture.path, 'export'));
+      await deployment.configure(
+        'export',
+        path: export.path,
+        platform: 'plugin',
+        minecraft: '26.3',
+      );
+      Map<String, Object?> dropins = await deployment.configure(
+        'shared',
+        dropins: true,
+        platform: 'plugin',
+        minecraft: '26.3',
+      );
+      List<Map<String, Object?>> targets = <Map<String, Object?>>[
+        target('api', role: 'api'),
+        target('library', role: 'library'),
+        target('fabric', platforms: <String>['fabric']),
+        target('version', minecraftVersions: <String>['1.21.11']),
+      ];
+      BuildProject app = project('app', targets);
+      Map<String, Object?> state = run(
+        'delivery-skipped',
+        <BuildProject>[app],
+        targets
+            .map((Map<String, Object?> item) => 'app:${item['id']}')
+            .toList(),
+      );
+      expect(await ProjectWorker(store, state).execute(), 0);
+      expect(state['status'], 'succeeded');
+      expect(
+        (state['jobs'] as List<Object?>)
+            .map(projectObject)
+            .map((Map<String, Object?> job) => job['status']),
+        everyElement('succeeded'),
+      );
+      expect(export.existsSync(), isFalse);
+      Directory shared = Directory(dropins['path'] as String);
+      expect(shared.listSync(), isEmpty);
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
+    'delivery failure preserves built artifacts and continues destinations and dependencies',
+    () async {
+      BuildProject app = project('app', <Map<String, Object?>>[
+        target('one', artifactPath: 'build/one.jar'),
+        target(
+          'two',
+          artifactPath: 'build/two.jar',
+          dependencies: <String>['app:one'],
+        ),
+      ]);
+      File(p.join(app.directory, 'gradlew')).writeAsStringSync(
+        '\ncp build/result.jar build/one.jar\ncp build/result.jar build/two.jar\n',
+        mode: FileMode.append,
+      );
+      ProjectDeployment deployment = ProjectDeployment(store);
+      Directory blocked = Directory(p.join(fixture.path, 'blocked'))
+        ..createSync();
+      File unmanaged = File(p.join(blocked.path, 'one.jar'))
+        ..writeAsStringSync('unmanaged');
+      Directory export = Directory(p.join(fixture.path, 'export'));
+      await deployment.configure('a-blocked', path: blocked.path);
+      await deployment.configure('z-export', path: export.path);
+      Map<String, Object?> state = run(
+        'delivery-failed',
+        <BuildProject>[app],
+        <String>['app:two'],
+      );
+      expect(await ProjectWorker(store, state).execute(), 1);
+      expect(state['status'], 'failed');
+      List<Map<String, Object?>> jobs = (state['jobs'] as List<Object?>)
+          .map(projectObject)
+          .toList();
+      expect(
+        jobs.map((Map<String, Object?> job) => job['status']),
+        everyElement('succeeded'),
+      );
+      expect(unmanaged.readAsStringSync(), 'unmanaged');
+      for (String filename in <String>['one.jar', 'two.jar']) {
+        expect(
+          File(p.join(export.path, filename)).readAsStringSync(),
+          'captured input',
+        );
+      }
+      List<Map<String, Object?>> deliveries =
+          (jobs.first['deliveries'] as List<Object?>)
+              .map(projectObject)
+              .toList();
+      Map<String, Object?> failed = deliveries.singleWhere(
+        (Map<String, Object?> item) => item['destination'] == 'a-blocked',
+      );
+      expect(failed['status'], 'failed');
+      expect(failed['error'], contains('unmanaged'));
+      expect(
+        deliveries.singleWhere(
+          (Map<String, Object?> item) => item['destination'] == 'z-export',
+        )['status'],
+        'succeeded',
+      );
+      for (Map<String, Object?> job in jobs) {
+        Map<String, Object?> artifact = projectObject(
+          (job['artifacts'] as List<Object?>).single,
+        );
+        expect(
+          File(artifact['file'] as String).readAsStringSync(),
+          'captured input',
+        );
+      }
+    },
+    skip: Platform.isWindows,
+  );
+
+  test('concurrent builds finish all deliveries before returning', () async {
+    List<Map<String, Object?>> targets = <Map<String, Object?>>[
+      for (String id in <String>['one', 'two', 'three'])
+        target(id, artifactPath: 'build/$id.jar'),
+    ];
+    BuildProject app = project('app', targets);
+    File(p.join(app.directory, 'gradlew')).writeAsStringSync(
+      '\ncp build/result.jar build/one.jar\n'
+      'cp build/result.jar build/two.jar\n'
+      'cp build/result.jar build/three.jar\n',
+      mode: FileMode.append,
+    );
+    Directory export = Directory(p.join(fixture.path, 'export'));
+    await ProjectDeployment(store).configure('export', path: export.path);
+    Map<String, Object?> state = run(
+      'delivery-parallel',
+      <BuildProject>[app],
+      targets.map((Map<String, Object?> item) => 'app:${item['id']}').toList(),
+    );
+    expect(await ProjectWorker(store, state).execute(), 0);
+    Map<String, Object?> persisted = projectReadJson(
+      store.runFile('delivery-parallel'),
+    );
+    DateTime finished = DateTime.parse(persisted['finishedAt'] as String);
+    for (Map<String, Object?> job in (persisted['jobs'] as List<Object?>).map(
+      projectObject,
+    )) {
+      expect(job['status'], 'succeeded');
+      expect(
+        projectObject((job['deliveries'] as List<Object?>).single)['status'],
+        'succeeded',
+      );
+      expect(
+        DateTime.parse(job['finishedAt'] as String).isAfter(finished),
+        isFalse,
+      );
+      expect(
+        File(p.join(export.path, '${job['target']}.jar')).readAsStringSync(),
+        'captured input',
+      );
+    }
+    Map<String, Object?> manifest = projectReadJson(
+      File(p.join(export.path, '.multiplexor-project-artifacts.json')),
+    );
+    expect(manifest['artifacts'], hasLength(3));
+  }, skip: Platform.isWindows);
+
+  test(
+    'ambiguous dropins leave exports usable and exact target builds deliver reused artifacts',
+    () async {
+      BuildProject app = project('app', <Map<String, Object?>>[
+        target('one', artifactPath: 'build/one.jar'),
+        target('two', artifactPath: 'build/two.jar'),
+      ]);
+      File(p.join(app.directory, 'gradlew')).writeAsStringSync(
+        '\ncp build/result.jar build/one.jar\ncp build/result.jar build/two.jar\n',
+        mode: FileMode.append,
+      );
+      ProjectDeployment deployment = ProjectDeployment(store);
+      Directory export = Directory(p.join(fixture.path, 'export'));
+      await deployment.configure('export', path: export.path);
+      Map<String, Object?> configured = await deployment.configure(
+        'shared',
+        dropins: true,
+        platform: 'plugin',
+        minecraft: '26.3',
+      );
+      Directory shared = Directory(configured['path'] as String);
+      Map<String, Object?> ambiguous = run(
+        'delivery-ambiguous',
+        <BuildProject>[app],
+        <String>['app:one', 'app:two'],
+      );
+      expect(await ProjectWorker(store, ambiguous).execute(), 1);
+      expect(shared.listSync(), isEmpty);
+      for (Map<String, Object?> job in (ambiguous['jobs'] as List<Object?>).map(
+        projectObject,
+      )) {
+        expect(job['status'], 'succeeded');
+        expect(
+          File(p.join(export.path, '${job['target']}.jar')).readAsStringSync(),
+          'captured input',
+        );
+        Map<String, Object?> failed = (job['deliveries'] as List<Object?>)
+            .map(projectObject)
+            .singleWhere(
+              (Map<String, Object?> item) => item['destination'] == 'shared',
+            );
+        expect(failed['status'], 'failed');
+        expect(failed['error'], contains('Multiple compatible targets'));
+      }
+      Map<String, Object?> selected = run(
+        'delivery-selected',
+        <BuildProject>[app],
+        <String>['app:two'],
+        changed: true,
+      );
+      expect(await ProjectWorker(store, selected).execute(), 0);
+      Map<String, Object?> job = projectObject(
+        (selected['jobs'] as List<Object?>).single,
+      );
+      expect(job['reusedFrom'], 'delivery-ambiguous');
+      expect(
+        (job['deliveries'] as List<Object?>)
+            .map(projectObject)
+            .map((Map<String, Object?> item) => item['status']),
+        everyElement('succeeded'),
+      );
+      expect(File(p.join(shared.path, 'one.jar')).existsSync(), isFalse);
+      expect(File(p.join(shared.path, 'two.jar')).existsSync(), isFalse);
+      expect(
+        File(p.join(shared.path, 'app.jar')).readAsStringSync(),
+        'captured input',
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
+  test(
     'auxiliary inputs are isolated, invalidate reuse, and remain frozen on retry',
     () async {
       BuildProject app = project(
@@ -413,7 +735,7 @@ printf '> Task :assemble\\n'
       unrelated.writeAsStringSync('not an input');
       File wrapper = File(p.join(app.directory, 'gradlew'));
       wrapper.writeAsStringSync(
-        '\ncat ../docs/app/reference.txt > build/result.jar\n',
+        '\ncat ../docs/app/reference.txt > build/result.jar\nprintf \'docs=%s\\n\' "\$(ls ../docs)"\n',
         mode: FileMode.append,
       );
       Map<String, Object?> first = run(
@@ -422,15 +744,20 @@ printf '> Task :assemble\\n'
         <String>['app:one'],
       );
       expect(await ProjectWorker(store, first).execute(), 0);
-      String sandbox = p.join(
-        store.runWork('inputs-first').path,
-        'sandboxes/app/one',
+      Map<String, Object?> captured = projectObject(
+        (first['jobs'] as List<Object?>).single,
       );
       expect(
-        File(p.join(sandbox, 'docs/app/reference.txt')).readAsStringSync(),
+        File(
+          projectObject((captured['artifacts'] as List<Object?>).single)['file']
+              as String,
+        ).readAsStringSync(),
         'first documentation',
       );
-      expect(Directory(p.join(sandbox, 'docs/other')).existsSync(), isFalse);
+      expect(
+        File(captured['logPath'] as String).readAsStringSync(),
+        contains('docs=app\n'),
+      );
       docs.writeAsStringSync('edited documentation');
       Map<String, Object?> second = run(
         'inputs-second',
@@ -495,6 +822,10 @@ printf '> Task :assemble\\n'
       File docs = File(p.join(fixture.path, 'sources/docs/version.txt'));
       docs.parent.createSync(recursive: true);
       docs.writeAsStringSync('document version');
+      File(p.join(app.directory, 'gradlew')).writeAsStringSync(
+        '\ncat ../docs/version.txt > build/result.jar\n',
+        mode: FileMode.append,
+      );
       Map<String, Object?> state = run(
         'file-input',
         <BuildProject>[app],
@@ -503,10 +834,14 @@ printf '> Task :assemble\\n'
       expect(await ProjectWorker(store, state).execute(), 0);
       expect(
         File(
-          p.join(
-            store.runWork('file-input').path,
-            'sandboxes/app/one/docs/version.txt',
-          ),
+          projectObject(
+                (projectObject(
+                          (state['jobs'] as List<Object?>).single,
+                        )['artifacts']
+                        as List<Object?>)
+                    .single,
+              )['file']
+              as String,
         ).readAsStringSync(),
         'document version',
       );
@@ -626,7 +961,7 @@ printf 'property-arguments=%s\n' "$property_arguments"
   );
 
   test(
-    'packaging participates in reuse and cache settings reach isolated Gradle homes',
+    'packaging participates in reuse and cache settings reach the shared Gradle home',
     () async {
       BuildProject app = project('app', <Map<String, Object?>>[
         target('one'),
@@ -635,9 +970,13 @@ printf 'property-arguments=%s\n' "$property_arguments"
       File wrapper = File(p.join(app.directory, 'gradlew'));
       wrapper.writeAsStringSync(r'''
 printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--init-script' ]; then cat "$2"; fi
+  shift
+done
 ''', mode: FileMode.append);
       Map<String, Object?> first = run(
-        'pack-local',
+        'pack-compact',
         <BuildProject>[app],
         <String>['app:one', 'app:two'],
       );
@@ -649,7 +988,8 @@ printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
       for (Map<String, Object?> job in jobs) {
         String log = File(job['logPath'] as String).readAsStringSync();
         expect(log, contains('--build-cache'));
-        expect(log, contains('-PcompactRelease=false'));
+        expect(log, contains('-PcompactRelease=true'));
+        expect(log, contains('settings.buildCache'));
         environments.add(
           log
               .split('\n')
@@ -660,31 +1000,32 @@ printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
         environments.map((String line) => line.split(' home=').first).toSet(),
         hasLength(1),
       );
+      String home = p.join(store.workDirectory.path, 'gradle-home');
       expect(
         environments.map((String line) => line.split(' home=').last).toSet(),
-        hasLength(2),
+        <String>{home},
       );
       expect(
         File(
-          p.join(store.runWork('pack-local').path, 'budget.init.gradle'),
-        ).readAsStringSync(),
-        contains('settings.buildCache'),
+          p.join(home, 'init.d', 'multiplexor-cache-retention.gradle'),
+        ).existsSync(),
+        isTrue,
       );
-      Map<String, Object?> compact = run(
-        'pack-compact',
+      Map<String, Object?> local = run(
+        'pack-local',
         <BuildProject>[app],
         <String>['app:one'],
         changed: true,
       );
-      compact['packaging'] = 'compact';
-      expect(await ProjectWorker(store, compact).execute(), 0);
+      local['packaging'] = 'local';
+      expect(await ProjectWorker(store, local).execute(), 0);
       Map<String, Object?> job = projectObject(
-        (compact['jobs'] as List<Object?>).single,
+        (local['jobs'] as List<Object?>).single,
       );
       expect(job['reusedFrom'], isNull);
       expect(
         File(job['logPath'] as String).readAsStringSync(),
-        contains('-PcompactRelease=true'),
+        contains('-PcompactRelease=false'),
       );
     },
     skip: Platform.isWindows,
@@ -784,6 +1125,54 @@ printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
     );
   }, skip: Platform.isWindows);
 
+  test('recorded durations start the longest target first', () async {
+    BuildProject app = project('app', <Map<String, Object?>>[
+      target('quick'),
+      target('slow'),
+    ]);
+    DateTime start = DateTime.utc(2026, 10, 1);
+    projectAtomicJson(store.runFile('history'), <String, Object?>{
+      'schema': 1,
+      'id': 'history',
+      'status': 'succeeded',
+      'createdAt': start.toIso8601String(),
+      'jobs': <Object?>[
+        for (MapEntry<String, int> recorded in <String, int>{
+          'app:quick': 1,
+          'app:slow': 9,
+        }.entries)
+          <String, Object?>{
+            'key': recorded.key,
+            'project': 'app',
+            'target': recorded.key.split(':').last,
+            'status': 'succeeded',
+            'startedAt': start.toIso8601String(),
+            'finishedAt': start
+                .add(Duration(minutes: recorded.value))
+                .toIso8601String(),
+            'artifacts': <Object?>[],
+          },
+      ],
+    });
+    Map<String, Object?> state = run(
+      'ordered',
+      <BuildProject>[app],
+      <String>['app:quick', 'app:slow'],
+    );
+    state['jobsLimit'] = 1;
+    expect(await ProjectWorker(store, state).execute(), 0);
+    Map<String, Map<String, Object?>> jobs = <String, Map<String, Object?>>{
+      for (Object? item in state['jobs'] as List<Object?>)
+        projectObject(item)['key'] as String: projectObject(item),
+    };
+    expect(
+      DateTime.parse(
+        jobs['app:slow']!['startedAt'] as String,
+      ).isBefore(DateTime.parse(jobs['app:quick']!['startedAt'] as String)),
+      isTrue,
+    );
+  }, skip: Platform.isWindows);
+
   test(
     'Git ignores generated runtimes while retaining tracked and untracked sources',
     () async {
@@ -878,6 +1267,175 @@ printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
     );
   }, skip: Platform.isWindows);
 
+  void recordRun(
+    String id,
+    String createdAt, {
+    String status = 'succeeded',
+    String? retryOf,
+    List<Object?> jobs = const <Object?>[],
+  }) {
+    projectAtomicJson(store.runFile(id), <String, Object?>{
+      'schema': 1,
+      'id': id,
+      'status': status,
+      'createdAt': createdAt,
+      'retryOf': ?retryOf,
+      'jobs': jobs,
+    });
+    for (String entry in <String>['snapshot', 'artifacts', 'sandboxes']) {
+      Directory(
+        p.join(store.runWork(id).path, entry),
+      ).createSync(recursive: true);
+    }
+  }
+
+  test('finished runs keep only retry inputs, logs, and artifacts', () async {
+    for (int index = 0; index < 10; index++) {
+      recordRun('older-$index', '2026-01-01T00:00:0$index.000Z');
+    }
+    File(p.join(store.runWork('older-9').path, 'leftover', 'output.bin'))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('stale output');
+    BuildProject app = project(
+      'app',
+      <Map<String, Object?>>[
+        target('built'),
+        target('broken', command: 'fail'),
+      ],
+      inputs: <String>['docs/app'],
+    );
+    File docs = File(p.join(fixture.path, 'sources/docs/app/reference.txt'));
+    docs.parent.createSync(recursive: true);
+    docs.writeAsStringSync('documentation');
+    Map<String, Object?> state = run(
+      'finished',
+      <BuildProject>[app],
+      <String>['app:built', 'app:broken'],
+    );
+    expect(await ProjectWorker(store, state).execute(), 1);
+    expect(state['status'], 'failed');
+    expect(
+      store
+          .runWork('finished')
+          .listSync()
+          .map((FileSystemEntity entry) => p.basename(entry.path))
+          .toSet(),
+      <String>{'artifacts', 'input-snapshot', 'logs', 'snapshot'},
+    );
+    expect(
+      store
+          .runWork('older-9')
+          .listSync()
+          .map((FileSystemEntity entry) => p.basename(entry.path))
+          .toSet(),
+      <String>{'artifacts', 'snapshot'},
+    );
+    expect(store.runFile('older-0').existsSync(), isFalse);
+    expect(store.runWork('older-0').existsSync(), isFalse);
+    expect(store.runs(), hasLength(10));
+    expect(
+      Directory(p.join(store.workDirectory.path, 'trash')).listSync(),
+      isEmpty,
+    );
+    Map<String, Object?> retry = run(
+      'finished-retry',
+      <BuildProject>[app],
+      <String>['app:built'],
+    );
+    retry['retryOf'] = 'finished';
+    retry['sourceHashes'] = state['sourceHashes'];
+    retry['inputHashes'] = state['inputHashes'];
+    expect(await ProjectWorker(store, retry).execute(), 0);
+    expect(
+      projectObject((retry['jobs'] as List<Object?>).single)['reusedFrom'],
+      'finished',
+    );
+  }, skip: Platform.isWindows);
+
+  test(
+    'run retention keeps the newest runs and every run still in use',
+    () async {
+      String at(int index) =>
+          '2026-01-01T00:00:${index.toString().padLeft(2, '0')}.000Z';
+      for (int index = 5; index < 15; index++) {
+        recordRun('run-$index', at(index));
+      }
+      recordRun('run-0', at(0));
+      recordRun('run-1', at(1), status: 'running', retryOf: 'run-4');
+      recordRun('run-2', at(2));
+      recordRun('run-3', at(3));
+      recordRun('run-4', at(4));
+      String referenced = p.join(
+        store.runWork('run-2').path,
+        'artifacts',
+        'app',
+        'one',
+        'app.jar',
+      );
+      recordRun(
+        'run-12',
+        at(12),
+        jobs: <Object?>[
+          <String, Object?>{
+            'key': 'app:one',
+            'status': 'succeeded',
+            'artifacts': <Object?>[
+              <String, Object?>{'file': referenced},
+            ],
+          },
+        ],
+      );
+      recordRun(
+        'run-11',
+        at(11),
+        jobs: <Object?>[
+          <String, Object?>{
+            'key': 'app:one',
+            'status': 'succeeded',
+            'reusedFrom': 'run-3',
+            'artifacts': <Object?>[],
+          },
+        ],
+      );
+      store.retainRuns();
+      expect(
+        store.runs().map((Map<String, Object?> run) => run['id']).toSet(),
+        <String>{
+          for (int index = 5; index < 15; index++) 'run-$index',
+          'run-1',
+          'run-2',
+          'run-4',
+        },
+      );
+      for (String removed in <String>['run-0', 'run-3']) {
+        expect(store.runFile(removed).parent.existsSync(), isFalse);
+        expect(store.runWork(removed).existsSync(), isFalse);
+      }
+      expect(
+        Directory(
+          p.join(store.runWork('run-1').path, 'sandboxes'),
+        ).existsSync(),
+        isTrue,
+      );
+      expect(
+        Directory(
+          p.join(store.runWork('run-2').path, 'sandboxes'),
+        ).existsSync(),
+        isFalse,
+      );
+      expect(
+        Directory(p.join(store.workDirectory.path, 'trash')).listSync(),
+        isNotEmpty,
+      );
+      await store.emptyTrash();
+      expect(
+        Directory(p.join(store.workDirectory.path, 'trash')).listSync(),
+        isEmpty,
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
   test(
     'metadata scan runs against copies and atomically registers targets',
     () async {
@@ -908,4 +1466,179 @@ printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
     },
     skip: Platform.isWindows,
   );
+
+  Map<String, Object?> declaration(
+    String id,
+    List<Map<String, Object?>> targets, {
+    List<String> sources = const <String>[],
+  }) => <String, Object?>{
+    'schema': 1,
+    'id': id,
+    'name': id,
+    'sandbox': 'per-target',
+    'parallelTargets': true,
+    'sourceDependencies': sources,
+    'sourceInputs': <String>[],
+    'targets': targets,
+  };
+
+  BuildProject declare(
+    BuildProject registered,
+    Map<String, Object?> declared, {
+    int exitCode = 0,
+  }) {
+    List<String> artifacts = <String>[
+      for (Object? item in declared['targets'] as List<Object?>? ?? <Object?>[])
+        for (Object? artifact
+            in projectObject(item)['artifacts'] as List<Object?>)
+          projectObject(artifact)['path'] as String,
+    ];
+    File(p.join(registered.directory, 'gradlew')).writeAsStringSync('''#!/bin/sh
+for argument in "\$@"; do
+  if [ "\$argument" = "multiplexorMetadata" ]; then
+    printf '%s\\n' 'MULTIPLEXOR_PROJECT=${jsonEncode(declared)}'
+    exit $exitCode
+  fi
+done
+for artifact in ${artifacts.join(' ')}; do
+  mkdir -p "\$(dirname "\$artifact")"
+  cat input.txt > "\$artifact"
+done
+''');
+    return BuildProject.fromJson(<String, Object?>{
+      ...registered.toJson(),
+      'definitionHash': 'outdated',
+    });
+  }
+
+  Map<String, Map<String, Object?>> jobsByKey(Map<String, Object?> state) =>
+      <String, Map<String, Object?>>{
+        for (Object? item in state['jobs'] as List<Object?>)
+          projectObject(item)['key'] as String: projectObject(item),
+      };
+
+  test(
+    'changed declarations are re-read from the captured snapshot and saved',
+    () async {
+      BuildProject app = declare(
+        project('app', <Map<String, Object?>>[
+          target('one', artifactPath: 'build/app-1.jar'),
+        ]),
+        declaration('app', <Map<String, Object?>>[
+          target('one', artifactPath: 'build/app-2.jar'),
+        ]),
+      );
+      projectAtomicJson(store.catalogFile, <String, Object?>{
+        'schema': 1,
+        'projects': <Object?>[app.toJson()],
+      });
+      Map<String, Object?> state = run(
+        'declared',
+        <BuildProject>[app],
+        <String>['app:one'],
+      );
+      expect(await ProjectWorker(store, state).execute(), 0);
+      Map<String, Object?> artifact = projectObject(
+        (jobsByKey(state)['app:one']!['artifacts'] as List<Object?>).single,
+      );
+      expect(p.basename(artifact['file'] as String), 'app-2.jar');
+      String snapshotHash = await projectDefinitionHash(
+        Directory(p.join(store.runWork('declared').path, 'snapshot', 'app')),
+      );
+      BuildProject saved = store.projects().single;
+      expect(saved.targets.single.artifacts.single.path, 'build/app-2.jar');
+      expect(saved.definitionHash, snapshotHash);
+      BuildProject recorded = BuildProject.fromJson(
+        projectObject((state['projects'] as List<Object?>).single),
+      );
+      expect(recorded.targets.single.artifacts.single.path, 'build/app-2.jar');
+      expect(
+        Directory(
+          p.join(store.runWork('declared').path, 'declarations', 'sources'),
+        ).existsSync(),
+        isFalse,
+      );
+    },
+    skip: Platform.isWindows,
+  );
+
+  test('unreadable declarations fail only their own targets', () async {
+    BuildProject broken = declare(
+      project('broken', <Map<String, Object?>>[target('one')]),
+      <String, Object?>{},
+      exitCode: 3,
+    );
+    BuildProject consumer = project('consumer', <Map<String, Object?>>[
+      target('one', dependencies: <String>['broken:one']),
+    ]);
+    BuildProject app = project('app', <Map<String, Object?>>[target('one')]);
+    Map<String, Object?> state = run(
+      'partial',
+      <BuildProject>[broken, consumer, app],
+      <String>['consumer:one', 'app:one'],
+    );
+    expect(await ProjectWorker(store, state).execute(), 1);
+    Map<String, Map<String, Object?>> jobs = jobsByKey(state);
+    expect(jobs['broken:one']!['status'], 'failed');
+    expect(
+      jobs['broken:one']!['error'],
+      contains('Cannot read broken targets'),
+    );
+    expect(File(jobs['broken:one']!['logPath'] as String).existsSync(), isTrue);
+    expect(jobs['consumer:one']!['status'], 'blocked');
+    expect(jobs['app:one']!['status'], 'succeeded');
+  }, skip: Platform.isWindows);
+
+  test('declarations drop removed targets and add new requirements', () async {
+    BuildProject lib = project('lib', <Map<String, Object?>>[
+      target('api', role: 'api'),
+    ]);
+    BuildProject shared = project('shared', <Map<String, Object?>>[
+      target('library', role: 'library'),
+    ]);
+    BuildProject app = declare(
+      project('app', <Map<String, Object?>>[target('one'), target('two')]),
+      declaration(
+        'app',
+        <Map<String, Object?>>[
+          target('one', dependencies: <String>['lib:api']),
+        ],
+        sources: <String>['shared'],
+      ),
+    );
+    File(p.join(app.directory, 'gradlew')).writeAsStringSync(
+      "if [ -d ../shared ]; then printf 'shared=present\\n'; fi\n",
+      mode: FileMode.append,
+    );
+    Map<String, Object?> state = run(
+      'reshaped',
+      <BuildProject>[lib, shared, app],
+      <String>['app:one', 'app:two'],
+    );
+    expect(await ProjectWorker(store, state).execute(), 1);
+    Map<String, Map<String, Object?>> jobs = jobsByKey(state);
+    expect(jobs['app:two']!['status'], 'failed');
+    expect(jobs['app:two']!['error'], 'app no longer declares target two');
+    expect(jobs['lib:api']!['status'], 'succeeded');
+    expect(jobs['app:one']!['status'], 'succeeded');
+    expect(state['targets'], <String>['lib:api', 'app:one']);
+    expect(
+      projectObject(state['sourceHashes']).keys,
+      containsAll(<String>['app', 'lib', 'shared']),
+    );
+    expect(
+      File(jobs['app:one']!['logPath'] as String).readAsStringSync(),
+      contains('shared=present\n'),
+    );
+  }, skip: Platform.isWindows);
+
+  test('version catalogs participate in declaration hashes', () async {
+    Directory source = Directory(p.join(fixture.path, 'catalog'))..createSync();
+    File catalog = File(p.join(source.path, 'gradle', 'libs.versions.toml'))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('[versions]\nminecraft = "26.2"\n');
+    String before = await projectDefinitionHash(source);
+    catalog.writeAsStringSync('[versions]\nminecraft = "26.3"\n');
+    expect(await projectDefinitionHash(source), isNot(before));
+  });
 }

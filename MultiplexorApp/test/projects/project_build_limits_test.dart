@@ -254,7 +254,7 @@ void main() {
       expect(first['jobsLimit'], 2);
       expect(first['memoryMiB'], 2048);
       expect(first['workers'], 3);
-      expect(first['packaging'], 'local');
+      expect(first['packaging'], 'compact');
 
       projectAtomicJson(
         service.store.limitsFile,
@@ -270,7 +270,7 @@ void main() {
       expect(retry['jobsLimit'], 2);
       expect(retry['memoryMiB'], 2048);
       expect(retry['workers'], 3);
-      expect(retry['packaging'], 'local');
+      expect(retry['packaging'], 'compact');
 
       Map<String, Object?> overridden =
           await _runCli(executable, service, <String>[
@@ -278,7 +278,7 @@ void main() {
             '--targets',
             'beta:plugin',
             '--packaging',
-            'compact',
+            'local',
             '--jobs',
             '1',
             '--memory',
@@ -293,12 +293,23 @@ void main() {
       expect(overridden['jobsLimit'], 1);
       expect(overridden['memoryMiB'], 1024);
       expect(overridden['workers'], 2);
-      expect(overridden['packaging'], 'compact');
-      Map<String, Object?> compactRetry = await _runCli(
+      expect(overridden['packaging'], 'local');
+      Map<String, Object?> localRetry = await _runCli(
         executable,
         service,
         <String>['retry', overridden['id'] as String, '--wait', '--json'],
       );
+      expect(localRetry['packaging'], 'local');
+      expect(localRetry['status'], 'succeeded');
+      Map<String, Object?> compactRetry =
+          await _runCli(executable, service, <String>[
+            'retry',
+            overridden['id'] as String,
+            '--packaging',
+            'compact',
+            '--wait',
+            '--json',
+          ]);
       expect(compactRetry['packaging'], 'compact');
       expect(compactRetry['status'], 'succeeded');
       expect(service.limits().toJson(), <String, Object?>{
@@ -307,6 +318,65 @@ void main() {
         'memoryMiB': 4096,
         'workers': 4,
       });
+    },
+    skip: Platform.isWindows ? 'Uses a POSIX fixture wrapper' : false,
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
+
+  test(
+    'retry captures current sources when the previous run stopped before capture',
+    () async {
+      Directory source = Directory(p.join(fixture.path, 'sources', 'alpha'))
+        ..createSync(recursive: true);
+      File wrapper = File(p.join(source.path, 'gradlew'))
+        ..writeAsStringSync('#!/bin/sh\nprintf "> Task :build\\n"\n');
+      expect(
+        Process.runSync('chmod', <String>['755', wrapper.path]).exitCode,
+        0,
+      );
+      Map<String, Object?> project = _project(
+        p.join(fixture.path, 'sources'),
+        'alpha',
+      );
+      projectAtomicJson(service.store.catalogFile, <String, Object?>{
+        'projects': <Object?>[project],
+      });
+      projectAtomicJson(service.store.runFile('run-stopped'), <String, Object?>{
+        'schema': 1,
+        'id': 'run-stopped',
+        'status': 'failed',
+        'createdAt': DateTime.now().toUtc().toIso8601String(),
+        'projects': <Object?>[project],
+        'targets': <String>['alpha:plugin'],
+        'jobs': <Object?>[
+          <String, Object?>{
+            'key': 'alpha:plugin',
+            'project': 'alpha',
+            'target': 'plugin',
+            'status': 'blocked',
+            'artifacts': <Object?>[],
+            'error': 'Worker stopped during capture',
+          },
+        ],
+        'jobsLimit': 1,
+        'memoryMiB': 1024,
+        'workers': 1,
+        'packaging': 'local',
+        'changed': true,
+        'sourceHashes': null,
+        'error': 'Worker stopped during capture',
+      });
+      Map<String, Object?> retry = await _runCli(executable, service, <String>[
+        'retry',
+        'run-stopped',
+        '--wait',
+        '--json',
+      ]);
+      expect(retry['status'], 'succeeded');
+      expect(retry.containsKey('retryOf'), isFalse);
+      expect(retry['changed'], isTrue);
+      expect(retry['packaging'], 'local');
+      expect(projectObject(retry['sourceHashes']).keys, <String>['alpha']);
     },
     skip: Platform.isWindows ? 'Uses a POSIX fixture wrapper' : false,
     timeout: const Timeout(Duration(minutes: 2)),

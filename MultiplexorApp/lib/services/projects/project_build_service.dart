@@ -351,7 +351,7 @@ class ProjectBuildService {
     String packaging =
         args.option('packaging') ??
         previous?['packaging'] as String? ??
-        'local';
+        'compact';
     if (!<String>{'local', 'compact'}.contains(packaging)) {
       throw const FormatException('Packaging must be local or compact');
     }
@@ -362,6 +362,12 @@ class ProjectBuildService {
         );
       }
     }
+    bool captured =
+        previous != null &&
+        previous['sourceHashes'] is Map<String, Object?> &&
+        Directory(
+          p.join(store.runWork(previous['id'] as String).path, 'snapshot'),
+        ).existsSync();
     String id = 'run-${DateTime.now().toUtc().microsecondsSinceEpoch}-$pid';
     List<Map<String, Object?>> jobsState = <Map<String, Object?>>[
       for (String key in plan.keys)
@@ -387,10 +393,12 @@ class ProjectBuildService {
       'memoryMiB': memory,
       'workers': workers,
       'packaging': packaging,
-      'changed': args.flag('changed'),
-      if (previous != null) 'retryOf': previous['id'],
-      if (previous != null) 'sourceHashes': previous['sourceHashes'],
-      if (previous != null) 'inputHashes': previous['inputHashes'],
+      'changed':
+          args.flag('changed') ||
+          (previous != null && !captured && previous['changed'] == true),
+      if (captured) 'retryOf': previous['id'],
+      if (captured) 'sourceHashes': previous['sourceHashes'],
+      if (captured) 'inputHashes': previous['inputHashes'],
     };
     projectAtomicJson(store.runFile(id), run);
     try {

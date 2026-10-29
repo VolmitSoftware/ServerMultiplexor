@@ -118,6 +118,28 @@ void main() {
     }
   });
 
+  test('delivery progress and failure remain visible after compilation', () {
+    Map<String, Object?> job = <String, Object?>{
+      'status': 'succeeded',
+      'deliveryStatus': 'running',
+      'currentTask': 'Delivering to exports',
+    };
+    ProjectDashboardRow row = ProjectDashboardRow(
+      project: 'example',
+      target: 'bukkit',
+      name: 'Example',
+      job: job,
+      registered: true,
+    );
+    expect(row.status, 'running');
+    expect(row.task, 'Delivering to exports');
+    job['deliveryStatus'] = 'failed';
+    job['deliveryError'] = 'Delivery to exports failed';
+    expect(row.status, 'failed');
+    expect(row.error, 'Delivery to exports failed');
+    expect(job['status'], 'succeeded');
+  });
+
   test('finished and interrupted run timers stop advancing', () {
     for (String status in <String>['succeeded', 'failed', 'cancelled']) {
       Map<String, Object?> completed = <String, Object?>{

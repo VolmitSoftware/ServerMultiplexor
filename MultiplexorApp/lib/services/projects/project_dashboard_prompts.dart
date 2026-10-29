@@ -58,7 +58,7 @@ class ProjectDashboardPrompts {
   ProjectDashboardPrompts(this.command);
 
   final ProjectDashboardCommand command;
-  String _packaging = 'local';
+  String _packaging = 'compact';
   bool _reuse = true;
 
   Future<List<String>?> request(

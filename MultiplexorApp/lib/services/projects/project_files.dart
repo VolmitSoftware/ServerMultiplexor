@@ -37,6 +37,43 @@ bool projectSourceEntry(String name) =>
 Future<String> projectFileHash(File file) async =>
     (await sha256.bind(file.openRead()).first).toString();
 
+void moveProjectFile(File source, String target) {
+  try {
+    source.renameSync(target);
+  } on FileSystemException catch (error) {
+    if (error.osError?.errorCode != (Platform.isWindows ? 17 : 18)) rethrow;
+    if (FileSystemEntity.typeSync(target, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      rethrow;
+    }
+    File temporary = File(
+      '$target.$pid.${DateTime.now().microsecondsSinceEpoch}.tmp',
+    )..createSync(exclusive: true);
+    bool installed = false;
+    try {
+      source.copySync(temporary.path);
+      RandomAccessFile copied = temporary.openSync(mode: FileMode.append);
+      try {
+        copied.flushSync();
+      } finally {
+        copied.closeSync();
+      }
+      if (FileSystemEntity.typeSync(target, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        throw FileSystemException('Move target appeared while copying', target);
+      }
+      temporary.renameSync(target);
+      installed = true;
+      source.deleteSync();
+    } on FileSystemException {
+      if (installed) File(target).deleteSync();
+      rethrow;
+    } finally {
+      if (temporary.existsSync()) temporary.deleteSync();
+    }
+  }
+}
+
 String projectDigest(Object? value) =>
     sha256.convert(utf8.encode(jsonEncode(value))).toString();
 
@@ -255,6 +292,7 @@ Future<String> projectDefinitionHash(Directory directory) async {
               entry.path.endsWith('.gradle.kts') ||
               entry.path.endsWith('.properties') ||
               entry.path.endsWith('.json') ||
+              entry.path.endsWith('.toml') ||
               p
                   .split(p.relative(entry.path, from: directory.path))
                   .contains('buildSrc'))) {

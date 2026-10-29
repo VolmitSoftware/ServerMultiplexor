@@ -48,7 +48,7 @@ void main() {
   }
 
   test(
-    'checked targets default to verified reuse and local packaging',
+    'checked targets default to verified reuse and compact packaging',
     () async {
       expect(await prompt('build', <String>['1']), <String>[
         'build',
@@ -56,7 +56,7 @@ void main() {
         'wormholes:bukkit,wormholes:fabric',
         '--changed',
         '--packaging',
-        'local',
+        'compact',
         '--jobs',
         '3',
         '--memory',
@@ -67,13 +67,13 @@ void main() {
     },
   );
 
-  test('packaging and reuse toggles retain the checked scope', () async {
+  test('local packaging and reuse toggles retain the checked scope', () async {
     expect(await prompt('build', <String>['5', '6', '1']), <String>[
       'build',
       '--targets',
       'wormholes:bukkit,wormholes:fabric',
       '--packaging',
-      'compact',
+      'local',
       '--jobs',
       '3',
       '--memory',

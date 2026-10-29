@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:multiplexor/services/projects/project_deployment.dart';
 import 'package:multiplexor/services/projects/project_files.dart';
+import 'package:multiplexor/services/projects/project_model.dart';
 import 'package:multiplexor/services/projects/project_store.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
@@ -321,6 +322,61 @@ void main() {
     );
   });
 
+  test(
+    'staging stays outside the export and retains sibling ownership',
+    () async {
+      saveRun('one', <Map<String, Object?>>[
+        await artifact('one', 'iris', 'fabric', contents: 'old'),
+        await artifact('one', 'iris', 'forge', contents: 'sibling'),
+      ]);
+      await configure();
+      await deployment.deploy('one', 'exports');
+      saveRun('two', <Map<String, Object?>>[
+        await artifact('two', 'iris', 'fabric', contents: 'new'),
+      ]);
+      Set<String> stages = <String>{};
+      ProjectDeployment observed = ProjectDeployment(
+        store,
+        moveFile: (File source, String target) {
+          String temporary = p.isWithin(destination.path, source.path)
+              ? target
+              : source.path;
+          expect(p.isWithin(destination.path, temporary), isFalse);
+          stages.add(p.dirname(temporary));
+          moveProjectFile(source, target);
+        },
+      );
+      await observed.deploy('two', 'exports');
+      expect(stages, hasLength(1));
+      expect(Directory(stages.single).existsSync(), isFalse);
+      expect(
+        File(p.join(destination.path, 'iris-fabric.jar')).readAsStringSync(),
+        'new',
+      );
+      expect(
+        File(p.join(destination.path, 'iris-forge.jar')).readAsStringSync(),
+        'sibling',
+      );
+      List<Map<String, Object?>> entries =
+          (projectReadJson(
+                    File(
+                      p.join(
+                        destination.path,
+                        '.multiplexor-project-artifacts.json',
+                      ),
+                    ),
+                  )['artifacts']
+                  as List<Object?>)
+              .map(projectObject)
+              .toList();
+      expect(entries, hasLength(2));
+      expect(
+        entries.map((Map<String, Object?> entry) => entry['target']),
+        unorderedEquals(<String>['fabric', 'forge']),
+      );
+    },
+  );
+
   test('unmanaged filename collision is never overwritten', () async {
     saveRun('one', <Map<String, Object?>>[
       await artifact('one', 'iris', 'bukkit'),
@@ -431,6 +487,113 @@ void main() {
         target: 'iris:first',
       );
       expect((result['actions'] as List<Object?>).length, 1);
+    },
+  );
+
+  test('dropins keep one project filename across artifact versions', () async {
+    Map<String, Object?> configured = await deployment.configure(
+      'shared',
+      dropins: true,
+      platform: 'plugin',
+      minecraft: '26.3',
+    );
+    Directory shared = Directory(configured['path'] as String);
+    for (String version in <String>['v1', 'v2']) {
+      saveRun(version, <Map<String, Object?>>[
+        await artifact(
+          version,
+          'iris',
+          'bukkit',
+          filename: 'iris-$version.jar',
+          contents: version,
+        ),
+      ]);
+      Map<String, Object?> result = await deployment.deploy(version, 'shared');
+      expect(File(p.join(shared.path, 'iris.jar')).readAsStringSync(), version);
+      expect(
+        shared
+            .listSync()
+            .whereType<File>()
+            .map((File file) => p.basename(file.path))
+            .where((String name) => name.endsWith('.jar')),
+        <String>['iris.jar'],
+      );
+      Map<String, Object?> action = projectObject(
+        (result['actions'] as List<Object?>).single,
+      );
+      expect(action['file'], 'iris.jar');
+      expect(action['action'], version == 'v1' ? 'install' : 'replace');
+      Map<String, Object?> manifest = projectReadJson(
+        File(p.join(shared.path, '.multiplexor-project-artifacts.json')),
+      );
+      Map<String, Object?> owned = projectObject(
+        (manifest['artifacts'] as List<Object?>).single,
+      );
+      expect(owned['file'], 'iris.jar');
+      expect(owned['runId'], version);
+    }
+  });
+
+  test(
+    'dropins preserve the existing managed filename for a project',
+    () async {
+      Map<String, Object?> configured = await deployment.configure(
+        'shared',
+        dropins: true,
+        platform: 'plugin',
+        minecraft: '26.3',
+      );
+      Directory shared = Directory(configured['path'] as String);
+      File previous = File(p.join(shared.path, 'Iris.jar'))
+        ..writeAsStringSync('previous');
+      File manifest = File(
+        p.join(shared.path, '.multiplexor-project-artifacts.json'),
+      );
+      projectAtomicJson(manifest, <String, Object?>{
+        'schema': 1,
+        'artifacts': <Map<String, Object?>>[
+          <String, Object?>{
+            'file': 'Iris.jar',
+            'sha256': await projectFileHash(previous),
+            'size': previous.lengthSync(),
+            'project': 'iris',
+            'target': 'first',
+            'runId': 'previous',
+          },
+        ],
+      });
+      saveRun('current', <Map<String, Object?>>[
+        await artifact(
+          'current',
+          'iris',
+          'second',
+          filename: 'iris-v2.jar',
+          contents: 'current',
+        ),
+      ]);
+      Map<String, Object?> result = await deployment.deploy(
+        'current',
+        'shared',
+      );
+      expect(previous.readAsStringSync(), 'current');
+      expect(
+        shared
+            .listSync()
+            .whereType<File>()
+            .map((File file) => p.basename(file.path))
+            .where((String name) => name.endsWith('.jar')),
+        <String>['Iris.jar'],
+      );
+      expect(
+        projectObject((result['actions'] as List<Object?>).single)['file'],
+        'Iris.jar',
+      );
+      Map<String, Object?> owned = projectObject(
+        (projectReadJson(manifest)['artifacts'] as List<Object?>).single,
+      );
+      expect(owned['file'], 'Iris.jar');
+      expect(owned['target'], 'second');
+      expect(owned['runId'], 'current');
     },
   );
 

@@ -75,9 +75,13 @@ class ProjectDashboardRow {
   final bool registered;
 
   String get key => '$project:$target';
-  String get status => projectText(job['status'] ?? 'ready');
+  String get status => switch (job['deliveryStatus']) {
+    'running' => 'running',
+    'failed' => 'failed',
+    _ => projectText(job['status'] ?? 'ready'),
+  };
   String get task => projectText(job['currentTask']);
-  String get error => projectText(job['error']);
+  String get error => projectText(job['error'] ?? job['deliveryError']);
   String get logPath => projectText(job['logPath']);
 
   String elapsed(DateTime now) {

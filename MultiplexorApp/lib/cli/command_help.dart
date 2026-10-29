@@ -379,6 +379,15 @@ void writeCommandHelp(
     write('  ./start.sh ${group.command} $form');
   }
   write('');
+  if (group.command == 'projects') {
+    write(
+      'Build packaging defaults to compact; use --packaging local for faster compression.',
+    );
+    write(
+      'Retry preserves the saved packaging mode unless --packaging overrides it.',
+    );
+    write('');
+  }
   write('Run ./start.sh help for the full command list.');
 }
 
