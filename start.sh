@@ -145,8 +145,20 @@ ensure_harness() {
   # The tracked lockfile keeps launcher installs and `gameplay setup` on the
   # same dependency versions. npm writes its installed lock after success.
   local -a installer=(npm ci --no-audit --no-fund)
+  # Unless downloads are kept, npm downloads through a throwaway cache so the
+  # install does not grow ~/.npm.
+  local storage="$ROOT_DIR/.multiplexor/storage.json"
+  local keep='"keepDownloads"[[:space:]]*:[[:space:]]*true'
+  local cache=''
+  if [[ ! -f "$storage" || ! "$(<"$storage")" =~ $keep ]]; then
+    cache="$(mktemp -d "${TMPDIR:-/tmp}/multiplexor-npm-cache-XXXXXX" 2>/dev/null)" || cache=''
+    [[ -n "$cache" ]] && installer+=(--cache "$cache")
+  fi
 
-  if ! (cd "$HARNESS_DIR" && "${installer[@]}" >&2); then
+  local status=0
+  (cd "$HARNESS_DIR" && "${installer[@]}" >&2) || status=$?
+  [[ -n "$cache" ]] && rm -rf "$cache"
+  if [[ "$status" != '0' ]]; then
     warn 'the Mineflayer harness failed to install; run ./start.sh doctor'
     return 1
   fi
@@ -158,7 +170,7 @@ report_runtimes() {
   command -v java >/dev/null 2>&1 ||
     warn 'java is not on PATH; servers cannot be started (needs JDK 21+)'
   command -v git >/dev/null 2>&1 ||
-    warn 'git is not on PATH; `repos sync` will not work'
+    warn 'git is not on PATH; upstream version lookup has no release-branch fallback'
 }
 
 # True when the command being run is a gameplay one. The value after --root

@@ -36,7 +36,6 @@ class ConsumerService {
     final bool isPlugin = profile == ConsumerProfile.plugin;
     final dirs = <String>[
       root,
-      p.join(root, 'repos'),
       p.join(root, 'builds'),
       p.join(root, 'instances'),
       p.join(root, 'state'),

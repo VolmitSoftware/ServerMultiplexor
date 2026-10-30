@@ -62,9 +62,13 @@ class ProjectWorker {
       run['workerPid'] = pid;
       _save();
       heartbeat = Timer.periodic(const Duration(seconds: 2), (_) => _save());
+      await _cleanStorage(store.emptyTrash);
       await _capture();
       await _inspectTools();
-      cache = ProjectGradleCache(store)..prepare();
+      cache = ProjectGradleCache(
+        store,
+        run['cache'] == true ? store.workDirectory : work,
+      )..prepare();
       if (cancelled) {
         for (Map<String, Object?> job in jobs) {
           job['status'] = 'cancelled';
@@ -112,7 +116,9 @@ class ProjectWorker {
       if (ownsRun) {
         run['finishedAt'] = DateTime.now().toUtc().toIso8601String();
         _save();
-        await _cleanStorage(store.retainRuns);
+        await _cleanStorage(
+          () => store.retainRuns(cache: run['cache'] == true),
+        );
       }
       ownership.closeSync();
       if (ownsRun) await _cleanStorage(store.emptyTrash);

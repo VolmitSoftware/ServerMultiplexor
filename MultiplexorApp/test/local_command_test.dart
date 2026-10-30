@@ -116,7 +116,6 @@ void main() {
       'instance': 'list',
       'runtime': 'status',
       'build': 'list',
-      'repos': 'sync',
       'plugins': 'show-source',
       'mods': 'show-source',
       'config': 'localize',

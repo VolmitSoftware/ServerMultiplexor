@@ -37,6 +37,7 @@ import 'networks/network_definition.dart';
 import 'passthrough_service.dart';
 import 'projects/project_build_service.dart';
 import 'projects/project_dashboard.dart';
+import 'storage_settings.dart';
 import 'profiling/remote_profiler_models.dart';
 import 'pterodactyl/pterodactyl_console_protocol.dart';
 import 'pterodactyl/pterodactyl_console_session.dart';
@@ -5109,6 +5110,9 @@ class InteractiveWizard {
       final String profile = settings.profile ?? 'aikar';
       final String wrap = settings.consoleWrap ?? 'off';
       final String logFormat = settings.consoleLogFormat ?? 'minimal';
+      final bool keepDownloads = StorageSettings(
+        passthrough.context.metadataDir,
+      ).keepDownloads;
 
       final List<MenuEntry<_BuildAct>> entries = <MenuEntry<_BuildAct>>[
         const MenuEntry<_BuildAct>.separator('build'),
@@ -5131,9 +5135,12 @@ class InteractiveWizard {
           detail: 'refresh every platform jar, spigot included',
         ),
         const MenuEntry<_BuildAct>('Show build cache', value: _BuildAct.cache),
-        const MenuEntry<_BuildAct>(
-          'Sync upstream repos',
-          value: _BuildAct.repos,
+        MenuEntry<_BuildAct>(
+          'Keep downloads cached',
+          value: _BuildAct.keepDownloads,
+          detail: keepDownloads
+              ? 'on: keep build caches and Push backups'
+              : 'off: delete downloads after use',
         ),
         const MenuEntry<_BuildAct>.separator('dropins'),
         MenuEntry<_BuildAct>(
@@ -5195,9 +5202,12 @@ class InteractiveWizard {
           await _shellRun(<String>['build', 'list']);
           await Ui.pause();
           break;
-        case _BuildAct.repos:
-          Ui.doing('Syncing upstream repos');
-          await _shellRun(<String>['repos', 'sync', 'all']);
+        case _BuildAct.keepDownloads:
+          await _shellRun(<String>[
+            'storage',
+            'keep-downloads',
+            keepDownloads ? 'off' : 'on',
+          ]);
           await Ui.pause();
           break;
         case _BuildAct.sync:
@@ -5769,7 +5779,7 @@ enum _BuildAct {
   build,
   pullAll,
   cache,
-  repos,
+  keepDownloads,
   sync,
   source,
   heap,

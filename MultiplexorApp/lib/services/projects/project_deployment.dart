@@ -436,8 +436,12 @@ class ProjectDeployment {
         }
         _regularFileOrMissing(source);
         File file = File(source);
-        if (!file.existsSync() ||
-            file.lengthSync() != artifact['size'] ||
+        if (!file.existsSync()) {
+          throw StateError(
+            'Build artifacts for $runId were cleared after delivery; rebuild the target or turn on storage keep-downloads',
+          );
+        }
+        if (file.lengthSync() != artifact['size'] ||
             await projectFileHash(file) != _hash(artifact['sha256'])) {
           throw StateError('Build artifact changed: $source');
         }

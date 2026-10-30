@@ -217,6 +217,19 @@ List<CachedBuildJar> planBuildPrune({
   return List<CachedBuildJar>.unmodifiable(stale);
 }
 
+/// Jars nothing needs while downloads are not kept: everything except
+/// [keepPaths] and the `latest.jar` pointer.
+List<CachedBuildJar> planUnusedBuildPrune({
+  required List<CachedBuildJar> jars,
+  Set<String> keepPaths = const <String>{},
+}) {
+  final List<CachedBuildJar> stale = <CachedBuildJar>[
+    for (final CachedBuildJar jar in jars)
+      if (jar.name != 'latest.jar' && !keepPaths.contains(jar.path)) jar,
+  ]..sort((CachedBuildJar a, CachedBuildJar b) => a.path.compareTo(b.path));
+  return List<CachedBuildJar>.unmodifiable(stale);
+}
+
 /// Human phrasing for a cached-build age: `never`, `just now`, `12m ago`,
 /// `3h ago`, `2d ago`.
 String formatBuildAge(Duration? age) {

@@ -8,6 +8,7 @@ import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_link_store
 import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_models.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_path_policy.dart';
 import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_service.dart';
+import 'package:multiplexor/services/storage_settings.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
@@ -561,6 +562,7 @@ void main() {
     PterodactylTransferService createService({
       Duration remoteReadyTimeout = const Duration(milliseconds: 10),
       List<Duration>? observedDelays,
+      Future<void> Function(Directory directory)? temporaryDirectoryDeleter,
     }) => PterodactylTransferService.withGateways(
       metadataDirectoryPath: p.join(temporary.path, '.multiplexor'),
       remoteGateway: remote,
@@ -570,6 +572,7 @@ void main() {
       delay: (Duration duration) async {
         observedDelays?.add(duration);
       },
+      temporaryDirectoryDeleter: temporaryDirectoryDeleter,
     );
 
     setUp(() {
@@ -703,6 +706,9 @@ void main() {
     test(
       'update push preserves Remote-only files and restores runtime',
       () async {
+        StorageSettings(
+          p.join(temporary.path, '.multiplexor'),
+        ).saveKeepDownloads(true);
         final PterodactylLocalInstance instance = local.seed('local');
         _write(instance.path, 'server.properties', 'new');
         _write(instance.path, 'plugins/example.jar', 'plugin');
@@ -869,6 +875,135 @@ void main() {
         expect(_json(manifests.single.path)['status'], 'rolled_back');
       },
     );
+
+    group('Push backup retention', () {
+      Future<PterodactylTransferResult> pushChangedProperties(
+        PterodactylTransferService transfers,
+      ) async {
+        final PterodactylLocalInstance instance = local.seed('local');
+        _write(instance.path, 'server.properties', 'new');
+        _write(remote.folder.path, 'server.properties', 'old');
+        final PterodactylTransferPlan plan = await transfers.planPush(
+          localInstanceName: 'local',
+          profileId: 'panel',
+          serverIdentifier: 'abc123',
+        );
+        return transfers.push(
+          localInstanceName: 'local',
+          profileId: 'panel',
+          serverIdentifier: 'abc123',
+          expectedPlanToken: plan.confirmationToken,
+        );
+      }
+
+      test(
+        'successful push removes its backup when downloads are not kept',
+        () async {
+          final PterodactylTransferResult result = await pushChangedProperties(
+            service,
+          );
+
+          expect(
+            File(
+              p.join(remote.folder.path, 'server.properties'),
+            ).readAsStringSync(),
+            'new',
+          );
+          expect(result.backupPath, isNull);
+          expect(result.recoveryManifestPath, isNull);
+          expect(_backupRoots(temporary.path), isEmpty);
+          expect(
+            result.warnings.where(
+              (String warning) => warning.contains('backup cleanup failed'),
+            ),
+            isEmpty,
+          );
+        },
+      );
+
+      test(
+        'successful push keeps its backup when downloads are kept',
+        () async {
+          StorageSettings(
+            p.join(temporary.path, '.multiplexor'),
+          ).saveKeepDownloads(true);
+
+          final PterodactylTransferResult result = await pushChangedProperties(
+            service,
+          );
+
+          expect(result.backupPath, isNotNull);
+          expect(
+            File(
+              p.join(result.backupPath!, 'server.properties'),
+            ).readAsStringSync(),
+            'old',
+          );
+          expect(_json(result.recoveryManifestPath!)['status'], 'completed');
+          expect(_backupRoots(temporary.path), hasLength(1));
+        },
+      );
+
+      test(
+        'failed push keeps its backup when downloads are not kept',
+        () async {
+          remote.failApplyAfterMutation = true;
+
+          await expectLater(pushChangedProperties(service), throwsStateError);
+
+          final List<Directory> roots = _backupRoots(temporary.path);
+          expect(roots, hasLength(1));
+          expect(
+            File(
+              p.join(roots.single.path, 'files', 'server.properties'),
+            ).readAsStringSync(),
+            'old',
+          );
+          expect(_latestRecoveryStatus(temporary.path), 'rolled_back');
+        },
+      );
+
+      test(
+        'backup removal failure warns without failing a committed push',
+        () async {
+          final String backups = p.join(
+            temporary.path,
+            '.multiplexor',
+            'pterodactyl-transfers',
+            'backups',
+          );
+          final PterodactylTransferService transfers = createService(
+            temporaryDirectoryDeleter: (Directory directory) async {
+              if (p.isWithin(backups, directory.path)) {
+                throw FileSystemException(
+                  'Directory not empty',
+                  directory.path,
+                );
+              }
+              await directory.delete(recursive: true);
+            },
+          );
+
+          final PterodactylTransferResult result = await pushChangedProperties(
+            transfers,
+          );
+
+          expect(
+            File(
+              p.join(remote.folder.path, 'server.properties'),
+            ).readAsStringSync(),
+            'new',
+          );
+          expect(result.backupPath, isNull);
+          expect(result.recoveryManifestPath, isNull);
+          expect(
+            result.warnings,
+            contains(contains('Remote backup cleanup failed')),
+          );
+          expect(_backupRoots(temporary.path), hasLength(1));
+        },
+      );
+    });
 
     test('no-op push does not stop or create a backup', () async {
       final PterodactylLocalInstance instance = local.seed('local');
@@ -1879,6 +2014,15 @@ String _latestRecoveryStatus(String temporaryPath) {
           .toList(growable: false);
   expect(manifests, hasLength(1));
   return _json(manifests.single.path)['status']! as String;
+}
+
+List<Directory> _backupRoots(String temporaryPath) {
+  final Directory backups = Directory(
+    p.join(temporaryPath, '.multiplexor', 'pterodactyl-transfers', 'backups'),
+  );
+  return backups.existsSync()
+      ? backups.listSync().whereType<Directory>().toList(growable: false)
+      : <Directory>[];
 }
 
 Future<void> _waitForApply(

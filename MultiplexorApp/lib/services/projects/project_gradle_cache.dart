@@ -19,13 +19,12 @@ if (GradleVersion.current() >= GradleVersion.version('8.0')) {
 ''';
 
 class ProjectGradleCache {
-  ProjectGradleCache(this.store);
+  ProjectGradleCache(this.store, this.root);
 
   final ProjectStore store;
-  Directory get home =>
-      Directory(p.join(store.workDirectory.path, 'gradle-home'));
-  Directory get taskCache =>
-      Directory(p.join(store.workDirectory.path, 'task-cache'));
+  final Directory root;
+  Directory get home => Directory(p.join(root.path, 'gradle-home'));
+  Directory get taskCache => Directory(p.join(root.path, 'task-cache'));
 
   void prepare() {
     for (Directory directory in <Directory>[

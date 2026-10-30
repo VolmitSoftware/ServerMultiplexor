@@ -271,45 +271,6 @@ void main() {
     skip: Platform.isWindows ? 'Mocks the tmux backend' : false,
   );
 
-  test('repo sync refills independent work with four workers', () async {
-    final ManagerContext context = ManagerContext(
-      rootDir: root.path,
-      verbose: false,
-    );
-    final Completer<void> fourStarted = Completer<void>();
-    final Completer<void> release = Completer<void>();
-    int active = 0;
-    int peak = 0;
-    int total = 0;
-    final NativeCommandService repos = NativeCommandService(
-      context: context,
-      consumerService: ConsumerService(context),
-      processExecutor: (String executable, List<String> args) async {
-        expect(executable, 'git');
-        expect(args.first, 'clone');
-        total++;
-        active++;
-        if (active > peak) peak = active;
-        if (total == 4) fourStarted.complete();
-        await release.future;
-        active--;
-        return ProcessResult(0, 0, '', '');
-      },
-    );
-    final Future<CapturedResult> result = repos.execute(<String>[
-      'repos',
-      'sync',
-      'all',
-    ], stream: false);
-    await fourStarted.future.timeout(const Duration(seconds: 3));
-    expect(total, 4);
-    release.complete();
-    expect((await result).exitCode, 0);
-    expect(total, 5);
-    expect(peak, 4);
-    repos.disposeRcon();
-  });
-
   test('invalid concurrency rejects before any mutation', () async {
     await create('a');
     for (final String value in <String>['0', '9', 'many']) {

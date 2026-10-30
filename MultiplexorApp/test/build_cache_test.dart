@@ -173,6 +173,42 @@ purpur\tpurpur-1.21.11-2233.jar\t90000
     });
   });
 
+  group('planUnusedBuildPrune', () {
+    CachedBuildJar jar(String name, int day) => CachedBuildJar(
+      path: '/builds/paper/$name',
+      name: name,
+      modified: DateTime.utc(2026, 7, day),
+    );
+
+    test('removes every jar that is not kept, across versions', () {
+      final List<CachedBuildJar> stale = planUnusedBuildPrune(
+        jars: <CachedBuildJar>[
+          jar('paper-1.20.1-196.jar', 1),
+          jar('paper-26.2-135.jar', 2),
+          jar('paper-26.3-230.jar', 3),
+          jar('latest.jar', 4),
+        ],
+        keepPaths: <String>{'/builds/paper/paper-26.3-230.jar'},
+      );
+
+      expect(stale.map((CachedBuildJar jar) => jar.name), <String>[
+        'paper-1.20.1-196.jar',
+        'paper-26.2-135.jar',
+      ]);
+    });
+
+    test('removes unreferenced content-addressed custom jars', () {
+      final List<CachedBuildJar> stale = planUnusedBuildPrune(
+        jars: <CachedBuildJar>[jar('0b56ad54.jar', 1), jar('1373c651.jar', 2)],
+        keepPaths: <String>{'/builds/paper/1373c651.jar'},
+      );
+
+      expect(stale.map((CachedBuildJar jar) => jar.name), <String>[
+        '0b56ad54.jar',
+      ]);
+    });
+  });
+
   group('BuildCacheEntry.matchesVersion', () {
     const BuildCacheEntry entry = BuildCacheEntry(
       type: 'paper',

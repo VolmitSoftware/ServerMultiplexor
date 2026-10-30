@@ -51,7 +51,7 @@ printf '{}\n' >"$HARNESS_DIR/node_modules/.package-lock.json"
 touch -t 200001010000 "$APP_DIR/pubspec.yaml" "$HARNESS_DIR/package.json" "$HARNESS_DIR/package-lock.json"
 touch -t 200101010000 "$HARNESS_DIR/node_modules/.package-lock.json"
 
-for tool in bash dirname mkdir cp chmod touch cat cmp rm find sed mv; do
+for tool in bash dirname mkdir cp chmod touch cat cmp rm find sed mv mktemp; do
   ln -s "$(command -v "$tool")" "$BIN_DIR/$tool"
 done
 export PATH="$BIN_DIR"
@@ -176,12 +176,17 @@ run_launcher gameplay doctor
 assert_equal 'absent' "$([[ -f "$TEMP_ROOT/npm.log" ]] && printf present || printf absent)" 'fresh installed lock skips npm'
 rm "$HARNESS_DIR/node_modules/.package-lock.json"
 run_launcher gameplay doctor
-assert_equal 'ci --no-audit --no-fund' "$(cat "$TEMP_ROOT/npm.log")" 'missing installed lock uses npm ci'
+npm_arguments="$(cat "$TEMP_ROOT/npm.log")"
+assert_equal 'ci --no-audit --no-fund --cache' "${npm_arguments% *}" 'missing installed lock uses npm ci with a temporary cache'
+assert_equal absent "$([[ -e "${npm_arguments##* }" ]] && printf present || printf absent)" 'the temporary npm cache is removed after install'
 rm "$TEMP_ROOT/npm.log"
+mkdir -p "$WORKSPACE/.multiplexor"
+printf '{"schema":1,"keepDownloads":true}\n' >"$WORKSPACE/.multiplexor/storage.json"
 touch -t 200001010000 "$HARNESS_DIR/node_modules/.package-lock.json"
 touch -t 200201010000 "$HARNESS_DIR/package-lock.json"
 run_launcher gameplay doctor
-assert_equal 'ci --no-audit --no-fund' "$(cat "$TEMP_ROOT/npm.log")" 'changed package lock refreshes npm dependencies'
+assert_equal 'ci --no-audit --no-fund' "$(cat "$TEMP_ROOT/npm.log")" 'changed package lock refreshes npm dependencies through the kept npm cache'
+rm "$WORKSPACE/.multiplexor/storage.json"
 
 MULTIPLEXOR_REBUILD=1 run_launcher --version
 assert_equal "$BIN_DIR/dart pub get

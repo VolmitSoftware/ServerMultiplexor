@@ -169,7 +169,6 @@ const Map<String, String> _defaults = <String, String>{
   'instance': 'list',
   'runtime': 'status',
   'build': 'list',
-  'repos': 'sync',
   'plugins': 'show-source',
   'mods': 'show-source',
   'config': 'localize',
@@ -179,6 +178,7 @@ const Map<String, String> _defaults = <String, String>{
   'gameplay': 'doctor',
   'network': 'list',
   'projects': 'list',
+  'storage': 'show',
 };
 
 const Set<String> _internal = <String>{
@@ -269,7 +269,6 @@ const Map<String, List<String>> _positionalOptions = <String, List<String>>{
   'build list-all': <String>['type'],
   'build prune': <String>['type'],
   'build cache-info': <String>['type'],
-  'repos sync': <String>['target'],
   'plugins sync': <String>['target'],
   'mods sync': <String>['target'],
   'plugins iris-packs-link': <String>['target'],
@@ -362,7 +361,6 @@ const Map<String, int> _maximumPositionals = <String, int>{
   'runtime settings set-preset': 1,
   'runtime settings set-wrap': 1,
   'runtime settings set-log-format': 1,
-  'repos sync': 1,
   'plugins sync': 1,
   'plugins copy': 1,
   'plugins watch-start': 0,
@@ -407,6 +405,7 @@ const Map<String, int> _maximumPositionals = <String, int>{
   'gameplay prepare': 1,
   'gameplay run': 2,
   'build test-latest': 0,
+  'storage keep-downloads': 1,
 };
 
 const Map<String, String> _commandAliases = <String, String>{
@@ -418,6 +417,7 @@ const Map<String, String> _commandAliases = <String, String>{
 };
 
 const Map<String, int> _minimumPositionals = <String, int>{
+  'storage keep-downloads': 1,
   'projects init': 1,
   'projects scan': 1,
   'projects logs': 1,

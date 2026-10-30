@@ -170,6 +170,32 @@ void main() {
     });
   }
 
+  test('clearing stored builds leaves only run logs', () async {
+    String work = service.store.workDirectory.path;
+    for (String path in <String>[
+      'gradle-home/caches/module.jar',
+      'task-cache/entry.bin',
+      'discovery-abc/sources/alpha/build.gradle',
+      'runs/run-old/artifacts/alpha/plugin/alpha.jar',
+      'runs/run-old/snapshot/alpha/build.gradle',
+      'runs/run-old/logs/alpha/plugin.log',
+    ]) {
+      File(p.join(work, path))
+        ..createSync(recursive: true)
+        ..writeAsStringSync(path);
+    }
+    projectAtomicJson(service.store.runFile('run-old'), <String, Object?>{
+      'schema': 1,
+      'id': 'run-old',
+      'status': 'succeeded',
+      'createdAt': '2026-01-01T00:00:00.000Z',
+      'jobs': <Object?>[],
+    });
+    expect(await service.clearCache(), isTrue);
+    expect(_tree(work), <String>['runs/run-old/logs/alpha/plugin.log']);
+    expect(service.store.runs().single['id'], 'run-old');
+  });
+
   test(
     'saved memory limits reject oversized targets before creating a run',
     () async {
@@ -238,6 +264,9 @@ void main() {
         service.store.limitsFile,
         ProjectBuildLimits(jobs: 2, memoryMiB: 2048, workers: 3).toJson(),
       );
+      File stale = File(
+        p.join(service.store.workDirectory.path, 'gradle-home', 'stale.bin'),
+      )..createSync(recursive: true);
       Map<String, Object?> first = await _runCli(executable, service, <String>[
         'build',
         '--targets',
@@ -255,6 +284,15 @@ void main() {
       expect(first['memoryMiB'], 2048);
       expect(first['workers'], 3);
       expect(first['packaging'], 'compact');
+      expect(first['cache'], isFalse);
+      expect(stale.existsSync(), isFalse);
+      expect(
+        await _settledTree(
+          service.store.workDirectory.path,
+          'runs/${first['id']}/logs/',
+        ),
+        isEmpty,
+      );
 
       projectAtomicJson(
         service.store.limitsFile,
@@ -272,6 +310,7 @@ void main() {
       expect(retry['workers'], 3);
       expect(retry['packaging'], 'compact');
 
+      service.storage.saveKeepDownloads(true);
       Map<String, Object?> overridden =
           await _runCli(executable, service, <String>[
             'build',
@@ -294,6 +333,7 @@ void main() {
       expect(overridden['memoryMiB'], 1024);
       expect(overridden['workers'], 2);
       expect(overridden['packaging'], 'local');
+      expect(overridden['cache'], isTrue);
       Map<String, Object?> localRetry = await _runCli(
         executable,
         service,
@@ -408,6 +448,29 @@ Map<String, Object?> _project(
       },
   ],
 };
+
+List<String> _tree(String root) {
+  List<String> files = <String>[
+    for (FileSystemEntity entry in Directory(
+      root,
+    ).listSync(recursive: true, followLinks: false))
+      if (entry is! Directory) p.relative(entry.path, from: root),
+  ]..sort();
+  return files;
+}
+
+Future<List<String>> _settledTree(String root, String kept) async {
+  DateTime deadline = DateTime.now().add(const Duration(seconds: 30));
+  while (true) {
+    List<String> remaining = _tree(
+      root,
+    ).where((String path) => !path.startsWith(kept)).toList();
+    if (remaining.isEmpty || DateTime.now().isAfter(deadline)) {
+      return remaining;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+}
 
 Future<Map<String, Object?>> _runCli(
   String executable,

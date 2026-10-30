@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
+import '../storage_settings.dart';
 import 'project_build_limits.dart';
 import 'project_deployment.dart';
 import 'project_files.dart';
@@ -16,9 +17,11 @@ import 'project_worker.dart';
 
 class ProjectBuildService {
   ProjectBuildService({required String rootDirectory})
-    : store = ProjectStore(rootDirectory);
+    : store = ProjectStore(rootDirectory),
+      storage = StorageSettings(p.join(rootDirectory, '.multiplexor'));
 
   final ProjectStore store;
+  final StorageSettings storage;
 
   ProjectBuildLimits limits() => store.limitsFile.existsSync()
       ? ProjectBuildLimits.fromJson(projectReadJson(store.limitsFile))
@@ -246,6 +249,13 @@ class ProjectBuildService {
     });
   }
 
+  Future<bool> clearCache() => store.locked(() async {
+    if (status()['activeRunId'] != null) return false;
+    store.clearCache();
+    await store.emptyTrash();
+    return true;
+  });
+
   ProjectPlan _plan(ProjectArguments args) {
     List<BuildProject> projects = store.projects();
     if (projects.isEmpty) {
@@ -338,6 +348,8 @@ class ProjectBuildService {
       );
     }
     await _recoverInterrupted();
+    bool cache = storage.keepDownloads;
+    if (!cache) store.clearCache();
     ProjectBuildLimits configured = previous == null
         ? limits()
         : ProjectBuildLimits(
@@ -393,6 +405,7 @@ class ProjectBuildService {
       'memoryMiB': memory,
       'workers': workers,
       'packaging': packaging,
+      'cache': cache,
       'changed':
           args.flag('changed') ||
           (previous != null && !captured && previous['changed'] == true),

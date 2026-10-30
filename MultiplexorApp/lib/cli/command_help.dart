@@ -178,9 +178,7 @@ const List<CommandHelpGroup> commandHelpGroups = <CommandHelpGroup>[
     'test-latest [--spigot-mc <version>]',
     'prune [all|type]',
   ]),
-  CommandHelpGroup('repos', <String>[
-    'sync [all|paper|purpur|folia|canvas|leaf]',
-  ]),
+  CommandHelpGroup('storage', <String>['show', 'keep-downloads <on|off>']),
   CommandHelpGroup('plugins', <String>[
     'show-source',
     'sync [instance|--all] [--clean]',
@@ -385,6 +383,18 @@ void writeCommandHelp(
     );
     write(
       'Retry preserves the saved packaging mode unless --packaging overrides it.',
+    );
+    write(
+      'Unless storage keep-downloads is on, each build clears Gradle caches, sources and artifacts before and after it runs, keeping only logs.',
+    );
+    write('');
+  }
+  if (group.command == 'storage') {
+    write(
+      'Keep downloads cached is off by default: project builds keep only logs, server builds keep the latest build of each platform plus the jars instances use, and a successful Remote Push removes its pre-Push backup.',
+    );
+    write(
+      'Turning it off clears what is already stored the same way. Turn it on to keep Gradle caches, project runs, superseded server builds, BuildTools and Push backups.',
     );
     write('');
   }

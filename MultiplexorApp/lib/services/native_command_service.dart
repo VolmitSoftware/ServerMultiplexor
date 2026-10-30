@@ -14,6 +14,7 @@ import '../models/neoforge_version.dart';
 import '../models/gameplay_swarm.dart';
 import '../models/gameplay_sessions.dart';
 import '../models/server_minecraft_version.dart';
+import '../models/upstream_release_branches.dart';
 import '../utils/async_work_pool.dart';
 import '../utils/delete_path.dart';
 import '../utils/duration_format.dart';
@@ -48,6 +49,7 @@ import '../models/backup_summary.dart';
 import 'runtime_state.dart';
 import 'runtime_stop.dart';
 import 'server_ping.dart';
+import 'storage_settings.dart';
 
 part 'native_command_help.dart';
 part 'native_cli_output.dart';
@@ -283,13 +285,11 @@ class NativeCommandService {
       case 'build':
         return _dispatchBuild(rest, io);
       case 'projects':
-        return ProjectBuildService(rootDirectory: context.rootDir).command(
-          rest,
-          output: io.write,
-          error: io.error,
-        );
-      case 'repos':
-        return _dispatchRepos(rest, io);
+        return ProjectBuildService(
+          rootDirectory: context.rootDir,
+        ).command(rest, output: io.write, error: io.error);
+      case 'storage':
+        return _dispatchStorage(rest, io);
       default:
         throw _NativeCommandException('Unknown command: $command', 2);
     }
@@ -2082,21 +2082,50 @@ class NativeCommandService {
     }
   }
 
-  Future<int> _dispatchRepos(List<String> args, _NativeIoBuffer io) async {
-    final sub = args.isEmpty ? 'sync' : args.first;
-    final rest = args.isEmpty ? const <String>[] : args.sublist(1);
-    final profile = _activeConsumer;
-
-    switch (sub) {
-      case 'sync':
-        final target = rest.isEmpty ? 'all' : rest.first;
-        await _reposSync(profile, target, io);
+  Future<int> _dispatchStorage(List<String> args, _NativeIoBuffer io) async {
+    final StorageSettings settings = StorageSettings(context.metadataDir);
+    switch (args.firstOrNull ?? 'show') {
+      case 'show':
+        io.write(
+          'Keep downloads cached: ${settings.keepDownloads ? 'on' : 'off'}',
+        );
+        return 0;
+      case 'keep-downloads':
+        final bool keep = switch (args.length == 2 ? args[1] : null) {
+          'on' => true,
+          'off' => false,
+          _ => throw _NativeCommandException(
+            'Usage: storage keep-downloads <on|off>',
+            2,
+          ),
+        };
+        settings.saveKeepDownloads(keep);
+        io.write('[OK] Keep downloads cached: ${keep ? 'on' : 'off'}');
+        if (!keep) {
+          await _clearStoredDownloads(io);
+        }
         return 0;
       default:
         throw _NativeCommandException(
-          'Usage: repos sync [all|paper|purpur|folia|canvas|leaf]',
+          'Usage: storage [show|keep-downloads <on|off>]',
           2,
         );
+    }
+  }
+
+  Future<void> _clearStoredDownloads(_NativeIoBuffer io) async {
+    if (!await ProjectBuildService(
+      rootDirectory: context.rootDir,
+    ).clearCache()) {
+      io.write(
+        '[INFO] A project build is running; its caches clear when the next build starts',
+      );
+    }
+    for (final ConsumerProfile consumer in ConsumerProfile.values) {
+      _pruneBuilds(consumer, null, io, qualifyConsumer: true);
+      for (final String type in _allBuildTypes) {
+        _pruneBuildToolsWorkDirs(consumer, type, io, qualifyConsumer: true);
+      }
     }
   }
 
@@ -2803,74 +2832,6 @@ class NativeCommandService {
     return Future<void>.value();
   }
 
-  Future<void> _reposSync(
-    ConsumerProfile profile,
-    String target,
-    _NativeIoBuffer io,
-  ) async {
-    if (target == 'all' && !_isPluginConsumer(profile)) {
-      io.write(
-        '[INFO] ${profile.shortName} resolves versions from upstream metadata APIs at build time.',
-      );
-      io.write('[INFO] No upstream repos to sync for this consumer.');
-      return;
-    }
-
-    final types = switch (target) {
-      'all' => const <String>['paper', 'purpur', 'folia', 'canvas', 'leaf'],
-      'paper' || 'purpur' || 'folia' || 'canvas' || 'leaf' => <String>[target],
-      'forge' ||
-      'mohist' ||
-      'fabric' ||
-      'neoforge' => throw _NativeCommandException(
-        '$target resolves versions from upstream metadata APIs; there is no repo to sync. Use: build $target [--mc <version>]',
-        2,
-      ),
-      _ => throw _NativeCommandException(
-        'Usage: repos sync [all|paper|purpur|folia|canvas|leaf]',
-        2,
-      ),
-    };
-
-    io.inlineProgress = false;
-    await boundedMap<String, void>(types, (String type) async {
-      final url = _repoUrl(type);
-      final dir = _repoDir(profile, type);
-      final gitDir = Directory(p.join(dir, '.git'));
-
-      if (gitDir.existsSync()) {
-        io.write('[INFO] Updating repo: $type');
-        await _runAndRequireSuccess(
-          'git',
-          <String>['-C', dir, 'fetch', '--all', '--prune'],
-          'Repo fetch failed: $type',
-          io,
-        );
-        final pullResult = await _runProcess('git', <String>[
-          '-C',
-          dir,
-          'pull',
-          '--ff-only',
-        ]);
-        if (pullResult.exitCode != 0) {
-          io.write(
-            '[WARN] git pull was not ff-only for $type. Keeping local state.',
-          );
-        }
-      } else {
-        io.write('[INFO] Cloning repo: $type');
-        await _runAndRequireSuccess(
-          'git',
-          <String>['clone', url, dir],
-          'Repo clone failed: $type',
-          io,
-        );
-      }
-
-      io.write('[OK] Repo ready: $type -> $dir');
-    });
-  }
-
   Future<int> _pluginsWatchStart(
     ConsumerProfile profile,
     _NativeIoBuffer io, {
@@ -3442,7 +3403,7 @@ class NativeCommandService {
 
       final fallbacks = buildVersionCandidates(
         latest: latest,
-        supported: await _buildSupportedVersions(profile, normalized),
+        supported: await _buildSupportedVersions(normalized),
       ).skip(1).toList(growable: false);
       if (fallbacks.isEmpty) {
         rethrow;
@@ -3490,7 +3451,7 @@ class NativeCommandService {
       options,
       io,
     );
-    _pruneBuildCache(profile, normalized, io);
+    _pruneBuilds(profile, normalized, io);
     return jar;
   }
 
@@ -4059,6 +4020,9 @@ class NativeCommandService {
     // the cache by that much on every run. Failed compiles keep theirs so the
     // logs stay inspectable.
     _removeBuildToolsWorkDir(buildDir, workDir, io);
+    if (!_keepDownloads) {
+      _removeBuildTools(profile, io);
+    }
     io.write(
       '[OK] Cached spigot${spigotBuild == null ? '' : ' build $spigotBuild'} '
       'for mc=$mc',
@@ -4419,7 +4383,7 @@ class NativeCommandService {
         for (final key in const <String>['jar', 'installer']) {
           final value = source[key]?.trim() ?? '';
           if (value.isNotEmpty) {
-            inUse.add(p.normalize(p.absolute(value)));
+            inUse.add(_canonicalBuildPath(value));
           }
         }
       }
@@ -4455,7 +4419,7 @@ class NativeCommandService {
         }
         jars.add(
           CachedBuildJar(
-            path: p.normalize(p.absolute(entity.path)),
+            path: _canonicalBuildPath(entity.path),
             name: p.basename(entity.path),
             modified: entity.lastModifiedSync(),
           ),
@@ -4466,7 +4430,13 @@ class NativeCommandService {
       return 0;
     }
 
-    final stale = planBuildPrune(jars: jars, keepPaths: _jarsInUse());
+    final bool keep = _keepDownloads;
+    final stale = keep
+        ? planBuildPrune(jars: jars, keepPaths: _jarsInUse())
+        : planUnusedBuildPrune(
+            jars: jars,
+            keepPaths: <String>{..._jarsInUse(), ?_latestBuildTarget(dir.path)},
+          );
     var removed = 0;
     var freed = 0;
     for (final jar in stale) {
@@ -4477,17 +4447,72 @@ class NativeCommandService {
         removed++;
         freed += size;
       } catch (e) {
-        io.error('[WARN] Could not remove superseded build ${jar.name}: $e');
+        io.error('[WARN] Could not remove build ${jar.name}: $e');
       }
     }
 
     if (removed > 0) {
       io.write(
-        '[OK] Pruned $removed superseded $label build(s), '
+        '[OK] Pruned $removed ${keep ? 'superseded' : 'unused'} $label build(s), '
         'freeing ${_formatBytes(freed)}',
       );
     }
     return removed;
+  }
+
+  bool get _keepDownloads => StorageSettings(context.metadataDir).keepDownloads;
+
+  /// Prunes [type]'s cache after a build, or every cache when [type] is null.
+  /// With downloads not kept, all of [profile]'s caches are pruned, since a
+  /// build or update can leave any of them unused.
+  void _pruneBuilds(
+    ConsumerProfile profile,
+    String? type,
+    _NativeIoBuffer io, {
+    bool qualifyConsumer = false,
+  }) {
+    if (_keepDownloads) {
+      for (final String cached
+          in type == null ? _allBuildTypes : <String>[type]) {
+        _pruneBuildCache(profile, cached, io, qualifyConsumer: qualifyConsumer);
+      }
+      return;
+    }
+    for (final String cached in <String>[
+      ..._allBuildTypes,
+      'custom',
+      'velocity',
+    ]) {
+      _pruneBuildCache(profile, cached, io, qualifyConsumer: qualifyConsumer);
+    }
+    _removeBuildTools(profile, io);
+  }
+
+  String? _latestBuildTarget(String buildDir) {
+    final String latest = p.join(buildDir, 'latest.jar');
+    return Link(latest).existsSync() ? _canonicalBuildPath(latest) : null;
+  }
+
+  String _canonicalBuildPath(String path) {
+    try {
+      return File(path).resolveSymbolicLinksSync();
+    } on FileSystemException {
+      return p.normalize(p.absolute(path));
+    }
+  }
+
+  void _removeBuildTools(ConsumerProfile profile, _NativeIoBuffer io) {
+    final Directory tools = Directory(
+      p.join(_buildDir(profile, 'spigot'), 'tools'),
+    );
+    if (!tools.existsSync()) {
+      return;
+    }
+    try {
+      tools.deleteSync(recursive: true);
+    } on FileSystemException catch (e) {
+      io.error('[WARN] Could not remove BuildTools: $e');
+    }
   }
 
   /// Removes BuildTools work directories sitting in [type]'s build dir.
@@ -4543,9 +4568,18 @@ class NativeCommandService {
       );
     }
 
-    final types = normalized == 'all' ? _allBuildTypes : <String>[normalized];
+    final bool keep = _keepDownloads;
+    final types = normalized == 'all'
+        ? <String>[
+            ..._allBuildTypes,
+            if (!keep) ...<String>['custom', 'velocity'],
+          ]
+        : <String>[normalized];
     var removed = 0;
     for (final consumer in ConsumerProfile.values) {
+      if (!keep && normalized == 'all') {
+        _removeBuildTools(consumer, io);
+      }
       for (final type in types) {
         removed += _pruneBuildCache(consumer, type, io, qualifyConsumer: true);
         removed += _pruneBuildToolsWorkDirs(
@@ -4640,7 +4674,7 @@ class NativeCommandService {
     }
 
     io.write('$target supported Minecraft versions:');
-    final versions = await _buildSupportedVersions(profile, target);
+    final versions = await _buildSupportedVersions(target);
     if (versions.isEmpty) {
       io.write('  (none: upstream metadata unavailable)');
       return;
@@ -4701,21 +4735,14 @@ class NativeCommandService {
 
   Future<String> _resolveLatestMcVersion(String type) async {
     final normalized = type.toLowerCase();
-    final profile = _activeConsumer;
 
     final upstream = await _resolveLatestSupportedMcVersion(normalized);
     if (upstream != null && upstream.isNotEmpty) {
       return upstream;
     }
 
-    if (<String>{
-      'paper',
-      'purpur',
-      'folia',
-      'canvas',
-      'leaf',
-    }.contains(normalized)) {
-      final stable = await _repoLatestStableVersion(profile, normalized);
+    if (upstreamRepositoryTypes.contains(normalized)) {
+      final stable = await _repoLatestStableVersion(normalized);
       if (stable != null && stable.isNotEmpty) {
         return stable;
       }
@@ -4732,10 +4759,7 @@ class NativeCommandService {
     );
   }
 
-  Future<List<String>> _buildSupportedVersions(
-    ConsumerProfile profile,
-    String type,
-  ) async {
+  Future<List<String>> _buildSupportedVersions(String type) async {
     try {
       final upstream = await _resolveSupportedMcVersions(type);
       if (upstream.isNotEmpty) {
@@ -4743,8 +4767,8 @@ class NativeCommandService {
       }
     } catch (_) {}
 
-    if (<String>{'paper', 'purpur', 'folia', 'canvas', 'leaf'}.contains(type)) {
-      return _repoStableVersions(profile, type);
+    if (upstreamRepositoryTypes.contains(type)) {
+      return _repoStableVersions(type);
     }
 
     return const <String>[];
@@ -5096,48 +5120,20 @@ class NativeCommandService {
     return RegExp(r'^\d+\.\d+(\.\d+)?$').hasMatch(value.trim());
   }
 
-  Future<List<String>> _repoStableVersions(
-    ConsumerProfile profile,
-    String type,
-  ) async {
-    final repoDir = _repoDir(profile, type);
-    final gitDir = Directory(p.join(repoDir, '.git'));
-    if (!gitDir.existsSync()) {
-      return const <String>[];
-    }
-
-    final result = await _runProcess('git', <String>[
-      '-C',
-      repoDir,
-      'for-each-ref',
-      '--format=%(refname:short)',
-      'refs/remotes/origin/ver',
+  Future<List<String>> _repoStableVersions(String type) async {
+    final ProcessResult result = await _runProcess('git', <String>[
+      'ls-remote',
+      '--refs',
+      upstreamRepositoryUrl(type),
+      'refs/heads/ver/*',
     ]);
-
-    if (result.exitCode != 0) {
-      return const <String>[];
-    }
-
-    final stdoutText = result.stdout.toString();
-    final versions =
-        stdoutText
-            .split('\n')
-            .map((line) => line.trim())
-            .where((line) => line.startsWith('origin/ver/'))
-            .map((line) => line.substring('origin/ver/'.length))
-            .where((line) => RegExp(r'^\d+\.\d+(\.\d+)?$').hasMatch(line))
-            .toSet()
-            .toList(growable: false)
-          ..sort(_compareVersions);
-
-    return versions;
+    return result.exitCode == 0
+        ? upstreamReleaseVersions(result.stdout.toString())
+        : const <String>[];
   }
 
-  Future<String?> _repoLatestStableVersion(
-    ConsumerProfile profile,
-    String type,
-  ) async {
-    final versions = await _repoStableVersions(profile, type);
+  Future<String?> _repoLatestStableVersion(String type) async {
+    final versions = await _repoStableVersions(type);
     if (versions.isEmpty) {
       return null;
     }
@@ -10631,17 +10627,6 @@ class NativeCommandService {
     );
   }
 
-  String _repoUrl(String type) {
-    return switch (type) {
-      'paper' => 'https://github.com/PaperMC/Paper.git',
-      'purpur' => 'https://github.com/PurpurMC/Purpur.git',
-      'folia' => 'https://github.com/PaperMC/Folia.git',
-      'canvas' => 'https://github.com/CraftCanvasMC/Canvas.git',
-      'leaf' => 'https://github.com/Winds-Studio/Leaf.git',
-      _ => throw _NativeCommandException('Unknown repo type: $type', 2),
-    };
-  }
-
   Future<ProcessResult> _runProcess(String executable, List<String> args) {
     return _processExecutor?.call(executable, args) ??
         Process.run(
@@ -10650,28 +10635,6 @@ class NativeCommandService {
           workingDirectory: context.rootDir,
           runInShell: true,
         );
-  }
-
-  Future<void> _runAndRequireSuccess(
-    String executable,
-    List<String> args,
-    String message,
-    _NativeIoBuffer io,
-  ) async {
-    final result = await _runProcess(executable, args);
-    if (result.stdout != null && result.stdout.toString().trim().isNotEmpty) {
-      for (final line in result.stdout.toString().trimRight().split('\n')) {
-        io.write(line);
-      }
-    }
-    if (result.stderr != null && result.stderr.toString().trim().isNotEmpty) {
-      for (final line in result.stderr.toString().trimRight().split('\n')) {
-        io.error(line);
-      }
-    }
-    if (result.exitCode != 0) {
-      throw _NativeCommandException(message, 1);
-    }
   }
 
   void _copyDirectory(Directory src, Directory dst) {
@@ -10990,10 +10953,6 @@ class NativeCommandService {
   String _consumerRoot(ConsumerProfile profile) {
     consumerService.ensureConsumerDirs(profile);
     return consumerService.rootFor(profile);
-  }
-
-  String _repoDir(ConsumerProfile profile, String type) {
-    return p.join(_consumerRoot(profile), 'repos', type);
   }
 
   String _buildDir(ConsumerProfile profile, String type) {

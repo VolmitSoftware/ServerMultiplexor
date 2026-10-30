@@ -23,6 +23,8 @@ const Set<String> _runRecords = <String>{
   'snapshot',
   'worker.log',
 };
+const Set<String> _runLogs = <String>{'declarations', 'logs', 'worker.log'};
+const List<String> _sharedCaches = <String>['gradle-home', 'task-cache'];
 
 class ProjectStore {
   static final Map<String, AsyncGate> _gates = <String, AsyncGate>{};
@@ -72,7 +74,21 @@ class ProjectStore {
     return result;
   }
 
-  void retainRuns() {
+  void clearCache() {
+    for (String name in _sharedCaches) {
+      _discard(Directory(p.join(workDirectory.path, name)));
+    }
+    if (workDirectory.existsSync()) {
+      for (FileSystemEntity entry in workDirectory.listSync(
+        followLinks: false,
+      )) {
+        if (p.basename(entry.path).startsWith('discovery-')) _discard(entry);
+      }
+    }
+    retainRuns(cache: false);
+  }
+
+  void retainRuns({required bool cache}) {
     List<Map<String, Object?>> history = runs();
     String root = p.join(workDirectory.path, 'runs');
     Set<String> kept = <String>{};
@@ -101,7 +117,7 @@ class ProjectStore {
         _discard(runWork(id));
         runFile(id).parent.deleteSync(recursive: true);
       } else if (!projectActiveStates.contains(run['status'])) {
-        _discardLeftovers(runWork(id));
+        _discardLeftovers(runWork(id), cache ? _runRecords : _runLogs);
       }
     }
   }
@@ -118,7 +134,7 @@ class ProjectStore {
     }
   }
 
-  void _discardLeftovers(Directory work) {
+  void _discardLeftovers(Directory work, Set<String> records) {
     if (!work.existsSync()) return;
     for (FileSystemEntity entry in work.listSync(followLinks: false)) {
       String name = p.basename(entry.path);
@@ -126,7 +142,7 @@ class ProjectStore {
         for (FileSystemEntity item in entry.listSync(followLinks: false)) {
           if (!item.path.endsWith('.log')) _discard(item);
         }
-      } else if (!_runRecords.contains(name)) {
+      } else if (!records.contains(name)) {
         _discard(entry);
       }
     }
@@ -145,12 +161,19 @@ class ProjectStore {
         trashDirectory.path,
       );
     }
-    entry.renameSync(
-      p.join(
-        trashDirectory.path,
-        '$pid-${DateTime.now().microsecondsSinceEpoch}-${_discards++}',
-      ),
-    );
+    try {
+      entry.renameSync(
+        p.join(
+          trashDirectory.path,
+          '$pid-${DateTime.now().microsecondsSinceEpoch}-${_discards++}',
+        ),
+      );
+    } on FileSystemException {
+      if (FileSystemEntity.typeSync(entry.path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        rethrow;
+      }
+    }
   }
 
   Future<T> locked<T>(Future<T> Function() action) =>

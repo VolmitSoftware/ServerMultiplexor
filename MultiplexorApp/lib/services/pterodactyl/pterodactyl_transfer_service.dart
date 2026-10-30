@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
+import '../storage_settings.dart';
 import 'pterodactyl_models.dart';
 import 'pterodactyl_service.dart';
 import 'pterodactyl_smb_service.dart';
@@ -742,6 +743,7 @@ final class PterodactylTransferService {
     Directory? stage;
     final List<Directory> failedSnapshots = <Directory>[];
     _TransferBackup? backup;
+    bool keepBackup = true;
     bool remoteMutationStarted = false;
     bool committed = false;
     bool wasRunning = false;
@@ -931,6 +933,7 @@ final class PterodactylTransferService {
       }
 
       final String operationId = _operationId(target);
+      keepBackup = StorageSettings(_metadataDirectoryPath).keepDownloads;
       backup = await _createBackupFromSnapshot(
         target: target,
         snapshot: authoritativeSnapshot,
@@ -1184,12 +1187,19 @@ final class PterodactylTransferService {
             startIfStopped || wasRunning && restorePreviousRunningState,
         warnings: warnings,
       );
+      if (!keepBackup) {
+        await _cleanupPrivateDirectory(
+          Directory(p.dirname(backup.recoveryManifestPath)),
+          warnings,
+          noun: 'Remote backup',
+        );
+      }
       return PterodactylTransferResult(
         plan: authoritativePlan,
         localInstance: local,
         link: link,
-        backupPath: backup.backupPath,
-        recoveryManifestPath: backup.recoveryManifestPath,
+        backupPath: keepBackup ? backup.backupPath : null,
+        recoveryManifestPath: keepBackup ? backup.recoveryManifestPath : null,
         remoteRestarted: restarted,
         linkPersisted: linkPersisted,
         warnings: warnings,

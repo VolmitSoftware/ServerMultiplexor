@@ -13,7 +13,7 @@ void main() {
     fixture = Directory.systemTemp.createTempSync('project-cache-test-');
     store = ProjectStore(fixture.path);
     store.workDirectory.createSync(recursive: true);
-    cache = ProjectGradleCache(store);
+    cache = ProjectGradleCache(store, store.workDirectory);
   });
   tearDown(() {
     if (store.workDirectory.existsSync()) {
@@ -45,6 +45,18 @@ void main() {
     retention.writeAsStringSync('edited');
     cache.prepare();
     expect(retention.readAsStringSync(), projectCacheRetentionInit);
+  });
+
+  test('a run-local Gradle home stays inside its run', () {
+    Directory run = Directory(p.join(store.workDirectory.path, 'runs', 'one'));
+    ProjectGradleCache local = ProjectGradleCache(store, run)..prepare();
+    expect(local.home.path, p.join(run.path, 'gradle-home'));
+    expect(local.taskCache.path, p.join(run.path, 'task-cache'));
+    expect(local.taskCache.existsSync(), isTrue);
+    expect(
+      Directory(p.join(store.workDirectory.path, 'gradle-home')).existsSync(),
+      isFalse,
+    );
   });
 
   test('a linked Gradle home outside the work directory is rejected', () {

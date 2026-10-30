@@ -5,7 +5,9 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../models/gameplay_swarm.dart';
+import '../utils/delete_path.dart';
 import 'manager_context.dart';
+import 'storage_settings.dart';
 
 class GameplayTestService {
   GameplayTestService({required this.context});
@@ -29,26 +31,38 @@ class GameplayTestService {
   Future<int> setup({
     required void Function(String line) write,
     required void Function(String line) error,
-  }) {
+  }) async {
     if (!File(p.join(harnessDirectory, 'package.json')).existsSync()) {
       error('[ERROR] Mineflayer harness is missing: $harnessDirectory');
-      return Future<int>.value(2);
+      return 2;
     }
     if (!File(p.join(harnessDirectory, 'package-lock.json')).existsSync()) {
       error('[ERROR] Mineflayer package lock is missing: $harnessDirectory');
-      return Future<int>.value(2);
+      return 2;
     }
-    return _run(
-      'npm',
-      const <String>['ci', '--no-audit', '--no-fund'],
-      // npm on Windows is npm.cmd, a batch shim CreateProcess refuses to
-      // launch; only the shell can start it. The harness runs (`node
-      // src/cli.mjs`) go to a real executable and stay off the shell, where
-      // scenario arguments cannot be re-parsed on the way through.
-      shell: Platform.isWindows,
-      write: write,
-      error: error,
-    );
+    final Directory? cache = StorageSettings(context.metadataDir).keepDownloads
+        ? null
+        : Directory.systemTemp.createTempSync('multiplexor-npm-cache-');
+    try {
+      return await _run(
+        'npm',
+        <String>[
+          'ci',
+          '--no-audit',
+          '--no-fund',
+          if (cache != null) ...<String>['--cache', cache.path],
+        ],
+        // npm on Windows is npm.cmd, a batch shim CreateProcess refuses to
+        // launch; only the shell can start it. The harness runs (`node
+        // src/cli.mjs`) go to a real executable and stay off the shell, where
+        // scenario arguments cannot be re-parsed on the way through.
+        shell: Platform.isWindows,
+        write: write,
+        error: error,
+      );
+    } finally {
+      if (cache != null) await deletePath(cache.path);
+    }
   }
 
   Future<int> doctor({

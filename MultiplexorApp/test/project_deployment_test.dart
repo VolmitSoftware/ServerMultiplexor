@@ -257,6 +257,23 @@ void main() {
     },
   );
 
+  test('cleared run artifacts name the keep-downloads setting', () async {
+    Map<String, Object?> entry = await artifact('one', 'iris', 'bukkit');
+    saveRun('one', <Map<String, Object?>>[entry]);
+    File(entry['file'] as String).deleteSync();
+    await configure();
+    await expectLater(
+      deployment.deploy('one', 'exports'),
+      throwsA(
+        isA<StateError>().having(
+          (StateError error) => error.message,
+          'message',
+          'Build artifacts for one were cleared after delivery; rebuild the target or turn on storage keep-downloads',
+        ),
+      ),
+    );
+  });
+
   test('artifact source hash changes fail before output writes', () async {
     Map<String, Object?> entry = await artifact('one', 'iris', 'bukkit');
     saveRun('one', <Map<String, Object?>>[entry]);

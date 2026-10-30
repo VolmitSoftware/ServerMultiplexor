@@ -96,6 +96,7 @@ printf '> Task :assemble\\n'
     List<BuildProject> projects,
     List<String> keys, {
     bool changed = false,
+    bool cache = true,
   }) {
     ProjectPlan plan = ProjectPlan(<String, BuildProject>{
       for (BuildProject project in projects) project.id: project,
@@ -113,6 +114,7 @@ printf '> Task :assemble\\n'
       'memoryMiB': 2048,
       'workers': 4,
       'changed': changed,
+      'cache': cache,
       'jobs': <Object?>[
         for (String key in plan.keys)
           <String, Object?>{
@@ -1031,6 +1033,39 @@ done
     skip: Platform.isWindows,
   );
 
+  test('without the build cache a finished run keeps only its logs', () async {
+    BuildProject app = project('app', <Map<String, Object?>>[target('one')]);
+    File(p.join(app.directory, 'gradlew')).writeAsStringSync(r'''
+printf 'cache=%s home=%s\n' "$MULTIPLEXOR_TASK_CACHE" "$GRADLE_USER_HOME"
+''', mode: FileMode.append);
+    Map<String, Object?> state = run(
+      'uncached',
+      <BuildProject>[app],
+      <String>['app:one'],
+      cache: false,
+    );
+    expect(await ProjectWorker(store, state).execute(), 0);
+    String work = store.runWork('uncached').path;
+    Map<String, Object?> job = projectObject(
+      (state['jobs'] as List<Object?>).single,
+    );
+    expect(
+      File(job['logPath'] as String).readAsStringSync(),
+      contains(
+        'cache=${p.join(work, 'task-cache')} home=${p.join(work, 'gradle-home')}',
+      ),
+    );
+    List<String> files = <String>[
+      for (FileSystemEntity entry in store.workDirectory.listSync(
+        recursive: true,
+        followLinks: false,
+      ))
+        if (entry is! Directory)
+          p.relative(entry.path, from: store.workDirectory.path),
+    ];
+    expect(files, <String>['runs/uncached/logs/app/one.log']);
+  }, skip: Platform.isWindows);
+
   test('source inputs reject traversal and overlapping materializations', () {
     BuildProject app = project('app', <Map<String, Object?>>[target('one')]);
     for (List<String> inputs in <List<String>>[
@@ -1352,6 +1387,48 @@ done
     );
   }, skip: Platform.isWindows);
 
+  test('clearing the build cache leaves only run logs', () async {
+    recordRun('kept', '2026-01-01T00:00:00.000Z');
+    recordRun('active', '2026-01-01T00:00:01.000Z', status: 'running');
+    for (String path in <String>[
+      'runs/kept/logs/app/one.log',
+      'runs/kept/declarations/abc.log',
+      'runs/kept/declarations/sources/app/build.gradle',
+      'runs/kept/snapshot/app/build.gradle',
+      'runs/active/snapshot/app/build.gradle',
+      'gradle-home/caches/module.jar',
+      'task-cache/entry.bin',
+      'discovery-abc/sources/app/build.gradle',
+    ]) {
+      File(p.join(store.workDirectory.path, path))
+        ..createSync(recursive: true)
+        ..writeAsStringSync(path);
+    }
+    store.clearCache();
+    await store.emptyTrash();
+    List<String> files = <String>[
+      for (FileSystemEntity entry in store.workDirectory.listSync(
+        recursive: true,
+        followLinks: false,
+      ))
+        if (entry is! Directory)
+          p.relative(entry.path, from: store.workDirectory.path),
+    ]..sort();
+    expect(files, <String>[
+      'runs/active/snapshot/app/build.gradle',
+      'runs/kept/declarations/abc.log',
+      'runs/kept/logs/app/one.log',
+    ]);
+    expect(
+      Directory(p.join(store.runWork('active').path, 'sandboxes')).existsSync(),
+      isTrue,
+    );
+    expect(
+      store.runs().map((Map<String, Object?> run) => run['id']).toSet(),
+      <String>{'kept', 'active'},
+    );
+  }, skip: Platform.isWindows);
+
   test(
     'run retention keeps the newest runs and every run still in use',
     () async {
@@ -1397,7 +1474,7 @@ done
           },
         ],
       );
-      store.retainRuns();
+      store.retainRuns(cache: true);
       expect(
         store.runs().map((Map<String, Object?> run) => run['id']).toSet(),
         <String>{

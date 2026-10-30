@@ -37,11 +37,23 @@ function Install-Harness {
         throw 'npm is not on PATH; install Node.js 22+ to use the gameplay commands.'
     }
     Write-LauncherMessage 'Installing the pinned Mineflayer harness dependencies'
+    $installer = @('ci', '--no-audit', '--no-fund')
+    $cache = $null
+    $storage = Join-Path $PSScriptRoot '.multiplexor\storage.json'
+    $keep = (Test-Path -LiteralPath $storage) -and
+        ((Get-Content -LiteralPath $storage -Raw | ConvertFrom-Json).keepDownloads -eq $true)
+    if (-not $keep) {
+        $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('multiplexor-npm-cache-' + [guid]::NewGuid())
+        $installer += @('--cache', $cache)
+    }
     Push-Location -LiteralPath $harnessDirectory
     try {
-        Invoke-SetupCommand $npmCommand.Source @('ci', '--no-audit', '--no-fund')
+        Invoke-SetupCommand $npmCommand.Source $installer
     } finally {
         Pop-Location
+        if ($null -ne $cache -and (Test-Path -LiteralPath $cache)) {
+            Remove-Item -LiteralPath $cache -Recurse -Force
+        }
     }
 }
 

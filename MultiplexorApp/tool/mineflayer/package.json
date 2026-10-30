@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "postinstall": "node scripts/patch-mineflayer-inventory.mjs",
+    "postinstall": "node scripts/patch-mineflayer-inventory.mjs && node scripts/prune-bedrock-data.mjs",
     "doctor": "node src/cli.mjs doctor",
     "list": "node src/cli.mjs list",
     "test": "node --test \"test/**/*_test.mjs\""
