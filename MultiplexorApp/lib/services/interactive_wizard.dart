@@ -283,8 +283,6 @@ List<MapEntry<String, String>> remoteCreatePushPreviewDetails({
   return List<MapEntry<String, String>>.unmodifiable(details);
 }
 
-const bool remoteCreateFinalConfirmationDefault = false;
-
 List<RemoteCreateSource> remoteCreateSources({
   required bool hasPanelEggs,
   required bool hasTemplates,
@@ -513,9 +511,7 @@ RemoteQuickActionEffect remoteQuickActionEffect({
 
 /// Whether [action] requires a typed, count-bound confirmation phrase.
 bool remoteBulkActionRequiresTypedConfirmation(RemoteBulkAction action) =>
-    action == RemoteBulkAction.kill ||
-    action == RemoteBulkAction.reinstall ||
-    action == RemoteBulkAction.delete;
+    action == RemoteBulkAction.reinstall || action == RemoteBulkAction.delete;
 
 String remoteBulkConfirmationPhrase(
   RemoteBulkAction action,
@@ -653,6 +649,9 @@ class InteractiveWizard {
   final ConsumerProfile? requestedConsumer;
   ConsumerProfile? _consumerOverride;
   MonitorView _monitorView = MonitorView.local;
+
+  /// The platform last picked in this session, offered first next time.
+  String? _lastPlatform;
   String? _remoteProfileId;
   bool _remoteConnectionChanged = false;
   MonitorUpdate? _appUpdate;
@@ -1003,16 +1002,11 @@ class InteractiveWizard {
   Future<bool> _updateApplication() async {
     final MonitorUpdate updater = _updater;
     if (updater.state == MonitorUpdateState.development) {
-      stdout.writeln(
-        'Development build: use ./start.sh to compile local source.',
-      );
-      stdout.writeln('Self-installation is available in downloaded releases.');
-      await Ui.pause();
+      Ui.report('Development build: update with ./start.sh');
       return false;
     }
     if (updater.state == MonitorUpdateState.unsupported) {
-      Ui.error('No compiled release is available for this platform.');
-      await Ui.pause();
+      Ui.report('No compiled release for this platform');
       return false;
     }
     if (updater.state == MonitorUpdateState.failed) {
@@ -1026,13 +1020,11 @@ class InteractiveWizard {
     }
     final SelfUpdateRelease? release = updater.release;
     if (release == null) {
-      stdout.writeln('Multiplexor v$multiplexorVersion is up to date.');
-      await Ui.pause();
+      Ui.report('Multiplexor v$multiplexorVersion is up to date');
       return false;
     }
     if (!await Ui.confirm(
       'Install Multiplexor v${release.version.text} and restart?',
-      defaultValue: false,
     )) {
       return false;
     }
@@ -1047,7 +1039,7 @@ class InteractiveWizard {
     if (code == null) {
       updater.state = MonitorUpdateState.current;
       updater.release = null;
-      await Ui.pause();
+      Ui.report('Multiplexor v$multiplexorVersion is up to date');
       return false;
     }
     exitCode = code;
@@ -1139,6 +1131,7 @@ class InteractiveWizard {
         await _quickConsole(instance);
       case MonitorAction.consolesGrid:
         await _quickConsoles();
+      case MonitorAction.delete:
       case MonitorAction.up:
       case MonitorAction.down:
       case MonitorAction.open:
@@ -1191,15 +1184,10 @@ class InteractiveWizard {
     switch (action) {
       case InstanceModalAction.start:
         Ui.doing('Starting $name in background');
-        final int code = await _shellRun(<String>[
-          'runtime',
-          'start',
-          name,
-          '--no-console',
-        ]);
-        if (code != 0) {
-          await Ui.pause();
-        }
+        await _settle(
+          await _shellRun(<String>['runtime', 'start', name, '--no-console']),
+          'Started $name',
+        );
       case InstanceModalAction.stop:
         await _quickStop(name);
       case InstanceModalAction.restart:
@@ -1214,21 +1202,24 @@ class InteractiveWizard {
         await _instanceBackups(name);
       case InstanceModalAction.pullToLocal:
       case InstanceModalAction.profile:
-        Ui.note('That action is Remote-only.');
-        await Ui.pause();
+        Ui.report('That action is Remote-only');
       case InstanceModalAction.settings:
         await _instanceRuntimeSettings(name);
       case InstanceModalAction.history:
       case InstanceModalAction.reinstall:
-        Ui.note('That action is Remote-only.');
-        await Ui.pause();
+        Ui.report('That action is Remote-only');
       case InstanceModalAction.setPort:
         await _setInstancePort(name);
       case InstanceModalAction.makeActive:
-        await _shellRun(<String>['instance', 'activate', name]);
+        await _settle(
+          await _shellRun(<String>['instance', 'activate', name]),
+          'Made $name the active instance',
+        );
       case InstanceModalAction.motd:
-        await _shellRun(<String>['instance', 'motd-style', name]);
-        await Ui.pause();
+        await _settle(
+          await _shellRun(<String>['instance', 'motd-style', name]),
+          'Updated styled MOTD for $name',
+        );
       case InstanceModalAction.lock:
         await _lockInstance(name);
       case InstanceModalAction.unlock:
@@ -1240,25 +1231,31 @@ class InteractiveWizard {
       case InstanceModalAction.copyDropins:
         await _copyDropinsIntoIsolated(name);
       case InstanceModalAction.folder:
-        await _shellRun(<String>['instance', 'open', name]);
+        await _settle(
+          await _shellRun(<String>['instance', 'open', name]),
+          'Opened the folder for $name',
+        );
       case InstanceModalAction.update:
         await _updateInstance(name);
       case InstanceModalAction.factoryReset:
-        final bool confirmed = await Ui.confirm(
+        if (await Ui.confirm(
           'Factory reset $name? Worlds, config, and dropins are wiped.',
-          defaultValue: false,
-        );
-        if (confirmed) {
-          await _shellRun(<String>['instance', 'reset', name]);
-          await Ui.pause();
+          destructive: true,
+        )) {
+          await _settle(
+            await _shellRun(<String>['instance', 'reset', name]),
+            'Factory reset $name',
+          );
         }
       case InstanceModalAction.delete:
-        final bool confirmed = await Ui.confirm(
+        if (await Ui.confirm(
           'Delete instance $name permanently?',
-          defaultValue: false,
-        );
-        if (confirmed) {
-          await _shellRun(<String>['instance', 'delete', name]);
+          destructive: true,
+        )) {
+          await _settle(
+            await _shellRun(<String>['instance', 'delete', name]),
+            'Deleted $name',
+          );
         }
     }
   }
@@ -1269,9 +1266,9 @@ class InteractiveWizard {
   ///
   /// The card offers START ALL and STOP ALL unconditionally — it is a fixed
   /// grid, not the old menu that hid entries it had no work for — so this is
-  /// where "nothing to do" is answered. Saying so and pausing is the point:
-  /// a suspension that runs no command and returns immediately reads as a
-  /// flash of the screen and nothing else.
+  /// where "nothing to do" is answered. Reporting it is the point: a
+  /// suspension that runs no command and returns silently reads as a flash
+  /// of the screen and nothing else.
   Future<void> _monitorWorkspaceAction(
     WorkspaceModalAction action,
     String? selectedIdentifier,
@@ -1315,14 +1312,11 @@ class InteractiveWizard {
       case WorkspaceModalAction.newInstance:
         await _createInstance();
       case WorkspaceModalAction.connect:
-        Ui.note('Remote connection settings are not available in Local view.');
-        await Ui.pause();
+        Ui.report('Remote connection settings are not in Local view');
       case WorkspaceModalAction.files:
-        Ui.note('Remote file sharing is not available in Local view.');
-        await Ui.pause();
+        Ui.report('Remote file sharing is not in Local view');
       case WorkspaceModalAction.bulkActions:
-        Ui.note('Remote bulk actions are not available in Local view.');
-        await Ui.pause();
+        Ui.report('Remote bulk actions are not in Local view');
     }
   }
 
@@ -1347,11 +1341,7 @@ class InteractiveWizard {
         switch (effect) {
           case RemoteQuickActionEffect.none:
             if (action == MonitorAction.console) {
-              Ui.note(
-                'Remote console is unavailable while $identifier is offline. '
-                'Use Start on its server card.',
-              );
-              await Ui.pause();
+              Ui.report('No console: $identifier is offline');
             }
           case RemoteQuickActionEffect.start:
             await _remotePower(identifier, PterodactylPowerSignal.start);
@@ -1360,19 +1350,13 @@ class InteractiveWizard {
           case RemoteQuickActionEffect.restart:
             await _remotePower(identifier, PterodactylPowerSignal.restart);
           case RemoteQuickActionEffect.kill:
-            final bool confirmed = await Ui.confirm(
-              'Kill remote server $identifier immediately?',
-              defaultValue: false,
-            );
-            if (confirmed) {
-              await _remotePower(identifier, PterodactylPowerSignal.kill);
-            }
+            await _remotePower(identifier, PterodactylPowerSignal.kill);
           case RemoteQuickActionEffect.console:
             await _remoteConsole(identifier);
         }
       case MonitorAction.consolesGrid:
-        Ui.note('The remote fleet does not expose a multi-console grid.');
-        await Ui.pause();
+        Ui.report('Remote servers have no multi-console grid');
+      case MonitorAction.delete:
       case MonitorAction.up:
       case MonitorAction.down:
       case MonitorAction.open:
@@ -1415,8 +1399,7 @@ class InteractiveWizard {
       case InstanceModalAction.profile:
         await _remoteProfile(identifier);
       case InstanceModalAction.pushToRemote:
-        Ui.note('That action is Local-only.');
-        await Ui.pause();
+        Ui.report('That action is Local-only');
       case InstanceModalAction.settings:
         await _remoteSettings(identifier);
       case InstanceModalAction.history:
@@ -1439,8 +1422,7 @@ class InteractiveWizard {
       case InstanceModalAction.backups:
       case InstanceModalAction.update:
       case InstanceModalAction.factoryReset:
-        Ui.note('That action is Local-only.');
-        await Ui.pause();
+        Ui.report('That action is Local-only');
     }
   }
 
@@ -1458,7 +1440,6 @@ class InteractiveWizard {
       case WorkspaceModalAction.stopAll:
         final bool confirmed = await Ui.confirm(
           'Stop every server in the selected remote panel?',
-          defaultValue: false,
         );
         if (confirmed) {
           await _remotePowerAll(PterodactylPowerSignal.stop);
@@ -1475,8 +1456,7 @@ class InteractiveWizard {
       case WorkspaceModalAction.networks:
       case WorkspaceModalAction.pullBuilds:
       case WorkspaceModalAction.wipe:
-        Ui.note('That workspace action is Local-only.');
-        await Ui.pause();
+        Ui.report('That workspace action is Local-only');
     }
   }
 
@@ -1489,7 +1469,7 @@ class InteractiveWizard {
       '${signal.name} remote server',
       () => pterodactyl.power(profile.id, identifier, signal),
     );
-    Ui.success('${signal.name} sent to $identifier');
+    Ui.report('Sent ${signal.name} to $identifier');
   }
 
   Future<void> _remoteConsole(String identifier) async {
@@ -1534,7 +1514,6 @@ class InteractiveWizard {
     _showTransferPlan(plan, profileName: profile.name);
     final bool confirmed = await Ui.confirm(
       'Create this stopped Local instance?',
-      defaultValue: false,
     );
     if (!confirmed) return;
 
@@ -1679,8 +1658,7 @@ class InteractiveWizard {
           left.name.toLowerCase().compareTo(right.name.toLowerCase()),
     );
     if (servers.isEmpty) {
-      Ui.note('${_safeRemoteText(profile.name)} has no existing server.');
-      await Ui.pause();
+      Ui.report('${_safeRemoteText(profile.name)} has no existing server');
       return null;
     }
     final int selected = await Ui.choose('Existing Remote server', <String>[
@@ -1817,7 +1795,6 @@ class InteractiveWizard {
     );
     if (!await Ui.confirm(
       'Create this stopped server and push the Local instance?',
-      defaultValue: false,
     )) {
       return;
     }
@@ -1853,15 +1830,7 @@ class InteractiveWizard {
         alreadyCompleted: claim.alreadyCompleted,
       );
       if (action == RemoteCreatePushClaimAction.completed) {
-        Ui.success('This exact Create & Push intent already completed.');
-        if (claim.server case final PterodactylApplicationServer server) {
-          Ui.keyValue(
-            'Remote server',
-            '${_safeRemoteText(server.name)} (${server.identifier})',
-          );
-        }
-        Ui.note('No server was created and no files were transferred again.');
-        await Ui.pause();
+        Ui.report('This Create & Push already completed');
         return;
       }
 
@@ -2051,8 +2020,7 @@ class InteractiveWizard {
       hasTemplates: catalog.templates.isNotEmpty,
     );
     if (sources.length == 1) {
-      Ui.warn('No creation-ready Panel egg or existing template is available.');
-      await Ui.pause();
+      Ui.report('No creation-ready Panel egg or template');
       return null;
     }
 
@@ -2219,14 +2187,13 @@ class InteractiveWizard {
 
   Future<bool> _confirmTransferPlan(PterodactylTransferPlan plan) async {
     if (!remoteTransferRequiresTypedConfirmation(plan.mode)) {
-      return Ui.confirm('Push these changes?', defaultValue: false);
+      return Ui.confirm('Push these changes?', destructive: true);
     }
     Ui.warn('This is the destructive exact-mirror mode.');
     final String phrase = remoteMirrorConfirmationPhrase(plan.serverIdentifier);
     final String typed = await Ui.input('Type "$phrase" to mirror');
     if (!remoteTransferConfirmationMatches(expected: phrase, typed: typed)) {
-      Ui.warn('Confirmation did not match. Nothing was changed.');
-      await Ui.pause();
+      Ui.report('Mirror cancelled: the phrase did not match');
       return false;
     }
     return true;
@@ -2243,13 +2210,16 @@ class InteractiveWizard {
     PterodactylTransferResult result, {
     bool newTarget = false,
   }) async {
-    Ui.blank();
     final PterodactylTransferPlan plan = result.plan;
-    Ui.success(
-      plan.direction == PterodactylTransferDirection.pull
-          ? 'Pulled ${_safeRemoteText(plan.remoteServerName)} to ${plan.localInstanceName}'
-          : 'Pushed ${plan.localInstanceName} to ${_safeRemoteText(plan.remoteServerName)}',
-    );
+    final String summary = plan.direction == PterodactylTransferDirection.pull
+        ? 'Pulled ${_safeRemoteText(plan.remoteServerName)} to ${plan.localInstanceName}'
+        : 'Pushed ${plan.localInstanceName} to ${_safeRemoteText(plan.remoteServerName)}';
+    if (result.warnings.isEmpty) {
+      Ui.report(summary);
+      return;
+    }
+    Ui.blank();
+    Ui.success(summary);
     Ui.keyValue(
       result.linkPersisted ? 'linked target' : 'one-time target',
       '${result.link.profileId}/${result.link.serverIdentifier}',
@@ -2333,10 +2303,8 @@ class InteractiveWizard {
         );
         if (!await Ui.confirm(
           'Trust exactly these SSH host keys for this server?',
-          defaultValue: false,
         )) {
-          Ui.note('Transfer cancelled; no SSH trust settings were changed.');
-          if (pauseOnFailure) await Ui.pause();
+          Ui.report('Transfer cancelled: SSH host keys not trusted');
           return false;
         }
         await pterodactylSmb.trustHostKeys(candidates);
@@ -2379,19 +2347,18 @@ class InteractiveWizard {
           check.name == 'ssh-host-keys' &&
           check.level == PterodactylSmbCheckLevel.error,
     );
-    if (needsHostTrust && !await _trustRemoteFileHostKeys(pauseAfter: false)) {
-      Ui.note('Open Folder cancelled; no SSH host keys were trusted.');
-      await Ui.pause();
+    if (needsHostTrust && !await _trustRemoteFileHostKeys()) {
+      Ui.report('Open Folder cancelled: SSH host keys not trusted');
       return;
     }
-    final String openedPath = await Ui.spin(
+    await Ui.spin(
       'Opening remote server folder',
       () => pterodactylSmb.openServerFolder(
         profileId: profile.id,
         serverIdentifier: identifier,
       ),
     );
-    Ui.success('Opened $openedPath');
+    Ui.report('Opened the folder for $identifier');
   }
 
   Future<void> _remoteSettings(String identifier) async {
@@ -2502,7 +2469,10 @@ class InteractiveWizard {
         description: description,
       ),
     );
-    if (updated) Ui.success('Updated ${server.identifier}');
+    if (updated) {
+      Ui.report('Updated ${server.identifier}');
+      return;
+    }
     await Ui.pause();
   }
 
@@ -2523,8 +2493,7 @@ class InteractiveWizard {
         .where((PterodactylStartupVariable item) => item.isEditable)
         .toList(growable: false);
     if (variables.isEmpty) {
-      Ui.note('This server exposes no editable startup variables.');
-      await Ui.pause();
+      Ui.report('This server has no editable startup variables');
       return;
     }
     final int selected = await Ui.choose('Startup variable', <String>[
@@ -2561,7 +2530,10 @@ class InteractiveWizard {
         );
       },
     );
-    if (updated) Ui.success('Updated ${variable.environmentVariable}');
+    if (updated) {
+      Ui.report('Updated ${variable.environmentVariable}');
+      return;
+    }
     await Ui.pause();
   }
 
@@ -2581,8 +2553,7 @@ class InteractiveWizard {
     final List<MapEntry<String, String>> images = startup.dockerImages.entries
         .toList(growable: false);
     if (images.isEmpty) {
-      Ui.note('This server exposes no selectable Docker images.');
-      await Ui.pause();
+      Ui.report('This server has no selectable Docker images');
       return;
     }
     final int selected = await Ui.choose('Allowed Docker image', <String>[
@@ -2606,7 +2577,10 @@ class InteractiveWizard {
         dockerImage: dockerImage,
       ),
     );
-    if (updated) Ui.success('Docker image set to $dockerImage');
+    if (updated) {
+      Ui.report('Docker image set to $dockerImage');
+      return;
+    }
     await Ui.pause();
   }
 
@@ -2680,7 +2654,10 @@ class InteractiveWizard {
         );
       },
     );
-    if (updated) Ui.success('Updated ${field.name}');
+    if (updated) {
+      Ui.report('Updated ${field.name}');
+      return;
+    }
     await Ui.pause();
   }
 
@@ -2710,7 +2687,10 @@ class InteractiveWizard {
         );
       },
     );
-    if (updated) Ui.success('Updated startup command');
+    if (updated) {
+      Ui.report('Updated startup command');
+      return;
+    }
     await Ui.pause();
   }
 
@@ -2769,17 +2749,12 @@ class InteractiveWizard {
       () => pterodactyl.serverAccess(profile.id, identifier),
     );
     final PterodactylClientServer server = access.server;
-    final bool continueToTypedConfirmation = await Ui.confirm(
-      '$action ${_safeRemoteText(server.name)}? $consequence',
-      defaultValue: false,
-    );
-    if (!continueToTypedConfirmation) return null;
+    Ui.warn('$action ${_safeRemoteText(server.name)}? $consequence');
     final String typed = await Ui.input(
-      'Type "${_safeRemoteText(server.name)}" or "${server.identifier}"',
+      'Type "${_safeRemoteText(server.name)}" or "${server.identifier}" to confirm',
     );
     if (typed != server.name && typed != server.identifier) {
-      Ui.warn('Confirmation did not match; $action cancelled.');
-      await Ui.pause();
+      Ui.report('$action cancelled: the name did not match');
       return null;
     }
     return access;
@@ -2808,7 +2783,10 @@ class InteractiveWizard {
           pterodactyl.reinstall(profile.id, access.server.identifier),
     );
     if (reinstalled) {
-      Ui.success('Reinstall requested for ${access.server.name}');
+      Ui.report(
+        'Reinstall requested for ${_safeRemoteText(access.server.name)}',
+      );
+      return;
     }
     await Ui.pause();
   }
@@ -2828,7 +2806,10 @@ class InteractiveWizard {
       purpose: 'delete this server',
       operation: () => pterodactyl.delete(profile.id, access.server.identifier),
     );
-    if (deleted) Ui.success('Deleted ${_safeRemoteText(access.server.name)}');
+    if (deleted) {
+      Ui.report('Deleted ${_safeRemoteText(access.server.name)}');
+      return;
+    }
     await Ui.pause();
   }
 
@@ -2846,7 +2827,7 @@ class InteractiveWizard {
       Ui.warn('The current API credentials are not allowed to $purpose.');
       final bool repair = await Ui.confirm(
         'Add or replace the Application API key and retry?',
-        defaultValue: false,
+        destructive: true,
       );
       if (!repair) return false;
       final PterodactylCredential? previous = await pterodactyl
@@ -2943,24 +2924,17 @@ class InteractiveWizard {
             pterodactylSmb.startDrive,
           );
           if (started.running) {
-            Ui.success(
-              'Multiplexor Drive is available at ${started.mountRoot}',
-            );
+            Ui.report('Multiplexor Drive is available');
           } else {
             Ui.warn('Multiplexor Drive did not become fully ready.');
+            await Ui.pause();
           }
-          await Ui.pause();
         case _RemoteFilesAction.open:
-          final String openedPath = await Ui.spin(
-            'Opening Multiplexor Drive',
-            pterodactylSmb.openDrive,
-          );
-          Ui.success('Opened $openedPath');
-          await Ui.pause();
+          await Ui.spin('Opening Multiplexor Drive', pterodactylSmb.openDrive);
+          Ui.report('Opened Multiplexor Drive');
         case _RemoteFilesAction.stop:
           await Ui.spin('Stopping Multiplexor Drive', pterodactylSmb.stopDrive);
-          Ui.success('Multiplexor Drive stopped');
-          await Ui.pause();
+          Ui.report('Stopped Multiplexor Drive');
         case _RemoteFilesAction.done:
           return;
       }
@@ -2978,14 +2952,10 @@ class InteractiveWizard {
         profileIds: profiles.map((PterodactylProfile profile) => profile.id),
       );
     });
-    Ui.success('Configured ${profiles.length} remote file account(s)');
-    Ui.note(
-      'Next, verify the Wings SSH fingerprints before starting the drive.',
-    );
-    await Ui.pause();
+    Ui.report('Configured ${profiles.length} remote file account(s)');
   }
 
-  Future<bool> _trustRemoteFileHostKeys({bool pauseAfter = true}) async {
+  Future<bool> _trustRemoteFileHostKeys() async {
     final List<PterodactylSshHostKeyCandidate> candidates = await Ui.spin(
       'Scanning Wings SSH host keys',
       pterodactylSmb.scanHostKeys,
@@ -3004,16 +2974,13 @@ class InteractiveWizard {
     );
     final bool confirmed = await Ui.confirm(
       'Trust exactly these SSH host keys?',
-      defaultValue: false,
     );
     if (!confirmed) {
-      Ui.note('No SSH trust settings were changed.');
-      if (pauseAfter) await Ui.pause();
+      Ui.report('No SSH trust settings were changed');
       return false;
     }
     await pterodactylSmb.trustHostKeys(candidates);
-    Ui.success('Wings SSH host keys trusted');
-    if (pauseAfter) await Ui.pause();
+    Ui.report('Trusted Wings SSH host keys');
     return true;
   }
 
@@ -3065,8 +3032,7 @@ class InteractiveWizard {
       eligible.add(server.identifier);
     }
     if (eligible.isEmpty) {
-      Ui.note('No remote servers can ${signal.name} in their current state.');
-      await Ui.pause();
+      Ui.report('No remote servers can ${signal.name} right now');
       return;
     }
     final PterodactylBulkResult result = await Ui.spin(
@@ -3077,6 +3043,12 @@ class InteractiveWizard {
         signal: signal,
       ),
     );
+    final String summary =
+        '${signal.name} sent to ${result.succeededCount}/${eligible.length} eligible servers';
+    if (result.isSuccess) {
+      Ui.report(summary);
+      return;
+    }
     for (final PterodactylBulkItemResult item in result.items) {
       if (!item.succeeded) {
         Ui.warn(
@@ -3084,9 +3056,7 @@ class InteractiveWizard {
         );
       }
     }
-    Ui.success(
-      '${signal.name} sent to ${result.succeededCount}/${eligible.length} eligible servers',
-    );
+    Ui.success(summary);
     await Ui.pause();
   }
 
@@ -3121,13 +3091,14 @@ class InteractiveWizard {
       if (action == RemoteBulkAction.done) return;
       if (action == RemoteBulkAction.createMany) {
         await _remoteCreateMany();
-      } else {
-        await _runRemoteBulkAction(action, selectedIdentifier);
+        return;
       }
+      if (await _runRemoteBulkAction(action, selectedIdentifier)) return;
     }
   }
 
-  Future<void> _runRemoteBulkAction(
+  /// Returns whether the action ran, as opposed to being backed out of.
+  Future<bool> _runRemoteBulkAction(
     RemoteBulkAction action,
     String? selectedIdentifier, {
     List<String>? checkedIdentifiers,
@@ -3150,7 +3121,7 @@ class InteractiveWizard {
             checkedIdentifiers: checkedIdentifiers,
             action: action,
           );
-    if (targets == null) return;
+    if (targets == null) return false;
     final Set<String> eligibleIds = targets
         .map((PterodactylFleetSample sample) => sample.server.identifier)
         .toSet();
@@ -3165,14 +3136,11 @@ class InteractiveWizard {
               )
               .toList();
     if (targets.isEmpty) {
-      Ui.note('No eligible servers are selected.');
-      for (final PterodactylFleetSample sample in skippedChecked) {
-        Ui.note(
-          'Skipped ${_safeRemoteText(sample.server.name)}: unavailable for ${action.name}.',
-        );
-      }
-      await Ui.pause();
-      return;
+      Ui.report(
+        'Nothing to ${action.name}'
+        '${skippedChecked.isEmpty ? '' : ': ${skippedChecked.length} selected servers skipped'}',
+      );
+      return true;
     }
     final List<PterodactylFleetSample> allEligible = remoteBulkTargets(
       fleet: fleet,
@@ -3186,7 +3154,7 @@ class InteractiveWizard {
       targets: targets,
       allEligibleCount: allEligible.length,
     )) {
-      return;
+      return true;
     }
 
     final List<String> identifiers = targets
@@ -3254,16 +3222,18 @@ class InteractiveWizard {
     }
     Ui.blank();
     if (result.isSuccess) {
-      Ui.success(
-        '${result.action.name}: all ${result.succeededCount} targets succeeded',
+      Ui.report(
+        '${result.action.name}: all ${result.succeededCount} targets succeeded'
+        '${skippedChecked.isEmpty ? '' : ' · ${skippedChecked.length} skipped'}',
       );
-    } else {
-      Ui.warn(
-        '${result.action.name}: ${result.succeededCount} succeeded, '
-        '${result.failedCount} failed',
-      );
+      return true;
     }
+    Ui.warn(
+      '${result.action.name}: ${result.succeededCount} succeeded, '
+      '${result.failedCount} failed',
+    );
     await Ui.pause();
+    return true;
   }
 
   Future<List<PterodactylFleetSample>?> _pickRemoteBulkTargets({
@@ -3278,8 +3248,6 @@ class InteractiveWizard {
       selectedIdentifier: selectedIdentifier,
     );
     if (eligible.isEmpty) {
-      Ui.note('No servers are currently eligible for ${action.name}.');
-      await Ui.pause();
       return const <PterodactylFleetSample>[];
     }
     final List<RemoteBulkTargetScope> candidatePresets =
@@ -3348,7 +3316,6 @@ class InteractiveWizard {
       if (serverIndex == eligible.length) {
         if (selectedIds.isEmpty) {
           Ui.warn('Select at least one server.');
-          await Ui.pause();
           continue;
         }
         return List<PterodactylFleetSample>.unmodifiable(
@@ -3362,12 +3329,16 @@ class InteractiveWizard {
     }
   }
 
+  /// Power actions run as soon as their targets are chosen. Reinstall and
+  /// delete destroy remote files, so they list their targets and take one
+  /// typed confirmation.
   Future<bool> _confirmRemoteBulkAction({
     required PterodactylProfile profile,
     required RemoteBulkAction action,
     required List<PterodactylFleetSample> targets,
     required int allEligibleCount,
   }) async {
+    if (!remoteBulkActionRequiresTypedConfirmation(action)) return true;
     Ui.clearScreen();
     Ui.appHeader('CONFIRM BULK ${action.name.toUpperCase()}', <String>[
       profile.name,
@@ -3380,13 +3351,6 @@ class InteractiveWizard {
         '${sample.resources?.currentState ?? 'state unavailable'}',
       );
     }
-    final bool confirmed = await Ui.confirm(
-      '${action.name} these ${targets.length} remote servers?',
-      defaultValue: false,
-    );
-    if (!confirmed) return false;
-    if (!remoteBulkActionRequiresTypedConfirmation(action)) return true;
-
     final bool entireEligibleFleet = targets.length == allEligibleCount;
     final String phrase = remoteBulkConfirmationPhrase(
       action,
@@ -3400,8 +3364,7 @@ class InteractiveWizard {
     );
     final String typed = await Ui.input('Type "$phrase" to continue');
     if (typed != phrase) {
-      Ui.warn('Confirmation did not match; bulk ${action.name} cancelled.');
-      await Ui.pause();
+      Ui.report('Bulk ${action.name} cancelled: the phrase did not match');
       return false;
     }
     return true;
@@ -3529,7 +3492,7 @@ class InteractiveWizard {
   Future<bool> _repairRemoteCreationCatalog(PterodactylProfile profile) async {
     final bool repair = await Ui.confirm(
       'Replace the Application API key and retry?',
-      defaultValue: true,
+      destructive: true,
     );
     if (!repair) {
       await Ui.pause();
@@ -3594,7 +3557,6 @@ class InteractiveWizard {
       names.length == 1
           ? 'Create this remote server?'
           : 'Create all ${names.length} remote servers?',
-      defaultValue: remoteCreateFinalConfirmationDefault,
     )) {
       return;
     }
@@ -3680,7 +3642,6 @@ class InteractiveWizard {
       names.length == 1
           ? 'Create this remote server?'
           : 'Create all ${names.length} remote servers?',
-      defaultValue: remoteCreateFinalConfirmationDefault,
     )) {
       return;
     }
@@ -3932,7 +3893,7 @@ class InteractiveWizard {
       _showRemoteCreationPermissionHelp();
       final bool repair = await Ui.confirm(
         'Replace the Application API key and retry?',
-        defaultValue: true,
+        destructive: true,
       );
       if (!repair) return null;
       final PterodactylVerification repaired =
@@ -3970,19 +3931,19 @@ class InteractiveWizard {
     }
     Ui.blank();
     if (result.isSuccess) {
-      Ui.success('Created all ${result.succeededCount} remote server(s)');
-    } else {
-      Ui.warn(
-        'Creation: ${result.succeededCount} succeeded, '
-        '${result.failedCount} failed',
-      );
+      Ui.report('Created ${result.succeededCount} remote server(s)');
+      return;
     }
+    Ui.warn(
+      'Creation: ${result.succeededCount} succeeded, '
+      '${result.failedCount} failed',
+    );
     if (remoteCreateResultNeedsCredentialRepair(result)) {
       Ui.warn('One or more requests were rejected by the Application API key.');
       _showRemoteCreationPermissionHelp();
       final bool repair = await Ui.confirm(
         'Replace the Application API key for the next attempt?',
-        defaultValue: true,
+        destructive: true,
       );
       if (repair) {
         await _replaceCredentialAndVerify(
@@ -4099,7 +4060,7 @@ class InteractiveWizard {
         case _RemoteAccountAction.remove:
           final bool confirmed = await Ui.confirm(
             'Remove ${active!.name} and its stored API credentials?',
-            defaultValue: false,
+            destructive: true,
           );
           if (confirmed) {
             await pterodactyl.removeProfile(active.id);
@@ -4286,7 +4247,7 @@ class InteractiveWizard {
       Ui.warn('The stored Client API key was rejected by the panel.');
       final bool replace = await Ui.confirm(
         'Replace the stored Client API key now?',
-        defaultValue: true,
+        destructive: true,
       );
       if (!replace) rethrow;
       return _replaceCredentialAndVerify(
@@ -4317,7 +4278,7 @@ class InteractiveWizard {
       Ui.warn('The stored Application key cannot read creation inventory.');
       final bool replace = await Ui.confirm(
         'Replace the Application API key now?',
-        defaultValue: true,
+        destructive: true,
       );
       if (!replace) return verification;
       verification = await _replaceCredentialAndVerify(
@@ -4385,9 +4346,7 @@ class InteractiveWizard {
     final int code = running
         ? await _shellRun(<String>['runtime', 'restart', name, '--no-console'])
         : await _shellRun(<String>['runtime', 'start', name, '--no-console']);
-    if (code != 0) {
-      await Ui.pause();
-    }
+    await _settle(code, running ? 'Restarted $name' : 'Started $name');
   }
 
   Future<void> _quickStop(String name) async {
@@ -4396,7 +4355,10 @@ class InteractiveWizard {
       return;
     }
     Ui.doing('Stopping $name (force after 5 seconds)');
-    await _shellRun(<String>['runtime', 'stop', name, '--graceful']);
+    await _settle(
+      await _shellRun(<String>['runtime', 'stop', name, '--graceful']),
+      'Stopped $name',
+    );
   }
 
   Future<void> _quickKill(String name) async {
@@ -4405,7 +4367,10 @@ class InteractiveWizard {
       return;
     }
     Ui.doing('Killing $name');
-    await _shellRun(<String>['runtime', 'stop', name, '--force']);
+    await _settle(
+      await _shellRun(<String>['runtime', 'stop', name, '--force']),
+      'Killed $name',
+    );
   }
 
   Future<void> _quickConsoles() async {
@@ -4418,8 +4383,7 @@ class InteractiveWizard {
       return;
     }
     if (running.stdout.trim().isEmpty) {
-      Ui.note('No running servers. Start a server before opening consoles.');
-      await Ui.pause();
+      Ui.report('No running servers');
       return;
     }
     if (await _shellRun(<String>['runtime', 'consoles']) != 0) {
@@ -4452,21 +4416,21 @@ class InteractiveWizard {
           )
           .map((_InstanceRow row) => row.name)
           .toList(growable: false);
+      final bool starting = action == InstanceBulkAction.start;
       if (targets.isEmpty) {
-        Ui.note(
-          action == InstanceBulkAction.start
-              ? 'No stopped servers.'
-              : 'No running servers.',
-        );
-        await Ui.pause();
+        Ui.report(starting ? 'No stopped servers' : 'No running servers');
         return;
       }
       Ui.doing('${action.name}: ${targets.length} servers in parallel');
       final int code = await Ui.shielded(
         () => scoped.run(<String>['instance', 'bulk', action.name, ...targets]),
       );
-      if (code != 0) await Ui.pause();
-      if (action != InstanceBulkAction.start) return;
+      await _settle(
+        code,
+        '${starting ? 'Started' : 'Stopped'} ${targets.length} '
+        'server${targets.length == 1 ? '' : 's'}',
+      );
+      if (!starting) return;
 
       // The bulk engine settles every target before console attachment.
       // Read actual state because a successful launch can exit immediately.
@@ -4599,11 +4563,7 @@ class InteractiveWizard {
       await _shellRun(<String>['runtime', 'start', name]);
       return;
     }
-
-    final bool activate = await Ui.confirm('Make $name the active instance?');
-    if (activate) {
-      await _shellRun(<String>['instance', 'activate', name]);
-    }
+    Ui.report('Created $name');
   }
 
   Future<List<String>> _selectDropinArtifacts(String prompt) async {
@@ -4651,22 +4611,23 @@ class InteractiveWizard {
       'Copy drop-ins into $name',
     );
     if (artifacts.isEmpty) {
-      Ui.note('No drop-ins selected.');
-      await Ui.pause();
+      Ui.report('No drop-ins selected');
       return;
     }
 
     final String command = _isPluginConsumer() ? 'plugins' : 'mods';
-    await _shellRun(<String>[
-      command,
-      'copy',
-      name,
-      for (final String artifact in artifacts) ...<String>[
-        '--artifact',
-        artifact,
-      ],
-    ]);
-    await Ui.pause();
+    await _settle(
+      await _shellRun(<String>[
+        command,
+        'copy',
+        name,
+        for (final String artifact in artifacts) ...<String>[
+          '--artifact',
+          artifact,
+        ],
+      ]),
+      'Copied ${artifacts.length} drop-in(s) into $name',
+    );
   }
 
   Future<void> _createMany() async {
@@ -4752,7 +4713,7 @@ class InteractiveWizard {
       );
 
       Ui.doing('Creating ${types.length} server(s) in parallel');
-      await _shellRun(<String>[
+      final int code = await _shellRun(<String>[
         'server',
         'create-many',
         '--types',
@@ -4761,10 +4722,11 @@ class InteractiveWizard {
         if (mc.trim().isNotEmpty) ...<String>['--mc', mc.trim()],
         if (isolated) '--isolated',
       ]);
-      if (!isolated) {
-        await _syncDropinsAllTargets();
-      }
-      await Ui.pause();
+      final int syncCode = isolated ? 0 : await _syncDropinsAllTargets();
+      await _settle(
+        code == 0 ? syncCode : code,
+        'Created ${types.length} server(s)',
+      );
     } finally {
       for (final PassthroughService service in typeServices.values) {
         service.disposeRcon();
@@ -4808,40 +4770,32 @@ class InteractiveWizard {
         'Pulled $pulled build(s); failed: ${failed.join(', ')} '
         '(see the errors above).',
       );
-    } else {
-      Ui.success('All $pulled platform build(s) fresh from upstream.');
+      await Ui.pause();
+      return;
     }
-    await Ui.pause();
+    Ui.report('Pulled $pulled fresh platform build(s)');
   }
 
   Future<void> _wipeEverything() async {
     Ui.warn(
       'This deletes EVERY instance across plugin/forge/fabric/neoforge consumers.',
     );
-    final bool confirmed = await Ui.confirm(
-      'Wipe every instance in every consumer profile?',
-      defaultValue: false,
-    );
-    if (!confirmed) {
-      return;
-    }
-    final bool reallySure = await Ui.confirm(
-      'Are you sure? This cannot be undone.',
-      defaultValue: false,
-    );
-    if (!reallySure) {
-      Ui.note('Wipe cancelled.');
-      await Ui.pause();
+    if (!await Ui.confirm(
+      'Wipe every instance in every consumer profile? This cannot be undone.',
+      destructive: true,
+    )) {
       return;
     }
     Ui.doing('Wiping all consumers');
-    await _shellRun(<String>[
-      'instance',
-      'delete-all',
-      '--everywhere',
-      '--force',
-    ]);
-    await Ui.pause();
+    await _settle(
+      await _shellRun(<String>[
+        'instance',
+        'delete-all',
+        '--everywhere',
+        '--force',
+      ]),
+      'Wiped every instance',
+    );
   }
 
   Future<void> _lockInstance(String name) async {
@@ -4862,8 +4816,10 @@ class InteractiveWizard {
       return;
     }
     // The service validates length/digits and reports any problem.
-    await _shellRun(<String>['instance', 'lock', name, '--pin', pin]);
-    await Ui.pause();
+    await _settle(
+      await _shellRun(<String>['instance', 'lock', name, '--pin', pin]),
+      'Locked $name',
+    );
   }
 
   Future<void> _unlockInstance(String name) async {
@@ -4873,8 +4829,10 @@ class InteractiveWizard {
     } on PromptBackNavigation {
       return;
     }
-    await _shellRun(<String>['instance', 'unlock', name, '--pin', pin]);
-    await Ui.pause();
+    await _settle(
+      await _shellRun(<String>['instance', 'unlock', name, '--pin', pin]),
+      'Unlocked $name',
+    );
   }
 
   Future<void> _toggleIsolated(
@@ -4889,11 +4847,17 @@ class InteractiveWizard {
     if (!confirmed) {
       return;
     }
-    await _shellRun(<String>['instance', 'isolated', name, target]);
-    if (target == 'false') {
-      await _syncDropinsAllTargets();
-    }
-    await Ui.pause();
+    final int code = await _shellRun(<String>[
+      'instance',
+      'isolated',
+      name,
+      target,
+    ]);
+    final int syncCode = target == 'false' ? await _syncDropinsAllTargets() : 0;
+    await _settle(
+      code == 0 ? syncCode : code,
+      currentlyIsolated ? 'Re-subscribed $name to dropins' : 'Isolated $name',
+    );
   }
 
   Future<void> _updateInstance(String name) async {
@@ -4951,17 +4915,19 @@ class InteractiveWizard {
         validator: _looksLikeMinecraftVersion,
         validationMessage: 'Use a version like 1.21.11 or 26.1.2.',
       );
-      await _shellRun(<String>[
-        'instance',
-        'safe-update',
-        name,
-        '--jar',
-        jar,
-        '--mc',
-        minecraft,
-        '--promote',
-      ]);
-      await Ui.pause();
+      await _settle(
+        await _shellRun(<String>[
+          'instance',
+          'safe-update',
+          name,
+          '--jar',
+          jar,
+          '--mc',
+          minecraft,
+          '--promote',
+        ]),
+        'Updated $name; its backup is under Backups',
+      );
       return;
     }
 
@@ -4987,12 +4953,7 @@ class InteractiveWizard {
       choice.version.trim(),
       if (refresh) '--auto-build',
     ]);
-    if (code == 0) {
-      Ui.success(
-        '$name update passed startup validation. Its backup is available under Backups.',
-      );
-    }
-    await Ui.pause();
+    await _settle(code, 'Updated $name; its backup is under Backups');
   }
 
   Future<void> _setInstancePort(String name) async {
@@ -5055,11 +5016,13 @@ class InteractiveWizard {
     if (owners.isNotEmpty &&
         !await Ui.confirm(
           'Port $port is also configured for ${owners.join(', ')}. Use it anyway?',
-          defaultValue: false,
         )) {
       return;
     }
-    await _shellRun(<String>['instance', 'port', name, '$port']);
+    await _settle(
+      await _shellRun(<String>['instance', 'port', name, '$port']),
+      'Port for $name set to $port',
+    );
   }
 
   // ─── Build & tuning ──────────────────────────────────────────────────
@@ -5084,6 +5047,7 @@ class InteractiveWizard {
       'Conservative (lower pause pressure)': 'conservative',
     };
 
+    _BuildAct last = _BuildAct.projects;
     while (true) {
       final bool plugins = _isPluginConsumer();
       final String dropinCommand = plugins ? 'plugins' : 'mods';
@@ -5182,11 +5146,15 @@ class InteractiveWizard {
         action = await menuSelect<_BuildAct>(
           'Build & tuning',
           entries,
+          initialIndex: entries.indexWhere(
+            (MenuEntry<_BuildAct> entry) => entry.value == last,
+          ),
           footer: _buildFreshnessFooter(cache),
         );
       } on PromptBackNavigation {
         return;
       }
+      last = action;
 
       switch (action) {
         case _BuildAct.projects:
@@ -5203,16 +5171,19 @@ class InteractiveWizard {
           await Ui.pause();
           break;
         case _BuildAct.keepDownloads:
-          await _shellRun(<String>[
-            'storage',
-            'keep-downloads',
-            keepDownloads ? 'off' : 'on',
-          ]);
-          await Ui.pause();
+          if (await _shellRun(<String>[
+                'storage',
+                'keep-downloads',
+                keepDownloads ? 'off' : 'on',
+              ]) !=
+              0) {
+            await Ui.pause();
+          }
           break;
         case _BuildAct.sync:
-          await _shellRun(<String>[dropinCommand, 'sync', '--all']);
-          await Ui.pause();
+          if (await _shellRun(<String>[dropinCommand, 'sync', '--all']) != 0) {
+            await Ui.pause();
+          }
           break;
         case _BuildAct.source:
           await _shellRun(<String>[dropinCommand, 'show-source']);
@@ -5297,8 +5268,10 @@ class InteractiveWizard {
     final _BuildVersionChoice versionChoice = await _pickSupportedVersion(type);
     final String label = _serverTypeLabel(type);
     Ui.doing('Building $label for Minecraft ${versionChoice.version}');
-    await _shellRun(<String>['build', type, '--mc', versionChoice.version]);
-    await Ui.pause();
+    await _settle(
+      await _shellRun(<String>['build', type, '--mc', versionChoice.version]),
+      'Built $label ${versionChoice.version}',
+    );
   }
 
   /// Platform menu with per-type build freshness so nobody has to wonder
@@ -5320,11 +5293,14 @@ class InteractiveWizard {
           detail: _freshnessDetail(_newestAgeForType(cache, type)),
         ),
     ];
-    return menuSelect<String>(
+    final String type = await menuSelect<String>(
       'Server platform',
       entries,
+      initialIndex: _lastPlatform == null ? 0 : types.indexOf(_lastPlatform!),
       footer: _buildFreshnessFooter(cache),
     );
+    _lastPlatform = type;
+    return type;
   }
 
   Future<_BuildVersionChoice> _pickSupportedVersion(String type) async {
@@ -5535,9 +5511,20 @@ class InteractiveWizard {
     return Ui.shielded(() => passthrough.run(args));
   }
 
-  Future<void> _syncDropinsAllTargets() async {
+  /// Ends a flow on a command's exit [code]: success returns straight to
+  /// the dashboard with [message] shown there, while a failure keeps its
+  /// output on screen until a key press.
+  Future<void> _settle(int code, String message) async {
+    if (code == 0) {
+      Ui.report(message);
+      return;
+    }
+    await Ui.pause();
+  }
+
+  Future<int> _syncDropinsAllTargets() {
     final String command = _isPluginConsumer() ? 'plugins' : 'mods';
-    await _shellRun(<String>[command, 'sync', '--all']);
+    return _shellRun(<String>[command, 'sync', '--all']);
   }
 
   Future<void> _withConsumer(

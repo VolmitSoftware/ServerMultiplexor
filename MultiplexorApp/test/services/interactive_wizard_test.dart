@@ -693,7 +693,10 @@ void main() {
     );
 
     test('destructive actions use exact count or whole-profile phrases', () {
-      expect(remoteBulkConfirmationPhrase(RemoteBulkAction.kill, 3), 'KILL 3');
+      expect(
+        remoteBulkConfirmationPhrase(RemoteBulkAction.delete, 3),
+        'DELETE 3',
+      );
       expect(
         remoteBulkConfirmationPhrase(
           RemoteBulkAction.delete,
@@ -709,6 +712,11 @@ void main() {
       expect(
         remoteBulkActionRequiresTypedConfirmation(RemoteBulkAction.stop),
         isFalse,
+      );
+      expect(
+        remoteBulkActionRequiresTypedConfirmation(RemoteBulkAction.kill),
+        isFalse,
+        reason: 'a kill loses no files, so it runs like any power action',
       );
     });
   });
@@ -892,10 +900,6 @@ void main() {
         () => remoteCreateNames(pattern: 'Server', count: 101),
         throwsRangeError,
       );
-    });
-
-    test('final creation confirmation is default-No', () {
-      expect(remoteCreateFinalConfirmationDefault, isFalse);
     });
 
     test('create-many result rows retain service order and positions', () {

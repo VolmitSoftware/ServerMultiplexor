@@ -1165,8 +1165,8 @@ void main() {
           'back',
           'build',
           'limits',
-          'locations',
-          if (size.$1 >= 80) ...<String>['setup', 'actions'],
+          if (size.$1 >= 80) ...<String>['locations', 'setup'],
+          'actions',
         ]);
         String row = frame.lines[frame.buttons.keys.single];
         for (ButtonSpan button in buttons) {

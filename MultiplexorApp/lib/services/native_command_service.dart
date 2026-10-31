@@ -821,20 +821,12 @@ class NativeCommandService {
       return 0;
     }
 
-    // Double confirmation gate for the cross-consumer wipe.
-    if (io.stream && !force) {
-      stdout.write(
-        'Delete EVERY instance across plugin/forge/fabric/neoforge? [y/N]: ',
-      );
-      final String answer = stdin.readLineSync()?.trim().toLowerCase() ?? '';
-      if (answer != 'y' && answer != 'yes') {
-        throw _NativeCommandException('Wipe cancelled', 1);
-      }
-      stdout.write('Are you sure? [y/N]: ');
-      final String again = stdin.readLineSync()?.trim().toLowerCase() ?? '';
-      if (again != 'y' && again != 'yes') {
-        throw _NativeCommandException('Wipe cancelled', 1);
-      }
+    if (io.stream &&
+        !force &&
+        !_confirmLine(
+          'Delete EVERY instance across plugin/forge/fabric/neoforge?',
+        )) {
+      throw _NativeCommandException('Wipe cancelled', 1);
     }
 
     final profiles = <ConsumerProfile>[
@@ -980,6 +972,13 @@ class NativeCommandService {
       return 'PIN must contain digits only';
     }
     return null;
+  }
+
+  /// Asks [question] on one line. Enter, `y`, or `yes` confirms.
+  bool _confirmLine(String question) {
+    stdout.write('$question [Y/n]: ');
+    final String answer = stdin.readLineSync()?.trim().toLowerCase() ?? 'n';
+    return answer.isEmpty || answer == 'y' || answer == 'yes';
   }
 
   /// Reads a line with terminal echo suppressed so the PIN is not shown.
@@ -9743,12 +9742,10 @@ class NativeCommandService {
         entries.map((entry) => p.basename(entry.path)).toList(growable: false)
           ..sort();
 
-    if (interactive && names.isNotEmpty) {
-      stdout.write('Type DELETE to remove ALL server instances: ');
-      final answer = stdin.readLineSync()?.trim() ?? '';
-      if (answer != 'DELETE') {
-        throw _NativeCommandException('Delete cancelled', 1);
-      }
+    if (interactive &&
+        names.isNotEmpty &&
+        !_confirmLine('Delete all ${names.length} server instances?')) {
+      throw _NativeCommandException('Delete cancelled', 1);
     }
 
     if (profile == ConsumerProfile.plugin) {

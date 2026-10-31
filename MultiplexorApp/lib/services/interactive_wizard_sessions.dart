@@ -56,7 +56,7 @@ extension _SessionWizard on InteractiveWizard {
     return path;
   }
 
-  void _sessionProfilePreview(Map<String, Object?> planned) {
+  bool _sessionProfilePreview(Map<String, Object?> planned) {
     Ui.keyValue('Profile', '${planned['name']}');
     Ui.keyValue('Duration', '${planned['durationSeconds']} seconds');
     Ui.keyValue(
@@ -156,6 +156,7 @@ extension _SessionWizard on InteractiveWizard {
       );
     }
     Ui.note('The run continues when this menu closes.');
+    return createsSettlement;
   }
 
   Future<void> _sessionRunsWizard({String? instance, String? network}) async {
@@ -242,14 +243,14 @@ extension _SessionWizard on InteractiveWizard {
         }
         final Map<String, Object?> planned =
             validated['profile']! as Map<String, Object?>;
-        _sessionProfilePreview(planned);
+        final bool replacesBlocks = _sessionProfilePreview(planned);
         if (!await Ui.confirm(
           'Start this profile on $target?',
-          defaultValue: false,
+          destructive: replacesBlocks,
         )) {
           continue;
         }
-        await _shellRun(<String>[
+        final int code = await _shellRun(<String>[
           'gameplay',
           'sessions',
           'start',
@@ -260,7 +261,7 @@ extension _SessionWizard on InteractiveWizard {
           '--start',
           '--stop-after',
         ]);
-        await Ui.pause();
+        if (code != 0) await Ui.pause();
         continue;
       }
       final Map<String, Object?> run = runs.firstWhere(
@@ -277,8 +278,15 @@ extension _SessionWizard on InteractiveWizard {
             const MenuEntry<String>('Back', value: 'back'),
           ]);
       if (action == 'back') continue;
-      await _shellRun(<String>['gameplay', 'sessions', action, choice]);
-      await Ui.pause();
+      final int code = await _shellRun(<String>[
+        'gameplay',
+        'sessions',
+        action,
+        choice,
+      ]);
+      if (code != 0 || action == 'status' || action == 'report') {
+        await Ui.pause();
+      }
     }
   }
 }

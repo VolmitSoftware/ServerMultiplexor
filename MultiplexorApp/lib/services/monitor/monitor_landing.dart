@@ -9,7 +9,11 @@
 /// Everything in this library is pure: no clock reads and no IO.
 library;
 
+import 'dart:math' as math;
+
+import '../../utils/charts/area_chart.dart';
 import '../../utils/charts/braille_chart.dart';
+import '../../utils/charts/chart_scale.dart';
 import '../../utils/charts/meter.dart';
 import '../../utils/charts/sparkline.dart';
 import '../../utils/duration_format.dart';
@@ -44,7 +48,7 @@ const int _colUpWidth = 7;
 
 /// Cells the trend sparkline may grow to when a wide terminal leaves slack;
 /// past this a typical window no longer fills it.
-const int _maxTrendCells = 26;
+const int _maxTrendCells = 48;
 
 /// The KPI strip's fleet card. The brief sizes it by its content —
 /// `N/M UP · P PLAYERS`, 18 columns at one digit per count — and a panel
@@ -87,6 +91,24 @@ const int _kpiMaxMeterCells = 16;
 const int _minChartRows = 4;
 const int _minChartWidth = 36;
 const int _chartGap = 2;
+
+/// The tallest the card's charts grow (plot rows and time axis). Past this a
+/// taller plot shows nothing new, so the rows go to the log tail instead.
+const int _maxChartRows = 18;
+
+/// The fewest rows worth spending on the card's log tail: a gap, the `LOG`
+/// rule, and two lines.
+const int _minLogRows = 4;
+
+/// The chart height a stacked row of charts is planned at, and the log rows
+/// stacking leaves free when there is a log to show.
+const int _stackChartRows = 12;
+const int _stackLogReserve = 12;
+
+/// The tallest a live card gets without a log tail to fill: its borders,
+/// the chart header, charts at [_maxChartRows], a blank, facts, and the
+/// network row. Metadata rows come on top.
+const int monitorLiveCardMaxRows = _maxChartRows + 6;
 
 /// A rendered block plus the clickable regions drawn on it, in absolute
 /// frame coordinates.
@@ -467,14 +489,26 @@ const Set<_TableColumn> _rightAligned = <_TableColumn>{
 
 /// The order columns give way in when the terminal cannot hold them all.
 /// The trend goes first: the selected card carries the real charts, and a
-/// sparkline is the one cell whose loss hides no number.
+/// sparkline is the one cell whose loss hides no number. On the narrowest
+/// terminals the name then shrinks to [_colNameMinWidth], and only after
+/// that do the state word (the row's bullet still carries its color) and
+/// the primary checkbox go.
 const List<_TableColumn> _tableDropOrder = <_TableColumn>[
   _TableColumn.trend,
   _TableColumn.up,
   _TableColumn.cpu,
   _TableColumn.mem,
   _TableColumn.players,
+  _TableColumn.tps,
+  _TableColumn.port,
 ];
+const List<_TableColumn> _tableLastDrops = <_TableColumn>[
+  _TableColumn.state,
+  _TableColumn.primary,
+];
+
+/// The narrowest a server name column shrinks to before whole columns go.
+const int _colNameMinWidth = 10;
 
 /// The columns that fit in [inner] and their widths: fixed widths, dropped
 /// whole in [_tableDropOrder] until the row fits, with a wide terminal's
@@ -516,6 +550,19 @@ const List<_TableColumn> _tableDropOrder = <_TableColumn>[
   }
 
   for (final _TableColumn drop in _tableDropOrder) {
+    if (needed() <= inner) {
+      break;
+    }
+    columns.remove(drop);
+  }
+  if (needed() > inner) {
+    widths[_TableColumn.name] = _clampInt(
+      widths[_TableColumn.name]! - (needed() - inner),
+      _colNameMinWidth,
+      widths[_TableColumn.name]!,
+    );
+  }
+  for (final _TableColumn drop in _tableLastDrops) {
     if (needed() <= inner) {
       break;
     }
@@ -598,7 +645,9 @@ MonitorPanelRender renderGroupedServerList({
     String title =
         '${focused ? '${theme.glyphs.selector} ' : ''}'
         '${monitorConsumerLabel(group.consumer)}';
-    if (group.visibleInstances.length < group.instances.length) {
+    if (group.collapsed) {
+      title += ' (${group.instances.length})';
+    } else if (group.visibleInstances.length < group.instances.length) {
       title +=
           ' ${group.offset + 1}-${group.offset + group.visibleInstances.length}'
           '/${group.instances.length}';
@@ -625,13 +674,14 @@ MonitorPanelRender renderGroupedServerList({
           colEnd: 5,
           kind: MonitorHitKind.checkbox,
         ),
-        MonitorHitbox(
-          id: '$primaryHitPrefix$instance',
-          row: row,
-          colStart: width - 9,
-          colEnd: width - 2,
-          kind: MonitorHitKind.checkbox,
-        ),
+        if (plan.columns.contains(_TableColumn.primary))
+          MonitorHitbox(
+            id: '$primaryHitPrefix$instance',
+            row: row,
+            colStart: width - 9,
+            colEnd: width - 2,
+            kind: MonitorHitKind.checkbox,
+          ),
       ]);
       content.add(
         _serverTableRow(
@@ -677,7 +727,7 @@ MonitorPanelRender renderGroupedServerList({
       theme: theme,
       emphasis: active ? PanelEmphasis.active : PanelEmphasis.normal,
     );
-    if (empty) {
+    if (empty || group.collapsed) {
       output.add(panel.first);
     } else {
       output.addAll(panel);
@@ -694,6 +744,18 @@ MonitorPanelRender renderGroupedServerList({
   }
   while (output.length < rows) {
     output.add('');
+  }
+  if (output.length > rows) {
+    // Even folded groups overflow a frame this short: keep the frame's own
+    // rows below the list (bars, footer) by clipping the list itself.
+    final int bottom = topRow + rows;
+    return MonitorPanelRender(
+      rows: output.sublist(0, rows < 0 ? 0 : rows),
+      hitboxes: <MonitorHitbox>[
+        for (final MonitorHitbox hitbox in hitboxes)
+          if (hitbox.row < bottom) hitbox,
+      ],
+    );
   }
   return MonitorPanelRender(rows: output, hitboxes: hitboxes);
 }
@@ -1050,7 +1112,7 @@ String _serverTableRow({
 
 /// One instance's trend sparkline over the window: its TPS when it has any
 /// (pinned `0..20`), otherwise its CPU (pinned `0..100`, the reading a mod
-/// server without RCON still has). A window with neither renders gaps.
+/// server without RCON still has). A window with neither stays blank.
 String _trendCell({
   required List<MetricSample> history,
   required int cells,
@@ -1070,6 +1132,9 @@ String _trendCell({
     }
     tps.add(sample.tps);
     cpu.add(sample.cpuPercent);
+  }
+  if (!anyTps && cpu.every((double? value) => value == null)) {
+    return ' ' * cells;
   }
   return renderSparkline(
     values: anyTps ? tps : cpu,
@@ -1103,6 +1168,7 @@ MonitorPanelRender renderSelectedPanel({
   required Duration range,
   required DateTime now,
   String? hoveredId,
+  List<String>? logLines,
 }) {
   final String instance = snapshot.instances[selectedIndex];
   final List<MetricSample> history = snapshot.historyFor(instance);
@@ -1137,6 +1203,7 @@ MonitorPanelRender renderSelectedPanel({
           theme: theme,
           range: range,
           now: now,
+          logLines: logLines,
         )
       : <String>[if (primaryRows > 0) _idleRow(latest: latest, theme: theme)];
   for (final String line in metadata) {
@@ -1181,10 +1248,12 @@ MonitorPanelRender renderSelectedPanel({
   );
 }
 
-/// The live card's content: a faint label row, up to three small charts side
-/// by side, a blank, the facts row, and a compact RX/TX network monitor at
-/// the bottom. When rows tighten, the blank, facts, and labels give way in
-/// that order; the charts and network monitor are the live card's signal.
+/// The live card's content: a header row of current readings, charts side
+/// by side (TPS, CPU and memory, then network and players as the width
+/// allows), a blank, the facts row, and a compact RX/TX network row unless
+/// network has its own chart. When rows tighten, the blank, facts, header,
+/// and network row give way in that order. Charts stop growing at
+/// [_maxChartRows]; [logLines] fill whatever the card has left below them.
 List<String> _liveCard({
   required List<MetricSample> history,
   required MetricSample latest,
@@ -1193,90 +1262,26 @@ List<String> _liveCard({
   required MonitorTheme theme,
   required Duration range,
   required DateTime now,
+  List<String>? logLines,
 }) {
-  bool labels = true;
-  bool blank = true;
-  bool facts = true;
-  bool network = true;
-  int chartRows = contentRows - 4;
-  if (chartRows < _minChartRows) {
-    blank = false;
-    chartRows = contentRows - 3;
+  if (contentRows < _minChartRows) {
+    return <String>[
+      if (contentRows > 0)
+        _summaryRow(latest: latest, inner: inner, theme: theme),
+    ];
   }
-  if (chartRows < _minChartRows) {
-    facts = false;
-    chartRows = contentRows - 2;
-  }
-  if (chartRows < _minChartRows) {
-    labels = false;
-    chartRows = contentRows - 1;
-  }
-  if (chartRows < _minChartRows) {
-    network = false;
-    chartRows = contentRows;
-  }
-  if (chartRows < 0) {
-    chartRows = 0;
-  }
-
-  final DateTime start = now.subtract(range);
-  bool anyTps = false;
-  for (final MetricSample sample in history) {
-    if (sample.tps != null &&
-        !sample.ts.isBefore(start) &&
-        !sample.ts.isAfter(now)) {
-      anyTps = true;
-      break;
-    }
-  }
-
-  final List<
-    ({
-      String title,
-      List<ChartPoint> points,
-      double? low,
-      double? high,
-      MonitorRamp ramp,
-    })
-  >
-  candidates =
-      <
-        ({
-          String title,
-          List<ChartPoint> points,
-          double? low,
-          double? high,
-          MonitorRamp ramp,
-        })
-      >[
-        if (anyTps)
-          (
-            title: 'TPS',
-            points: _chartPoints(history, (MetricSample s) => s.tps),
-            low: 0,
-            high: 20,
-            ramp: MonitorRamp.tps,
-          ),
-        (
-          title: 'CPU %',
-          points: _chartPoints(history, (MetricSample s) => s.cpuPercent),
-          low: 0,
-          high: 100,
-          ramp: MonitorRamp.load,
-        ),
-        (
-          title: 'MEM MiB',
-          points: _chartPoints(
-            history,
-            (MetricSample s) =>
-                s.rssBytes == null ? null : s.rssBytes! / 1048576,
-          ),
-          low: null,
-          high: null,
-          ramp: MonitorRamp.load,
-        ),
-      ];
-
+  final DateTime start = chartWindowStart(
+    history: history,
+    now: now,
+    range: range,
+  );
+  final List<_CardChart> candidates = _cardCharts(
+    history: history,
+    latest: latest,
+    start: start,
+    now: now,
+    theme: theme,
+  );
   int fit = 1;
   for (int count = candidates.length; count >= 1; count--) {
     if (count * _minChartWidth + (count - 1) * _chartGap <= inner) {
@@ -1284,63 +1289,372 @@ List<String> _liveCard({
       break;
     }
   }
-  final List<int> widths = List<int>.generate(fit, (int index) {
-    final int base = (inner - _chartGap * (fit - 1)) ~/ fit;
-    if (index < fit - 1) {
-      return base;
-    }
-    return inner - _chartGap * (fit - 1) - base * (fit - 1);
-  });
+
+  // A tall card narrower than its charts stacks the rest in further rows of
+  // the same width, keeping room for the log tail below them.
+  final int maxStacks = (candidates.length + fit - 1) ~/ fit;
+  final bool hasLog = logLines != null && logLines.isNotEmpty;
+  final int stackRoom = contentRows - 3 - (hasLog ? _stackLogReserve : 0);
+  final int stacks = _clampInt(
+    stackRoom ~/ (1 + _stackChartRows),
+    1,
+    maxStacks,
+  );
+  final List<List<_CardChart>> rowsOfCharts = <List<_CardChart>>[
+    for (int stack = 0; stack < stacks; stack++)
+      candidates.skip(stack * fit).take(fit).toList(),
+  ];
+  final List<_CardChart> charts = <_CardChart>[
+    for (final List<_CardChart> row in rowsOfCharts) ...row,
+  ];
+
+  bool labels = true;
+  bool blank = true;
+  bool facts = true;
+  bool network = !charts.any((_CardChart chart) => chart.secondary != null);
+  int chartRowsLeft() =>
+      (contentRows -
+          (stacks - 1) -
+          (stacks > 1 && hasLog ? _stackLogReserve : 0) -
+          (labels ? stacks : 0) -
+          (blank ? 1 : 0) -
+          (facts ? 1 : 0) -
+          (network ? 1 : 0)) ~/
+      stacks;
+  if (chartRowsLeft() < _minChartRows) blank = false;
+  if (chartRowsLeft() < _minChartRows) facts = false;
+  if (chartRowsLeft() < _minChartRows) labels = false;
+  if (chartRowsLeft() < _minChartRows) network = false;
+  final int chartRows = _clampInt(chartRowsLeft(), 0, _maxChartRows);
 
   final List<String> content = <String>[];
-  if (labels) {
-    final StringBuffer labelRow = StringBuffer();
-    for (int index = 0; index < fit; index++) {
-      if (index > 0) {
-        labelRow.write(' ' * _chartGap);
+  for (int stack = 0; stack < rowsOfCharts.length; stack++) {
+    final List<_CardChart> row = rowsOfCharts[stack];
+    final int count = row.length;
+    final List<int> widths = List<int>.generate(count, (int index) {
+      final int base = (inner - _chartGap * (count - 1)) ~/ count;
+      if (index < count - 1) {
+        return base;
       }
-      labelRow.write(_fitCell(candidates[index].title, widths[index]));
+      return inner - _chartGap * (count - 1) - base * (count - 1);
+    });
+    if (stack > 0) {
+      content.add('');
     }
-    content.add(theme.paint(labelRow.toString(), theme.muted));
+    if (labels) {
+      content.add(
+        <String>[
+          for (int index = 0; index < count; index++)
+            _chartHeader(row[index], widths[index], theme),
+        ].join(' ' * _chartGap),
+      );
+    }
+    content.addAll(
+      joinBlocks(<List<String>>[
+        for (int index = 0; index < count; index++)
+          row[index].secondary == null
+              ? renderAreaChart(
+                  points: row[index].points,
+                  width: widths[index],
+                  height: chartRows,
+                  start: start,
+                  end: now,
+                  theme: theme,
+                  forcedLow: row[index].low,
+                  forcedHigh: row[index].high,
+                )
+              : renderBrailleChart(
+                  series: <ChartSeries>[
+                    ChartSeries(label: 'RX', points: row[index].points),
+                    ChartSeries(
+                      label: 'TX',
+                      points: row[index].secondary!,
+                      toneIndex: 1,
+                    ),
+                  ],
+                  width: widths[index],
+                  height: chartRows,
+                  start: start,
+                  end: now,
+                  theme: theme,
+                  forcedLow: row[index].low,
+                ),
+      ], gap: ' ' * _chartGap),
+    );
   }
-  content.addAll(
-    joinBlocks(<List<String>>[
-      for (int index = 0; index < fit; index++)
-        renderBrailleChart(
-          series: <ChartSeries>[
-            ChartSeries(
-              label: candidates[index].title,
-              points: candidates[index].points,
-            ),
-          ],
-          width: widths[index],
-          height: chartRows,
-          start: start,
-          end: now,
-          theme: theme,
-          forcedLow: candidates[index].low,
-          forcedHigh: candidates[index].high,
-          ramp: candidates[index].ramp,
-        ),
-    ], gap: ' ' * _chartGap),
-  );
   if (blank) {
     content.add('');
   }
   if (facts) {
-    content.add(_factsRow(latest: latest, inner: inner, theme: theme));
+    content.add(
+      _factsRow(
+        latest: latest,
+        inner: inner,
+        theme: theme,
+        charted: <String>{
+          if (labels)
+            for (final _CardChart chart in charts) chart.title,
+        },
+      ),
+    );
   }
   if (network) {
     content.add(
       _networkMonitorRow(
-        history: history,
+        history: <MetricSample>[
+          for (final MetricSample sample in history)
+            if (!sample.ts.isBefore(start) && !sample.ts.isAfter(now)) sample,
+        ],
         latest: latest,
         inner: inner,
         theme: theme,
       ),
     );
   }
+  final int logRows = contentRows - content.length;
+  if (logLines != null && logLines.isNotEmpty && logRows >= _minLogRows) {
+    content
+      ..add('')
+      ..add(
+        theme.paint(
+          'LOG ${theme.glyphs.frameH * (inner - 4 < 0 ? 0 : inner - 4)}',
+          theme.faint,
+        ),
+      );
+    final int shown = logRows - 2;
+    final List<String> tail = logLines.length > shown
+        ? logLines.sublist(logLines.length - shown)
+        : logLines;
+    for (final String line in tail) {
+      content.add(
+        theme.paint(Ansi.clipVisible(Ansi.strip(line), inner), theme.muted),
+      );
+    }
+  }
   return content;
+}
+
+/// One chart in the live card: the reading its header leads with, the
+/// window extreme beside it, and the series it plots.
+class _CardChart {
+  const _CardChart({
+    required this.title,
+    required this.value,
+    required this.valueTone,
+    required this.stat,
+    required this.points,
+    this.secondary,
+    this.legend,
+    this.low,
+    this.high,
+  });
+
+  final String title;
+  final String value;
+  final String valueTone;
+  final String stat;
+  final List<ChartPoint> points;
+
+  /// A second series drawn as a line beside [points] (TX next to RX), which
+  /// makes the chart a two-line chart instead of a filled area.
+  final List<ChartPoint>? secondary;
+
+  /// A painted header replacing `title value`, for a chart whose readings
+  /// need their series marks beside them.
+  final String? legend;
+  final double? low;
+  final double? high;
+}
+
+/// TPS (when the server reports it), CPU, memory, network (when it has
+/// readings), and players, in the order a narrower card gives them up.
+///
+/// Each header carries the current reading and the extreme that matters:
+/// the TPS low, the CPU, memory, network, and player peaks. CPU keeps a
+/// 0-100 axis until a multi-core reading passes 100. Memory plots GiB from
+/// zero up to the server's memory limit when one is known. Network draws RX
+/// and TX as two lines, marked in the header by their line colors. Players
+/// plot up to the server's slot count.
+List<_CardChart> _cardCharts({
+  required List<MetricSample> history,
+  required MetricSample latest,
+  required DateTime start,
+  required DateTime now,
+  required MonitorTheme theme,
+}) {
+  final (double?, double?) tps = _windowExtent(
+    history,
+    start,
+    now,
+    (MetricSample s) => s.tps,
+  );
+  final (double?, double?) cpu = _windowExtent(
+    history,
+    start,
+    now,
+    (MetricSample s) => s.cpuPercent,
+  );
+  final (double?, double?) memory = _windowExtent(
+    history,
+    start,
+    now,
+    (MetricSample s) => s.rssBytes?.toDouble(),
+  );
+  final double? cpuPeak = cpu.$2;
+  final double? memoryPeak = memory.$2;
+  final int? limit = latest.memoryLimitBytes;
+  final NetworkRateUnit? unit = preferredNetworkRateUnit(history);
+  final (double?, double?) rx = _windowExtent(
+    history,
+    start,
+    now,
+    (MetricSample s) => networkRxRate(s, unit),
+  );
+  final (double?, double?) tx = _windowExtent(
+    history,
+    start,
+    now,
+    (MetricSample s) => networkTxRate(s, unit),
+  );
+  final double? networkPeak = rx.$2 == null && tx.$2 == null
+      ? null
+      : math.max(rx.$2 ?? 0, tx.$2 ?? 0);
+  final (double?, double?) players = _windowExtent(
+    history,
+    start,
+    now,
+    (MetricSample s) => s.players?.toDouble(),
+  );
+  final (double?, double?) slots = _windowExtent(
+    history,
+    start,
+    now,
+    (MetricSample s) => s.maxPlayers?.toDouble(),
+  );
+  final String mark = theme.glyphs.isAscii ? '=' : '━';
+  return <_CardChart>[
+    if (tps.$1 != null)
+      _CardChart(
+        title: 'TPS',
+        value: latest.tps?.toStringAsFixed(1) ?? 'n/a',
+        valueTone: theme.tpsTone(latest.tps),
+        stat: 'min ${tps.$1!.toStringAsFixed(1)}',
+        points: _chartPoints(history, (MetricSample s) => s.tps),
+        low: 0,
+        high: 20,
+      ),
+    _CardChart(
+      title: 'CPU',
+      value: _wholePercent(latest.cpuPercent),
+      valueTone: theme.textStrong,
+      stat: cpuPeak == null ? '' : 'peak ${cpuPeak.round()}%',
+      points: _chartPoints(history, (MetricSample s) => s.cpuPercent),
+      low: 0,
+      high: cpuPeak == null || cpuPeak <= 100
+          ? 100
+          : (cpuPeak / 50).ceil() * 50.0,
+    ),
+    _CardChart(
+      title: 'MEM',
+      value: formatBytes(latest.rssBytes),
+      valueTone: theme.textStrong,
+      stat: memoryPeak == null ? '' : 'peak ${formatBytes(memoryPeak.round())}',
+      points: _chartPoints(
+        history,
+        (MetricSample s) => s.rssBytes == null ? null : s.rssBytes! / _gib,
+      ),
+      low: 0,
+      high: limit != null && (memoryPeak == null || limit >= memoryPeak)
+          ? limit / _gib
+          : memoryPeak == null
+          ? null
+          : roomyCeiling(memoryPeak / _gib),
+    ),
+    if (networkPeak != null)
+      _CardChart(
+        title: 'NET',
+        value: '',
+        valueTone: theme.textStrong,
+        stat: 'peak ${_networkRateText(networkPeak, unit)}',
+        points: _chartPoints(
+          history,
+          (MetricSample s) => networkRxRate(s, unit),
+        ),
+        secondary: _chartPoints(
+          history,
+          (MetricSample s) => networkTxRate(s, unit),
+        ),
+        legend:
+            '${theme.paint('NET', theme.muted)} '
+            '${theme.paint(mark, theme.accent)} '
+            '${theme.paint('RX ${_networkRateText(networkRxRate(latest, unit), unit)}', '${theme.bold}${theme.textStrong}')} '
+            '${theme.paint(mark, theme.info)} '
+            '${theme.paint('TX ${_networkRateText(networkTxRate(latest, unit), unit)}', '${theme.bold}${theme.textStrong}')}',
+        low: 0,
+      ),
+    if (players.$2 != null)
+      _CardChart(
+        title: 'PLAYERS',
+        value: monitorPlayersText(latest, MonitorTheme.plain()),
+        valueTone: theme.textStrong,
+        stat: 'peak ${players.$2!.round()}',
+        points: _chartPoints(
+          history,
+          (MetricSample s) => s.players?.toDouble(),
+        ),
+        low: 0,
+        high: slots.$2 ?? roomyCeiling(players.$2!),
+      ),
+  ];
+}
+
+const double _gib = 1073741824;
+
+/// The lowest and highest reading [read] returns inside `[start, now]`.
+(double?, double?) _windowExtent(
+  List<MetricSample> history,
+  DateTime start,
+  DateTime now,
+  double? Function(MetricSample sample) read,
+) {
+  double? low;
+  double? high;
+  for (final MetricSample sample in history) {
+    if (sample.ts.isBefore(start) || sample.ts.isAfter(now)) continue;
+    final double? value = read(sample);
+    if (value == null || !value.isFinite) continue;
+    if (low == null || value < low) low = value;
+    if (high == null || value > high) high = value;
+  }
+  return (low, high);
+}
+
+/// A chart's header, exactly [width] columns: its title and current reading
+/// on the left, the window extreme faint on the right when it fits.
+String _chartHeader(_CardChart chart, int width, MonitorTheme theme) {
+  final String? legend = chart.legend;
+  if (legend != null) {
+    final int visible = Ansi.visibleLength(legend);
+    if (visible >= width) {
+      return Ansi.padVisible(Ansi.clipVisible(legend, width), width);
+    }
+    final String stat = visible + 1 + chart.stat.length <= width
+        ? chart.stat
+        : '';
+    return '$legend${' ' * (width - visible - stat.length)}'
+        '${stat.isEmpty ? '' : theme.paint(stat, theme.faint)}';
+  }
+  final String left = '${chart.title} ${chart.value}';
+  if (left.length >= width) {
+    return theme.paint(_fitCell(left, width), theme.muted);
+  }
+  final String stat = left.length + 1 + chart.stat.length <= width
+      ? chart.stat
+      : '';
+  return '${theme.paint(chart.title, theme.muted)} '
+      '${theme.paint(chart.value, '${theme.bold}${chart.valueTone}')}'
+      '${' ' * (width - left.length - stat.length)}'
+      '${stat.isEmpty ? '' : theme.paint(stat, theme.faint)}';
 }
 
 /// Maps [history] to chart points via [read], keeping nulls as gaps.
@@ -1352,7 +1666,8 @@ List<ChartPoint> _chartPoints(
     ChartPoint(ts: sample.ts, value: read(sample)),
 ];
 
-/// One compact, bottom-anchored network monitor. macOS Local samples use
+/// One compact, bottom-anchored network monitor over the charts' window.
+/// macOS Local samples use
 /// true per-process packet rates; Remote samples fall back to byte
 /// throughput because Pterodactyl does not expose packet counters.
 String _networkMonitorRow({
@@ -1385,6 +1700,9 @@ String _networkMonitorRow({
       peak = value;
     }
   }
+  if (peak != null && peak <= 0) {
+    return theme.paint('$summary · idle', theme.muted);
+  }
   final int sparkCells = _clampInt((inner - summary.length - 2) ~/ 2, 0, 24);
   if (sparkCells == 0) {
     return theme.paint(summary, theme.muted);
@@ -1415,6 +1733,32 @@ String _networkRateText(double? rate, NetworkRateUnit? unit) => switch (unit) {
   NetworkRateUnit.bytesPerSecond => formatBytesPerSecond(rate),
   null => 'n/a',
 };
+
+/// A live card with no room for charts: its state and current readings on
+/// one line.
+String _summaryRow({
+  required MetricSample latest,
+  required int inner,
+  required MonitorTheme theme,
+}) {
+  final int? uptime = latest.uptimeSeconds;
+  final List<String> facts = <String>[
+    if (latest.tps != null) 'TPS ${latest.tps!.toStringAsFixed(1)}',
+    if (latest.cpuPercent != null) 'CPU ${_wholePercent(latest.cpuPercent)}',
+    if (latest.rssBytes != null) 'MEM ${formatBytes(latest.rssBytes)}',
+    if (latest.players != null)
+      '${monitorPlayersText(latest, MonitorTheme.plain())} PLAYERS',
+    if (uptime != null)
+      'UP ${formatCompactDuration(Duration(seconds: uptime))}',
+  ];
+  final String state = monitorStateText(latest);
+  final String rest = facts.isEmpty ? '' : ' · ${facts.join(' · ')}';
+  return Ansi.clipVisible(
+    '${theme.paint(state, theme.statusTone(latest.state))}'
+    '${theme.paint(rest, theme.muted)}',
+    inner,
+  );
+}
 
 /// The idle card's one line: the state in its own tone, and what would bring
 /// the server to life — no fabricated facts, no empty chart grid.
@@ -1506,6 +1850,7 @@ String _factsRow({
   required MetricSample? latest,
   required int inner,
   required MonitorTheme theme,
+  Set<String> charted = const <String>{},
 }) {
   final int? uptime = latest?.uptimeSeconds;
   final int? latency = latest?.latencyMs;
@@ -1513,24 +1858,19 @@ String _factsRow({
   final String? version = latest?.version;
   final int? disk = latest?.diskBytes;
   final int? diskLimit = latest?.diskLimitBytes;
-  final NetworkRateUnit? networkUnit = latest == null
-      ? null
-      : preferredNetworkRateUnit(<MetricSample>[latest]);
-  final double? networkRx = latest == null
-      ? null
-      : networkRxRate(latest, networkUnit);
-  final double? networkTx = latest == null
-      ? null
-      : networkTxRate(latest, networkUnit);
   final List<String> facts = <String>[
-    'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}',
-    '${monitorPlayersText(latest, theme)} PLAYERS',
-    'PING ${latency == null ? 'n/a' : '${latency}ms'}',
-    'NET RX ${_networkRateText(networkRx, networkUnit)} TX ${_networkRateText(networkTx, networkUnit)}',
-    'MEM ${formatBytes(latest?.rssBytes)}',
-    'CPU ${formatCpuPercent(latest?.cpuPercent)}',
-    'DISK ${formatBytes(disk)}${diskLimit == null ? '' : '/${formatBytes(diskLimit)}'}',
-    version == null || version.isEmpty ? theme.glyphs.dash : version,
+    if (uptime != null)
+      'UP ${formatCompactDuration(Duration(seconds: uptime))}',
+    if (!charted.contains('PLAYERS'))
+      '${monitorPlayersText(latest, theme)} PLAYERS',
+    if (latency != null) 'PING ${latency}ms',
+    if (!charted.contains('CPU') && latest?.cpuPercent != null)
+      'CPU ${formatCpuPercent(latest?.cpuPercent)}',
+    if (!charted.contains('MEM') && latest?.rssBytes != null)
+      'MEM ${formatBytes(latest?.rssBytes)}',
+    if (disk != null)
+      'DISK ${formatBytes(disk)}${diskLimit == null ? '' : '/${formatBytes(diskLimit)}'}',
+    if (version != null && version.isNotEmpty) version,
   ];
   while (facts.length > 1 && facts.join(' · ').length > inner) {
     facts.removeLast();

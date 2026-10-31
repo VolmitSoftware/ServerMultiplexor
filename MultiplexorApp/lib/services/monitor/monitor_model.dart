@@ -31,18 +31,23 @@ const int _kpiRows = 3;
 const int _barRows = 1;
 const int _footerRows = 1;
 
+/// The narrowest frame the KPI strip still reads at; below it the strip
+/// gives its rows to the body.
+const int _kpiMinColumns = 80;
+
 /// How the body splits between the fleet table and the selected-server card.
 ///
-/// The card is sized to the selection's own state, and the table absorbs the
-/// rest: an idle selection has nothing to plot, so its card is one quiet
-/// line ([_idleCardRows]); a live one expands into charts, growing from
-/// [_minLiveCardRows] toward [_maxLiveCardRows] with whatever rows the whole
-/// fleet does not need, and never pushing the table below [_minListRows]
-/// (its borders, the column header and one instance row).
+/// The card is sized to the selection's own state, and the table keeps the
+/// rows its fleet needs: an idle selection has nothing to plot, so its card
+/// is one quiet line ([_idleCardRows]); a live one expands into charts,
+/// growing from [_minLiveCardRows] with whatever rows the fleet does not
+/// need, up to [monitorLiveCardMaxRows] without a log tail and without limit
+/// with one, and never pushing the table below [_minListRows] (its borders,
+/// the column header and one instance row). Rows the card cannot use go
+/// back to the table.
 const int _minListRows = 4;
 const int _idleCardRows = 3;
-const int _minLiveCardRows = 9;
-const int _maxLiveCardRows = 15;
+const int _minLiveCardRows = 8;
 
 /// Separator between footer hints.
 const String _hintSeparator = ' · ';
@@ -50,7 +55,7 @@ const String _hintSeparator = ' · ';
 /// Local footer key hints in display order — the row exactly as it renders on
 /// a terminal wide enough for all of it.
 const String _localFooterHints =
-    '[tab] local/remote · [enter] open · Space check · a all · x clear · d detail · Shift+R repaint · S stop · X kill · O console · '
+    '[tab] local/remote · [enter] open · Space check · a all · x clear · d detail · Shift+R repaint · S stop · X kill · ⌫ delete · O console · '
     'g consoles · n new · b build · w workspace · r range · '
     'q quit';
 
@@ -58,7 +63,7 @@ const String _localFooterHints =
 /// menu and connection card. The workspace shortcut remains visible because
 /// that card also owns files and create-many.
 const String _remoteFooterHints =
-    '[tab] local/remote · [enter] open · Space check · a all · x clear · d detail · Shift+R repaint · S stop · X kill · '
+    '[tab] local/remote · [enter] open · Space check · a all · x clear · d detail · Shift+R repaint · S stop · X kill · ⌫ delete · '
     'O live console · n new · b bulk · w workspace · c connection · r range · '
     'q quit';
 
@@ -72,11 +77,11 @@ const String _remoteFooterHints =
 /// shortcut costs a keystroke, while giving up `w` would leave the card
 /// reachable by mouse alone.
 const String _localFooterDropOrder =
-    'b build,n new,g consoles,O console,X kill,S stop,'
+    'b build,n new,g consoles,O console,X kill,⌫ delete,S stop,'
     'r range,w workspace,[tab] local/remote,x clear,a all,Space check';
 
 const String _remoteFooterDropOrder =
-    'n new,c connection,X kill,S stop,O live console,r range,b bulk,w workspace,'
+    'n new,c connection,X kill,⌫ delete,S stop,O live console,r range,b bulk,w workspace,'
     '[tab] local/remote,x clear,a all,Space check';
 
 /// The selection action bar's chips. Which set is drawn follows the
@@ -175,6 +180,11 @@ const List<ButtonSpec> _remoteEmptyWorkspaceButtons = <ButtonSpec>[
 /// name: a button chip renders hovered or pressed, and a hovered server row
 /// shows its selector. Both null (the `--once` snapshot) renders every
 /// region in its resting state.
+///
+/// [notice] is the outcome a finished flow left behind; while it is set it
+/// takes the footer's place, so a result is read without a key press.
+/// [logLines] are the selected server's log tail; a live card with spare
+/// rows shows them under its charts.
 MonitorFrame buildMonitorFrame({
   required MonitorSnapshot snapshot,
   required int selectedIndex,
@@ -191,6 +201,8 @@ MonitorFrame buildMonitorFrame({
   String? updateLabel,
   bool updateChecking = false,
   String? focusedGroup,
+  String? notice,
+  List<String>? logLines,
 }) {
   if (columns < monitorMinColumns || lines < monitorMinLines) {
     return MonitorFrame(
@@ -221,12 +233,44 @@ MonitorFrame buildMonitorFrame({
     windowEnd: now,
   );
 
-  final int bodyTop = _headerRows + _kpiRows;
-  final int bars = hasInstances ? _barRows * 2 : _barRows;
-  final int budget = lines - bodyTop - bars - _footerRows;
+  final String? selectedInstance = hasInstances
+      ? snapshot.instances[selected]
+      : null;
+  final MetricSample? selectedLatest = selectedInstance == null
+      ? null
+      : snapshot.latestFor(selectedInstance);
+  final bool selectedLive =
+      selectedLatest != null && selectedLatest.state != RuntimeState.stopped;
+  final int metadataRows = selectedInstance == null
+      ? 0
+      : selectedMetadataRowCount(
+          snapshot: snapshot,
+          instance: selectedInstance,
+          inner: columns - 4,
+        );
+  final int cardNeed =
+      selectedInstance == null || snapshot.groupedLocal && focusedGroup != null
+      ? 0
+      : metadataRows + (selectedLive ? _minLiveCardRows : _idleCardRows);
+  final _FrameBudget layout = _planFrameBudget(
+    lines: lines,
+    columns: columns,
+    // Chrome is shed for the card and a list that can still scroll, never
+    // just to show more rows of a long fleet.
+    need:
+        (!hasInstances
+            ? _minListRows
+            : snapshot.groupedLocal
+            ? localMonitorMinimumRows(snapshot)
+            : _minInt(total, 3) + 3) +
+        cardNeed,
+    bars: hasInstances ? _barRows * 2 : _barRows,
+  );
+  final int bodyTop = layout.headerRows + layout.kpiRows;
+  final int budget = lines - bodyTop - layout.bars - _footerRows;
   final int bodyRows = budget < 0 ? 0 : budget;
 
-  final List<String> header = _headerPanel(
+  final List<String> fullHeader = _headerPanel(
     snapshot: snapshot,
     instances: total,
     frame: frame,
@@ -237,42 +281,39 @@ MonitorFrame buildMonitorFrame({
     hoveredId: hoveredId,
     pressedId: pressedId,
   );
+  final List<String> header = layout.headerRows == _headerRows
+      ? fullHeader
+      : <String>[fullHeader.first];
   final List<String> rows = <String>[
     ...header,
-    ...renderKpiStrip(rollup: rollup, columns: columns, theme: theme),
+    if (layout.kpiRows > 0)
+      ...renderKpiStrip(rollup: rollup, columns: columns, theme: theme),
   ];
   final List<MonitorHitbox> hitboxes = <MonitorHitbox>[
     ..._headerActionHitboxes(header, snapshot.view),
   ];
 
-  if (hasInstances) {
-    final MetricSample? selectedLatest = snapshot.latestFor(
-      snapshot.instances[selected],
-    );
+  if (selectedInstance != null) {
     final String? operationBlockReason = snapshot.operationBlockReasonFor(
-      snapshot.instances[selected],
-    );
-    final bool selectedLive =
-        selectedLatest != null && selectedLatest.state != RuntimeState.stopped;
-    final String selectedInstance = snapshot.instances[selected];
-    final int metadataRows = selectedMetadataRowCount(
-      snapshot: snapshot,
-      instance: selectedInstance,
-      inner: columns - 4,
+      selectedInstance,
     );
 
     // The card's rows: sized to the selection's state, fed by the rows the
     // whole fleet does not need, and never starving the table below its own
     // floor. A body too short for even the idle card (unreachable above the
     // frame floor) gives everything to the table.
+    final bool hasLog = logLines != null && logLines.isNotEmpty;
+    final int liveCeiling = hasLog
+        ? bodyRows
+        : monitorLiveCardMaxRows + metadataRows;
     int cardRows;
     if (selectedLive) {
       cardRows = bodyRows - (total + 3);
       if (cardRows < _minLiveCardRows) {
         cardRows = _minLiveCardRows;
       }
-      if (cardRows > _maxLiveCardRows) {
-        cardRows = _maxLiveCardRows;
+      if (cardRows > liveCeiling) {
+        cardRows = liveCeiling;
       }
     } else {
       cardRows = _idleCardRows;
@@ -290,13 +331,21 @@ MonitorFrame buildMonitorFrame({
       cardRows = 0;
     }
     if (snapshot.groupedLocal) {
-      int spare = bodyRows - localMonitorNaturalRows(snapshot);
-      int cardFloor = informationFloor;
-      cardRows = focusedGroup != null || spare < cardFloor
+      // Groups keep their natural height when there is room; otherwise they
+      // scroll down to their minimum so the selected card still shows.
+      final int spare = bodyRows - localMonitorNaturalRows(snapshot);
+      final int room = bodyRows - localMonitorMinimumRows(snapshot);
+      final int cardFloor = informationFloor;
+      final int summaryFloor = metadataRows + _idleCardRows;
+      cardRows = focusedGroup != null
           ? 0
-          : selectedLive
-          ? _minInt(spare, _maxLiveCardRows)
-          : cardFloor;
+          : spare >= cardFloor
+          ? (selectedLive ? _minInt(spare, liveCeiling) : cardFloor)
+          : room >= cardFloor
+          ? cardFloor
+          : room >= summaryFloor
+          ? summaryFloor
+          : 0;
     }
     final int listRows = bodyRows - cardRows;
 
@@ -342,6 +391,7 @@ MonitorFrame buildMonitorFrame({
         range: range,
         now: now,
         hoveredId: hoveredId,
+        logLines: logLines,
       );
       rows.addAll(panel.rows);
       hitboxes.addAll(panel.hitboxes);
@@ -351,17 +401,24 @@ MonitorFrame buildMonitorFrame({
         ? ''
         : ' ${checked.length} SELECTED  ';
     final ButtonRowRender bar = layoutButtonRow(
-      buttons: snapshot.groupedLocal && focusedGroup != null && checked.isEmpty
-          ? <ButtonSpec>[
-              ButtonSpec(id: '$groupNewHitPrefix$focusedGroup', label: '+ NEW'),
-            ]
-          : checked.isEmpty
-          ? _selectionButtons(
-              selectedLatest,
-              operationBlockReason: operationBlockReason,
-              remote: snapshot.view == MonitorView.remote,
-            )
-          : _bulkButtons(snapshot, checked),
+      buttons: _keepLastChip(
+        snapshot.groupedLocal && focusedGroup != null && checked.isEmpty
+            ? <ButtonSpec>[
+                ButtonSpec(
+                  id: '$groupNewHitPrefix$focusedGroup',
+                  label: '+ NEW',
+                ),
+              ]
+            : checked.isEmpty
+            ? _selectionButtons(
+                selectedLatest,
+                operationBlockReason: operationBlockReason,
+                remote: snapshot.view == MonitorView.remote,
+              )
+            : _bulkButtons(snapshot, checked),
+        columns - selectionLabel.length,
+        indent: checked.isEmpty ? 1 : 0,
+      ),
       width: columns - selectionLabel.length,
       theme: theme,
       hoveredId: hoveredId,
@@ -405,32 +462,47 @@ MonitorFrame buildMonitorFrame({
     hitboxes.addAll(body.hitboxes);
   }
 
-  final ButtonRowRender workspace = layoutButtonRow(
-    buttons: snapshot.view == MonitorView.remote
-        ? (remoteDisconnected
-              ? _remoteEmptyWorkspaceButtons
-              : _remoteWorkspaceButtons)
-        : _workspaceButtons,
-    width: columns,
-    theme: theme,
-    hoveredId: hoveredId,
-    pressedId: pressedId,
-  );
-  rows.add(workspace.row);
-  hitboxes.addAll(_buttonHits(workspace.spans, rows.length - 1));
+  if (layout.bars == _barRows * 2 || !hasInstances) {
+    final ButtonRowRender workspace = layoutButtonRow(
+      buttons: _keepLastChip(
+        snapshot.view == MonitorView.remote
+            ? (remoteDisconnected
+                  ? _remoteEmptyWorkspaceButtons
+                  : _remoteWorkspaceButtons)
+            : _workspaceButtons,
+        columns,
+      ),
+      width: columns,
+      theme: theme,
+      hoveredId: hoveredId,
+      pressedId: pressedId,
+    );
+    rows.add(workspace.row);
+    hitboxes.addAll(_buttonHits(workspace.spans, rows.length - 1));
+  }
 
   final String? buttonLabel = updateLabel == null
       ? null
       : Ansi.clipVisible(updateLabel, columns ~/ 2 - 4);
   final int updateWidth = buttonLabel == null ? 0 : buttonLabel.length + 4;
   final int hintsWidth = columns - updateWidth - (updateWidth > 0 ? 1 : 0);
-  final String hints = _footerHints(
-    hintsWidth,
-    snapshot.view,
-    hasChecked: checked.isNotEmpty,
-    groupedLocal: snapshot.groupedLocal,
-  );
-  String footer = theme.paint(Ansi.clipVisible(hints, hintsWidth), theme.faint);
+  String footer = notice == null
+      ? theme.paint(
+          Ansi.clipVisible(
+            _footerHints(
+              hintsWidth,
+              snapshot.view,
+              hasChecked: checked.isNotEmpty,
+              groupedLocal: snapshot.groupedLocal,
+            ),
+            hintsWidth,
+          ),
+          theme.faint,
+        )
+      : theme.paint(
+          Ansi.clipVisible('✔ $notice', hintsWidth),
+          '${theme.bold}${theme.ok}',
+        );
   if (buttonLabel != null) {
     final ButtonRowRender update = layoutButtonRow(
       buttons: <ButtonSpec>[
@@ -459,6 +531,56 @@ MonitorFrame buildMonitorFrame({
     columns: columns,
     lines: lines,
   );
+}
+
+/// How a frame of [lines] rows spends them: a three-row header panel or its
+/// one-row title, the KPI strip or nothing, and one or two action bars.
+typedef _FrameBudget = ({int headerRows, int kpiRows, int bars});
+
+/// Gives the body the [need] rows its list and selected card want by
+/// shedding chrome in order: the KPI strip, then the header's facts and
+/// borders, then the workspace bar (whose card stays one `w` away). A
+/// frame narrower than [_kpiMinColumns] never draws the strip.
+_FrameBudget _planFrameBudget({
+  required int lines,
+  required int columns,
+  required int need,
+  required int bars,
+}) {
+  int headerRows = _headerRows;
+  int kpiRows = columns >= _kpiMinColumns ? _kpiRows : 0;
+  int barRows = bars;
+  int body() => lines - headerRows - kpiRows - barRows - _footerRows;
+  if (body() < need) kpiRows = 0;
+  if (body() < need) headerRows = 1;
+  if (body() < need && barRows > _barRows) barRows = _barRows;
+  return (headerRows: headerRows, kpiRows: kpiRows, bars: barRows);
+}
+
+/// [buttons] trimmed to fit [width] while keeping the last chip, the MORE
+/// card that reaches everything the bar had to leave out. Chips go from the
+/// end of the row, just before it.
+List<ButtonSpec> _keepLastChip(
+  List<ButtonSpec> buttons,
+  int width, {
+  int indent = 1,
+}) {
+  int needed(List<ButtonSpec> row) {
+    int total = indent;
+    for (int index = 0; index < row.length; index++) {
+      total +=
+          row[index].labelFor(showShortcut: true).length +
+          4 +
+          (index == 0 ? 0 : 1);
+    }
+    return total;
+  }
+
+  final List<ButtonSpec> kept = List<ButtonSpec>.of(buttons);
+  while (kept.length > 1 && needed(kept) > width) {
+    kept.removeAt(kept.length - 2);
+  }
+  return kept;
 }
 
 List<ButtonSpec> _bulkButtons(MonitorSnapshot snapshot, Set<String> checked) {

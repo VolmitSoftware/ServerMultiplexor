@@ -2144,7 +2144,6 @@ Future<bool> _confirmDriveHostKeys(
   }
   final bool confirmed = await Ui.confirm(
     'Trust exactly these ${candidates.length} SSH host keys?',
-    defaultValue: false,
   );
   if (!confirmed) {
     stdout.writeln('[CANCELLED] No SSH host keys were changed.');

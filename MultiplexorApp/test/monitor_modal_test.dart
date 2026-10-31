@@ -333,40 +333,102 @@ void main() {
       final CardBounds bounds = cardBounds(frame);
       for (final int index in <int>[
         for (int row = 0; row < 30; row++)
-          if (row < bounds.top || row > bounds.bottom) row,
+          if (row < bounds.top - 1 || row > bounds.bottom + 1) row,
       ]) {
         expect(frame.rows[index], base.rows[index], reason: 'row $index');
       }
     });
 
-    test('keeps the base text left of the card on every card row', () {
+    test('keeps the base text on both sides of every card row', () {
       final MonitorFrame base = baseFrame();
       final MonitorFrame frame = instanceOverlay();
       final CardBounds bounds = cardBounds(frame);
       for (int index = bounds.top; index <= bounds.bottom; index++) {
+        final String text = Ansi.strip(base.rows[index]);
         expect(
-          plainRows(frame)[index].substring(0, 27),
-          Ansi.strip(base.rows[index]).substring(0, 27),
+          plainRows(frame)[index].substring(0, bounds.left - 1),
+          text.substring(0, bounds.left - 1),
+          reason: 'row $index',
+        );
+        expect(
+          plainRows(frame)[index].substring(bounds.right + 1),
+          text.substring(bounds.right + 1),
           reason: 'row $index',
         );
       }
     });
 
-    test('blanks the base text right of the card on every card row', () {
+    test('clears a one-cell margin around the card', () {
       final MonitorFrame frame = instanceOverlay();
       final CardBounds bounds = cardBounds(frame);
+      final List<String> rows = plainRows(frame);
+      final String clear = ' ' * (bounds.right - bounds.left + 2);
+      expect(
+        rows[bounds.top - 1].substring(bounds.left - 1, bounds.right + 1),
+        clear,
+      );
+      expect(
+        rows[bounds.bottom + 1].substring(bounds.left - 1, bounds.right + 1),
+        clear,
+      );
       for (int index = bounds.top; index <= bounds.bottom; index++) {
-        expect(
-          plainRows(frame)[index].substring(73),
-          ' ' * 27,
-          reason: 'row $index',
-        );
+        expect(rows[index][bounds.left - 1], ' ', reason: 'row $index');
+        expect(rows[index][bounds.right], ' ', reason: 'row $index');
       }
     });
 
-    test('draws the esc hint on the row just inside the bottom border', () {
+    test('dims the dashboard behind the card', () {
+      final MonitorTheme theme = truecolor();
+      final MonitorFrame frame = instanceOverlay(theme: theme);
+      final CardBounds bounds = cardBounds(frame);
+      expect(frame.rows.first, startsWith(theme.faint));
+      expect(frame.rows[bounds.top], startsWith(theme.faint));
+    });
+
+    test('sizes the card to its action grid', () {
+      final CardBounds roomy = cardBounds(instanceOverlay(columns: 100));
+      final CardBounds wide = cardBounds(instanceOverlay(columns: 300));
+      expect(wide.right - wide.left, roomy.right - roomy.left);
+      expect(wide.right - wide.left, lessThanOrEqualTo(84));
+      final CardBounds narrow = cardBounds(instanceOverlay(columns: 80));
+      expect(narrow.right - narrow.left, lessThan(roomy.right - roomy.left));
+    });
+
+    test('lines the grid columns up across every section', () {
       final MonitorFrame frame = instanceOverlay();
-      expect(rowWith(frame, 'esc closes'), cardBounds(frame).bottom - 1);
+      expect(
+        boxFor(frame, 'im:restart')!.colStart,
+        boxFor(frame, 'im:settings')!.colStart,
+      );
+      expect(
+        boxFor(frame, 'im:stop')!.colStart,
+        boxFor(frame, 'im:backups')!.colStart,
+      );
+    });
+
+    test('labels its action groups and leads with the server readings', () {
+      final MonitorFrame frame = instanceOverlay();
+      final CardBounds bounds = cardBounds(frame);
+      expect(plainRows(frame)[bounds.top + 1], contains('port 25565'));
+      for (final String heading in <String>[
+        'RUN',
+        'CONFIGURE',
+        'FILES',
+        'DANGER',
+      ]) {
+        expect(rowWith(frame, '── $heading ─'), greaterThan(bounds.top));
+      }
+      expect(
+        plainRows(frame).join('\n'),
+        contains('Stop the server to add addons'),
+      );
+    });
+
+    test('inlays the esc hint in the bottom border', () {
+      final MonitorFrame frame = instanceOverlay();
+      final CardBounds bounds = cardBounds(frame);
+      expect(rowWith(frame, 'esc closes'), bounds.bottom);
+      expect(plainRows(frame)[bounds.bottom], contains('└─ arrows move'));
     });
 
     test('badges the instance card with the sampled state', () {
@@ -388,7 +450,7 @@ void main() {
         startsWith('┌─ WORKSPACE'),
       );
       expect(plainRows(frame)[bounds.bottom][bounds.right - 1], '┘');
-      expect(rowWith(frame, 'esc closes'), bounds.bottom - 1);
+      expect(rowWith(frame, 'esc closes'), bounds.bottom);
     });
   });
 
@@ -468,14 +530,15 @@ void main() {
     test('offsets button spans by the card left edge and its border', () {
       final MonitorFrame frame = instanceOverlay();
       final MonitorHitbox stop = boxFor(frame, 'im:stop')!;
-      // card left 27 + border/pad 2 + row indent 2, then hotkey + label.
-      expect(stop.row, cardBounds(frame).top + 1);
-      expect(stop.colStart, 31);
-      expect(stop.colEnd, 41);
+      // Card left 12 + border/pad 2; each span covers its whole column,
+      // and Factory reset makes the first column 19 wide.
+      expect(stop.row, rowWith(frame, '── RUN ') + 1);
+      expect(stop.colStart, 14);
+      expect(stop.colEnd, 33);
       final MonitorHitbox restart = boxFor(frame, 'im:restart')!;
-      expect(restart.row, cardBounds(frame).top + 1);
-      expect(restart.colStart, 43);
-      expect(restart.colEnd, 56);
+      expect(restart.row, stop.row);
+      expect(restart.colStart, 35);
+      expect(restart.colEnd, 48);
     });
 
     test('emits scrim, then card, then buttons so the topmost layer wins', () {
@@ -506,8 +569,8 @@ void main() {
       expect(cardBoxes.length, bottomBorder - topBorder + 1);
       for (final MonitorHitbox box in cardBoxes) {
         expect(box.kind, MonitorHitKind.modalScrim);
-        expect(box.colStart, 27);
-        expect(box.colEnd, 73);
+        expect(box.colStart, 12);
+        expect(box.colEnd, 88);
       }
       expect(cardBoxes.map((MonitorHitbox box) => box.row).toSet(), <int>{
         for (int index = topBorder; index <= bottomBorder; index++) index,
@@ -581,17 +644,19 @@ void main() {
 
     test('moves vertically to the closest button on the nearest row', () {
       final MonitorFrame frame = instanceOverlay();
+      // Addons is dimmed while running, so down from Stop lands on its
+      // nearest neighbour; columns line up, so Restart lands straight down.
       expect(
         moveModalSelection(frame.hitboxes, 'im:stop', ModalMove.down),
-        'im:console',
+        'im:settings',
       );
       expect(
         moveModalSelection(frame.hitboxes, 'im:restart', ModalMove.down),
-        'im:setPort',
+        'im:settings',
       );
       expect(
-        moveModalSelection(frame.hitboxes, 'im:setPort', ModalMove.up),
-        'im:restart',
+        moveModalSelection(frame.hitboxes, 'im:motd', ModalMove.up),
+        'im:makeActive',
       );
     });
 
@@ -599,15 +664,15 @@ void main() {
       final MonitorFrame frame = instanceOverlay(state: RuntimeState.stopped);
       expect(
         moveModalSelection(frame.hitboxes, 'im:start', ModalMove.right),
-        'im:start',
+        'im:makeActive',
       );
       expect(
         moveModalSelection(frame.hitboxes, 'im:start', ModalMove.down),
-        'im:setPort',
+        'im:addons',
       );
       expect(
         moveModalSelection(frame.hitboxes, 'missing', ModalMove.down),
-        'im:setPort',
+        'im:addons',
       );
     });
 
@@ -623,7 +688,7 @@ void main() {
     test('offers addons only for stopped Local instances', () {
       final MonitorFrame stopped = instanceOverlay(state: RuntimeState.stopped);
       expect(buttonIds(stopped), contains('im:addons'));
-      expect(plainRows(stopped).join('\n'), contains('[ O ADDONS ]'));
+      expect(plainRows(stopped).join('\n'), contains('[o] Addons'));
       final MonitorHitbox addons = boxFor(stopped, 'im:addons')!;
       expect(
         hitTest(stopped.hitboxes, row: addons.row, col: addons.colStart),
@@ -639,7 +704,7 @@ void main() {
             reason: state.name,
           );
           expect(modalActionIdForHotkey(live.hitboxes, 'o'), isNull);
-          expect(plainRows(live).join('\n'), contains('[ O ADDONS ]'));
+          expect(plainRows(live).join('\n'), contains('[o] Addons'));
         }
         final MonitorFrame remote = instanceOverlay(remote: true, state: state);
         expect(
@@ -647,7 +712,7 @@ void main() {
           isNot(contains('im:addons')),
           reason: state.name,
         );
-        expect(plainRows(remote).join('\n'), isNot(contains('ADDONS')));
+        expect(plainRows(remote).join('\n'), isNot(contains('Addons')));
       }
     });
 
@@ -660,9 +725,9 @@ void main() {
 
       expect(text, contains('BLOCKED'));
       expect(text, contains('node is under maintenance'));
-      expect(text, contains('[ S STOP ]'));
-      expect(text, contains('[ R RESTART ]'));
-      expect(text, contains('[ C CONSOLE ]'));
+      expect(text, contains('[s] Stop'));
+      expect(text, contains('[r] Restart'));
+      expect(text, contains('[c] Console'));
       expect(
         buttonIds(frame),
         isNot(containsAll(<String>['im:stop', 'im:restart', 'im:console'])),
@@ -698,14 +763,14 @@ void main() {
         );
         final String text = plainRows(frame).join('\n');
         for (final String label in <String>[
-          'E SETTINGS',
-          'H HISTORY',
-          'P PULL TO LOCAL',
-          'F OPEN FOLDER',
-          'N REINSTALL',
-          'D DELETE',
+          '[e] Settings',
+          '[h] History',
+          '[p] Pull to local',
+          '[f] Open folder',
+          '[n] Reinstall',
+          '[d] Delete',
         ]) {
-          expect(text, contains('[ $label ]'));
+          expect(text, contains(label));
         }
         expect(buttonIds(frame), isNot(contains('im:pullToLocal')));
       },
@@ -739,7 +804,7 @@ void main() {
       );
 
       expect(buttonIds(frame), isNot(contains('im:pullToLocal')));
-      expect(plainRows(frame).join('\n'), contains('[ P PULL TO LOCAL ]'));
+      expect(plainRows(frame).join('\n'), contains('[p] Pull to local'));
     });
 
     test('withholds Remote pull from every sampled live state', () {
@@ -757,7 +822,7 @@ void main() {
         );
         expect(
           plainRows(frame).join('\n'),
-          contains('[ P PULL TO LOCAL ]'),
+          contains('[p] Pull to local'),
           reason: state.name,
         );
       }
@@ -809,8 +874,8 @@ void main() {
       final List<String> rows = plainRows(
         instanceOverlay(state: RuntimeState.stopped),
       );
-      expect(rows.join('\n'), contains('[ R RESTART ]'));
-      expect(rows.join('\n'), contains('[ C CONSOLE ]'));
+      expect(rows.join('\n'), contains('[r] Restart'));
+      expect(rows.join('\n'), contains('[c] Console'));
     });
 
     test('treats a mid-flight state as live, not stopped', () {
@@ -856,17 +921,17 @@ void main() {
         expect(buttonIds(isolatedFrame), contains('im:shared'));
         expect(buttonIds(isolatedFrame), isNot(contains('im:isolated')));
         expect(buttonIds(isolatedFrame), contains('im:copyDropins'));
-        expect(plainRows(isolatedFrame).join('\n'), contains('[ I SHARE ]'));
+        expect(plainRows(isolatedFrame).join('\n'), contains('[i] Share'));
         expect(
           plainRows(isolatedFrame).join('\n'),
-          contains('[ Y COPY DROP-INS ]'),
+          contains('[y] Copy drop-ins'),
         );
 
         final MonitorFrame sharedFrame = instanceOverlay();
         expect(buttonIds(sharedFrame), contains('im:isolated'));
         expect(buttonIds(sharedFrame), isNot(contains('im:shared')));
         expect(buttonIds(sharedFrame), isNot(contains('im:copyDropins')));
-        expect(plainRows(sharedFrame).join('\n'), contains('[ I ISOLATE ]'));
+        expect(plainRows(sharedFrame).join('\n'), contains('[i] Isolate'));
       },
     );
 
@@ -907,7 +972,7 @@ void main() {
     test('never puts the bar-only new instance action on the card', () {
       final MonitorFrame frame = workspaceOverlay();
       expect(buttonIds(frame), isNot(contains('wm:newInstance')));
-      expect(plainRows(frame).join('\n'), isNot(contains('NEW')));
+      expect(plainRows(frame).join('\n'), isNot(contains('New')));
     });
 
     test('offers account, files, create-many, and bulk actions remotely', () {
@@ -919,10 +984,10 @@ void main() {
         'wm:bulkActions',
       });
       final String text = plainRows(frame).join('\n');
-      expect(text, contains('[ C CONNECTION ]'));
-      expect(text, contains('[ F FILES ]'));
-      expect(text, contains('[ M CREATE MANY ]'));
-      expect(text, contains('[ B BULK ACTIONS ]'));
+      expect(text, contains('[c] Connection'));
+      expect(text, contains('[f] Files'));
+      expect(text, contains('[m] Create many'));
+      expect(text, contains('[b] Bulk actions'));
     });
   });
 
@@ -933,52 +998,59 @@ void main() {
         state: RuntimeState.stopped,
         theme: theme,
       );
-      final int row = rowWith(frame, 'FACTORY RESET');
+      final int row = rowWith(frame, 'Factory reset');
       expect(row, greaterThan(0));
-      expect(frame.rows[row], contains(theme.danger));
-      expect(frame.rows[row], contains('DELETE'));
+      expect(
+        frame.rows[row],
+        contains(theme.paint('Factory reset', theme.danger)),
+      );
+      expect(frame.rows[row], contains(theme.paint('Delete', theme.danger)));
     });
 
     test('paints the workspace wipe chip in the danger tone', () {
       final MonitorTheme theme = truecolor();
       final MonitorFrame frame = workspaceOverlay(theme: theme);
-      final int row = rowWith(frame, 'WIPE');
+      final int row = rowWith(frame, 'Wipe');
       expect(row, greaterThan(0));
-      expect(frame.rows[row], contains(theme.danger));
+      expect(frame.rows[row], contains(theme.paint('Wipe', theme.danger)));
     });
 
-    test('paints only the hovered chip row in the accent tone', () {
+    test('puts only the hovered cell on the selection bar', () {
       final MonitorTheme theme = truecolor();
       final MonitorFrame frame = instanceOverlay(
         theme: theme,
         hoveredId: 'im:stop',
       );
-      final int hovered = rowWith(frame, 'STOP');
-      expect(frame.rows[hovered], contains(theme.accent));
+      final int hovered = rowWith(frame, 'Stop');
+      final String row = frame.rows[hovered];
+      expect(
+        Ansi.strip(row.substring(row.indexOf(theme.selectionBar))),
+        startsWith('▸ [s] Stop'),
+      );
       for (int index = 0; index < frame.rows.length; index++) {
         if (index == hovered) {
           continue;
         }
         expect(
           frame.rows[index],
-          isNot(contains(theme.accent)),
+          isNot(contains(theme.selectionBar)),
           reason: 'row $index',
         );
       }
     });
 
-    test('paints the keyboard-selected chip in the accent tone', () {
+    test('puts the keyboard-selected cell on the selection bar', () {
       final MonitorTheme theme = truecolor();
       final MonitorFrame frame = instanceOverlay(
         theme: theme,
         selectedId: 'im:restart',
       );
-      final int selected = rowWith(frame, 'RESTART');
-      expect(frame.rows[selected], contains(theme.accent));
+      final String row = frame.rows[rowWith(frame, 'Restart')];
       expect(
-        frame.rows[rowWith(frame, 'CONSOLE')],
-        isNot(contains(theme.accent)),
+        Ansi.strip(row.substring(row.indexOf(theme.selectionBar))),
+        startsWith('▸ [r] Restart'),
       );
+      expect(plainRows(frame).join('\n'), isNot(contains('▸ [s] Stop')));
     });
 
     test('paints the pressed chip in the uniform press flash', () {
@@ -988,7 +1060,7 @@ void main() {
         theme: theme,
         pressedId: 'im:delete',
       );
-      final int row = rowWith(frame, 'DELETE');
+      final int row = rowWith(frame, 'Delete');
       expect(frame.rows[row], contains('${theme.bold}${theme.textStrong}'));
     });
 
@@ -1020,77 +1092,73 @@ void main() {
 
     test('spends the whole frame width when the inset card is too narrow', () {
       final MonitorFrame frame = instanceOverlay(columns: 28);
-      expect(plainRows(frame)[9], startsWith('┌─ alpha '));
+      expect(rowWith(frame, '┌─ alpha '), isNonNegative);
+      expect(plainRows(frame)[rowWith(frame, '┌─ alpha ')], startsWith('┌'));
       for (final String row in frame.rows) {
         expect(Ansi.visibleLength(row), 28);
       }
     });
 
-    test('never trades a chip away for the eight-column inset', () {
-      // The inset would leave 32 columns, one short of what the destructive
-      // row needs, so the card takes the whole frame rather than drop DELETE.
+    test('keeps every destructive action at forty columns', () {
       final MonitorFrame frame = instanceOverlay(
         state: RuntimeState.stopped,
         columns: 40,
       );
       final String text = plainRows(frame).join('\n');
-      expect(text, contains('[ X FACTORY RESET ]'));
-      expect(text, contains('[ D DELETE ]'));
+      expect(text, contains('[x] Factory reset'));
+      expect(text, contains('[d] Delete'));
       expect(
         buttonIds(frame),
         containsAll(<String>['im:factoryReset', 'im:delete']),
       );
     });
 
-    test(
-      'keeps every action while suppressing only hotkeys that do not fit',
-      () {
-        // The destructive row needs all 35 columns without its shortcut
-        // prefixes, while the shorter rows can still show theirs.
-        final MonitorFrame frame = instanceOverlay(
-          state: RuntimeState.stopped,
-          columns: 35,
-        );
-        expect(Ansi.visibleLength(frame.rows[10]), 35);
-        expect(buttonIds(frame), <String>{
-          'im:start',
-          'im:setPort',
-          'im:pushToRemote',
-          'im:addons',
-          'im:backups',
-          'im:settings',
-          'im:makeActive',
-          'im:motd',
-          'im:lock',
-          'im:isolated',
-          'im:folder',
-          'im:update',
-          'im:factoryReset',
-          'im:delete',
-        });
-        for (final String label in <String>[
-          '[ S START ]',
-          '[ R RESTART ]',
-          '[ C CONSOLE ]',
-          '[ T SET PORT ]',
-          '[ P PUSH TO REMOTE ]',
-          '[ O ADDONS ]',
-          '[ A MAKE ACTIVE ]',
-          '[ M MOTD ]',
-          '[ L LOCK ]',
-          '[ I ISOLATE ]',
-          '[ F FOLDER ]',
-          '[ U UPDATE ]',
-          '[ FACTORY RESET ]',
-          '[ DELETE ]',
-        ]) {
-          expect(plainRows(frame).join('\n'), contains(label), reason: label);
-        }
-      },
-    );
+    test('keeps every action and its hotkey in a narrow card', () {
+      // Cells stack into a single column, so even 35 columns fits every
+      // action whole with its key.
+      final MonitorFrame frame = instanceOverlay(
+        state: RuntimeState.stopped,
+        columns: 35,
+      );
+      expect(Ansi.visibleLength(frame.rows[10]), 35);
+      expect(buttonIds(frame), <String>{
+        'im:start',
+        'im:setPort',
+        'im:pushToRemote',
+        'im:addons',
+        'im:backups',
+        'im:settings',
+        'im:makeActive',
+        'im:motd',
+        'im:lock',
+        'im:isolated',
+        'im:folder',
+        'im:update',
+        'im:factoryReset',
+        'im:delete',
+      });
+      for (final String label in <String>[
+        '[s] Start',
+        '[r] Restart',
+        '[c] Console',
+        '[t] Set port',
+        '[p] Push to remote',
+        '[o] Addons',
+        '[a] Make active',
+        '[m] MOTD',
+        '[l] Lock',
+        '[i] Isolate',
+        '[f] Folder',
+        '[u] Update',
+        '[x] Factory reset',
+        '[d] Delete',
+      ]) {
+        expect(plainRows(frame).join('\n'), contains(label), reason: label);
+      }
+    });
 
     test('renders every workspace chip at the content floor', () {
-      // BUILD & TUNING + PULL BUILDS is the widest workspace row: 41 columns.
+      // Build & tuning, the widest workspace cell, needs 20 columns.
       final MonitorFrame frame = workspaceOverlay(columns: 41);
       expect(Ansi.visibleLength(frame.rows[12]), 41);
       expect(buttonIds(frame), <String>{
@@ -1111,9 +1179,9 @@ void main() {
         columns: 24,
       );
       expect(buttonIds(local), contains('im:pushToRemote'));
-      expect(plainRows(local).join('\n'), contains('[ PUSH TO REMOTE ]'));
+      expect(plainRows(local).join('\n'), contains('[p] Push to remote'));
       expect(buttonIds(local), contains('im:addons'));
-      expect(plainRows(local).join('\n'), contains('[ O ADDONS ]'));
+      expect(plainRows(local).join('\n'), contains('[o] Addons'));
 
       final MonitorFrame remote = instanceOverlay(
         remote: true,
@@ -1121,33 +1189,27 @@ void main() {
         columns: 24,
       );
       expect(buttonIds(remote), contains('im:pullToLocal'));
-      expect(plainRows(remote).join('\n'), contains('[ PULL TO LOCAL ]'));
+      expect(plainRows(remote).join('\n'), contains('[p] Pull to local'));
     });
 
-    test('drops button rows from the bottom when the frame is short', () {
-      final MonitorFrame frame = instanceOverlay(lines: 6);
-      expect(frame.rows.length, 6);
+    test('drops headings, then button rows from the bottom, when short', () {
+      final MonitorFrame frame = instanceOverlay(lines: 5);
+      expect(frame.rows.length, 5);
+      expect(rowWith(frame, '── RUN '), -1);
       expect(
         buttonIds(frame),
-        containsAll(<String>['im:stop', 'im:restart', 'im:console']),
+        containsAll(<String>['im:stop', 'im:restart', 'im:settings']),
       );
       expect(buttonIds(frame), isNot(contains('im:folder')));
       expect(rowWith(frame, 'esc closes'), 4);
     });
 
-    test('keeps the first button row at the smallest workable height', () {
-      final MonitorFrame frame = instanceOverlay(lines: 4);
-      expect(frame.rows.length, 4);
-      expect(buttonIds(frame), contains('im:stop'));
-      expect(buttonIds(frame), isNot(contains('im:console')));
-      expect(rowWith(frame, 'esc closes'), 2);
-    });
-
-    test('drops the esc hint before it drops the last button row', () {
+    test('keeps the first button row and the hint at the smallest height', () {
       final MonitorFrame frame = instanceOverlay(lines: 3);
       expect(frame.rows.length, 3);
       expect(buttonIds(frame), contains('im:stop'));
-      expect(rowWith(frame, 'esc closes'), -1);
+      expect(buttonIds(frame), isNot(contains('im:settings')));
+      expect(rowWith(frame, 'esc closes'), 2);
     });
 
     test('holds the frame invariants at absurd sizes', () {

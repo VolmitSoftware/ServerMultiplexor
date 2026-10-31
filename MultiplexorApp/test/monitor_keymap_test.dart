@@ -105,6 +105,20 @@ void main() {
       );
     });
 
+    test(
+      'maps both delete keys to deleting the checked or focused servers',
+      () {
+        expect(
+          monitorActionForEvent(const TermEvent(TermEventKind.backspace)),
+          MonitorAction.delete,
+        );
+        expect(
+          monitorActionForEvent(const TermEvent(TermEventKind.delete)),
+          MonitorAction.delete,
+        );
+      },
+    );
+
     test('maps w to the workspace card behind the WORKSPACES header', () {
       expect(monitorActionForEvent(typed('w')), MonitorAction.workspaceCard);
     });
@@ -149,6 +163,8 @@ void main() {
         TermEventKind.ctrlC,
         TermEventKind.tab,
         TermEventKind.char,
+        TermEventKind.backspace,
+        TermEventKind.delete,
       };
       final Iterable<TermEventKind> unbound = TermEventKind.values.where(
         (TermEventKind kind) => !bound.contains(kind),

@@ -5,7 +5,6 @@ extension _SwarmWizard on InteractiveWizard {
     final _InstanceRow? instance = await _loadInstanceRow(name);
     if (instance == null || !instance.isolated) {
       Ui.note('Bot swarms require an isolated Local game server.');
-      await Ui.pause();
       return;
     }
     final String? root = await passthrough.captureStdoutLine(<String>[
@@ -24,7 +23,6 @@ extension _SwarmWizard on InteractiveWizard {
         Ui.note(
           'Bot swarms require a standalone game server outside a network.',
         );
-        await Ui.pause();
         return;
       }
     }
@@ -207,8 +205,13 @@ extension _SwarmWizard on InteractiveWizard {
         'The server must already use offline loopback access and will remain running.',
       );
     }
-    if (!await Ui.confirm('Run this swarm?', defaultValue: false)) return;
-    await _shellRun(<String>[
+    if (!await Ui.confirm(
+      'Run this swarm?',
+      destructive: placement == 'arena',
+    )) {
+      return;
+    }
+    final int code = await _shellRun(<String>[
       'gameplay',
       'swarm',
       selected,
@@ -232,7 +235,7 @@ extension _SwarmWizard on InteractiveWizard {
       if (chat) '--chat',
       if (stopped) ...<String>['--prepare', '--start', '--stop-after'],
     ]);
-    await Ui.pause();
+    if (code != 0) await Ui.pause();
   }
 
   Future<String> _swarmNumber(

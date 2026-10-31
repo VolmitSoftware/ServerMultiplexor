@@ -137,6 +137,31 @@ void main() {
       expect(rows.last, '└──────────────┘');
     });
 
+    test('a footer is inlaid into the bottom border', () {
+      final List<String> rows = renderPanel(
+        title: 'X',
+        content: <String>['a'],
+        footer: 'esc closes',
+        width: 24,
+        theme: plain,
+      );
+      expect(rows.last, '└─ esc closes ─────────┘');
+    });
+
+    test('a footer that does not fit is clipped, never widening the row', () {
+      for (final int width in <int>[3, 8, 12, 16]) {
+        final List<String> rows = renderPanel(
+          title: 'X',
+          content: <String>['a'],
+          footer: 'arrows move · enter runs · esc closes',
+          width: width,
+          theme: plain,
+        );
+        expect(Ansi.visibleLength(rows.last), width, reason: 'width=$width');
+        expect(rows.last, endsWith('┘'));
+      }
+    });
+
     test('widths of 2 or less render content-free frame-glyph rows', () {
       final List<String> rows = renderPanel(
         title: 'HOSTS',

@@ -13,6 +13,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../../models/consumer_profile.dart';
+import '../../utils/prompt/flow_notice.dart';
 import '../../utils/terminal/frame_patch.dart';
 import '../../utils/terminal/term_events.dart';
 import '../../utils/terminal/term_io.dart';
@@ -127,14 +128,17 @@ DateTime monitorDataTime({
   return newest;
 }
 
+/// How long a finished flow's notice stays in the footer.
+const Duration _noticeLifetime = Duration(seconds: 8);
+
 /// The detail view re-reads its log tail no more than once per second,
 /// however fast frames are drawn.
 const Duration _logTailInterval = Duration(seconds: 1);
 
-/// How many trailing log lines the detail view asks for. The log panel is
-/// row-capped by the detail model and shows the tail of what it is given,
-/// so reading more than this would be wasted IO.
-const int _logTailLines = 12;
+/// How many trailing log lines are read for the detail view and the
+/// selected card. Both show only the tail that fits, so this is sized for a
+/// tall terminal.
+const int _logTailLines = 120;
 
 /// Enter the alternate screen buffer and hide the cursor.
 const String _enterAltScreen = '\x1B[?1049h\x1B[?25l';
@@ -329,9 +333,17 @@ class MonitorScreen {
   /// paced against.
   DateTime _lastSweepKick = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// The outcome the last suspended flow reported, shown in the footer until
+  /// [_noticeUntil].
+  String? _notice;
+  DateTime _noticeUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
   bool _detailMode = false;
   String _detailInstance = '';
   List<String> _logLines = const <String>[];
+
+  /// The instance [_logLines] belong to.
+  String? _logInstance;
   DateTime? _logReadAt;
   bool _readingLog = false;
 
@@ -395,6 +407,7 @@ class MonitorScreen {
     _detailMode = false;
     _detailInstance = '';
     _logLines = const <String>[];
+    _logInstance = null;
     _logReadAt = null;
     _modal = null;
     _modalSelectedId = null;
@@ -541,6 +554,13 @@ class MonitorScreen {
             updateChecking: update?.state == MonitorUpdateState.checking,
             hoveredId: baseHovered,
             pressedId: basePressed,
+            notice: wallClock.isBefore(_noticeUntil) ? _notice : null,
+            logLines:
+                _snapshot.view == MonitorView.local &&
+                    _logInstance != null &&
+                    _logInstance == _selectedInstance
+                ? _logLines
+                : null,
           );
     final MonitorFrame frame = modal == null
         ? base
@@ -784,22 +804,34 @@ class MonitorScreen {
     }
   }
 
-  /// Refreshes the detail view's log tail at most once per [_logTailInterval],
-  /// off the render path so a slow read cannot stall the heartbeat.
+  /// The instance whose log tail is on screen: the detailed one, or the
+  /// selected Local server under its card. Remote servers have no readable
+  /// log file.
+  String? get _logTarget {
+    if (_detailMode) return _detailInstance.isEmpty ? null : _detailInstance;
+    return _snapshot.view == MonitorView.local ? _selectedInstance : null;
+  }
+
+  /// Refreshes the visible log tail at most once per [_logTailInterval], and
+  /// at once when the target changes, off the render path so a slow read
+  /// cannot stall the heartbeat.
   void _refreshLogTail() {
-    if (!_detailMode || _readingLog) {
+    final String? instance = _logTarget;
+    if (instance == null || _readingLog) {
       return;
     }
     final DateTime now = DateTime.now();
     final DateTime? readAt = _logReadAt;
-    if (readAt != null && now.difference(readAt) < _logTailInterval) {
+    if (instance == _logInstance &&
+        readAt != null &&
+        now.difference(readAt) < _logTailInterval) {
       return;
     }
     _logReadAt = now;
 
-    final String instance = _detailInstance;
     final String? logPath = _latestFor(instance)?.logPath;
     if (logPath == null || logPath.isEmpty) {
+      _logInstance = instance;
       _logLines = const <String>['no log yet'];
       return;
     }
@@ -810,11 +842,12 @@ class MonitorScreen {
   Future<void> _readLogTailInto(String instance, String logPath) async {
     try {
       final List<String> lines = await readLogTail(logPath, _logTailLines);
-      if (!_detailMode || _detailInstance != instance) {
+      if (_logTarget != instance) {
         // The view moved on while the read was in flight. Publishing now
         // would put one server's log under another server's header.
         return;
       }
+      _logInstance = instance;
       _logLines = lines;
     } catch (_) {
       // Unreadable right now (rotated, permissions): keep showing the last
@@ -1276,8 +1309,10 @@ class MonitorScreen {
     }
     _detailMode = true;
     _detailInstance = instance;
-    _logLines = const <String>[];
-    _logReadAt = null;
+    if (_logInstance != instance) {
+      _logLines = const <String>[];
+      _logInstance = null;
+    }
   }
 
   Future<MonitorResult?> _handleAction(MonitorAction action) async {
@@ -1292,8 +1327,6 @@ class MonitorScreen {
         case MonitorBackTarget.detail:
           _detailMode = false;
           _detailInstance = '';
-          _logLines = const <String>[];
-          _logReadAt = null;
           return null;
         case MonitorBackTarget.dashboard:
           return const MonitorQuit();
@@ -1344,8 +1377,18 @@ class MonitorScreen {
       case MonitorAction.back:
         // Handled above so modal/detail precedence is explicit.
         return null;
-      case MonitorAction.restart:
       case MonitorAction.stop:
+        if (!_detailMode && !_selection.isEmpty) {
+          return _runBulkAction(InstanceBulkAction.stop);
+        }
+        return _runQuickAction(action);
+      case MonitorAction.delete:
+        if (_detailMode) return null;
+        if (!_selection.isEmpty) {
+          return _runBulkAction(InstanceBulkAction.delete);
+        }
+        return _runInstanceAction(InstanceModalAction.delete);
+      case MonitorAction.restart:
       case MonitorAction.kill:
       case MonitorAction.console:
       case MonitorAction.consolesGrid:
@@ -1477,6 +1520,11 @@ class MonitorScreen {
       _last = null;
       _forceFull = true;
       _clearPointer();
+      final FlowNotice? notice = FlowNotice.take();
+      _notice = notice?.message;
+      _noticeUntil = notice == null
+          ? DateTime.fromMillisecondsSinceEpoch(0)
+          : DateTime.now().add(_noticeLifetime);
       // Picks up whatever the flow changed — state, ports, lock and
       // isolation flags — on the next sweep's capture.
       invalidated = sessionInvalidated?.call() ?? false;

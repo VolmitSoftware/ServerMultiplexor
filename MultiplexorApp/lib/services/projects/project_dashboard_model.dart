@@ -423,14 +423,18 @@ ProjectDashboardFrame renderProjectDashboard({
   Map<int, List<ButtonSpan>> buttons = <int, List<ButtonSpan>>{};
   Map<int, ButtonSpan> checkboxes = <int, ButtonSpan>{};
   Map<int, ButtonSpan> disclosures = <int, ButtonSpan>{};
-  if (width < 48 || height < 14) {
-    frame.addAll(<String>[
-      'Use a terminal at least 48 columns by 14 rows.',
-      'Builds continue while this view is closed.',
-      'q / Esc: detach',
-    ]);
+  if (width < 40 || height < 12) {
+    frame.addAll(
+      _wrapWords(
+        'Use a terminal at least 40 columns by 12 rows. Builds continue '
+        'while this view is closed. q / Esc: detach',
+        width,
+      ),
+    );
   } else {
-    String runLabel = 'No build runs. Press b to build or s to scan sources.';
+    String runLabel = width >= 54
+        ? 'No build runs. Press b to build or s to scan sources.'
+        : 'No build runs. b build · s scan';
     if (run != null) {
       String timing = projectRunTiming(run, now);
       String identity =
@@ -444,12 +448,15 @@ ProjectDashboardFrame renderProjectDashboard({
     );
     int bodyHeight = height - 6;
     bool lateral = showOutput && width >= 120;
-    int tableHeight = !showOutput || lateral
-        ? bodyHeight
-        : math.min(
-            math.max(4, nodes.length + 3),
-            math.max(5, (bodyHeight * 0.65).floor()),
-          );
+    int stackedTableHeight = math.min(
+      math.max(4, nodes.length + 3),
+      math.max(5, (bodyHeight * 0.65).floor()),
+    );
+    // A body too short for the table and at least one log line shows the
+    // table alone; the log returns on a taller terminal.
+    bool outputShown =
+        showOutput && (lateral || bodyHeight - stackedTableHeight >= 3);
+    int tableHeight = !outputShown || lateral ? bodyHeight : stackedTableHeight;
     int capacity = tableHeight - 3;
     List<int> visible = projectTreeViewport(nodes, selected, capacity);
     int naturalIdentityWidth = 11;
@@ -567,7 +574,7 @@ ProjectDashboardFrame renderProjectDashboard({
       theme: theme,
       emphasis: PanelEmphasis.active,
     );
-    if (showOutput) {
+    if (outputShown) {
       int logHeight = lateral ? bodyHeight : bodyHeight - tableHeight;
       int logWidth = lateral ? width - tableWidth - 1 : width;
       int logCapacity = math.max(0, logHeight - 2);
@@ -610,20 +617,31 @@ ProjectDashboardFrame renderProjectDashboard({
         stale ? theme.warn : theme.muted,
       ),
     );
+    List<ButtonSpec> actionButtons = <ButtonSpec>[
+      const ButtonSpec(id: 'back', label: 'BACK', shortcut: 'q'),
+      ButtonSpec(
+        id: 'build',
+        label: 'BUILD',
+        shortcut: 'b',
+        enabled: buildable > 0,
+      ),
+      const ButtonSpec(id: 'limits', label: 'LIMITS', shortcut: 'p'),
+      const ButtonSpec(id: 'locations', label: 'LOCATIONS', shortcut: 'o'),
+      const ButtonSpec(id: 'setup', label: 'CONVERT', shortcut: 'i'),
+      const ButtonSpec(id: 'actions', label: 'MORE'),
+    ];
+    // MORE reaches every action, so a narrow bar gives up the chips before
+    // it rather than MORE itself.
+    int barWidth() => actionButtons.fold(
+      -1,
+      (int total, ButtonSpec button) =>
+          total + button.labelFor(showShortcut: width >= 80).length + 5,
+    );
+    while (actionButtons.length > 2 && barWidth() > width) {
+      actionButtons.removeAt(actionButtons.length - 2);
+    }
     ButtonRowRender actions = layoutButtonRow(
-      buttons: <ButtonSpec>[
-        const ButtonSpec(id: 'back', label: 'BACK', shortcut: 'q'),
-        ButtonSpec(
-          id: 'build',
-          label: 'BUILD',
-          shortcut: 'b',
-          enabled: buildable > 0,
-        ),
-        const ButtonSpec(id: 'limits', label: 'LIMITS', shortcut: 'p'),
-        const ButtonSpec(id: 'locations', label: 'LOCATIONS', shortcut: 'o'),
-        const ButtonSpec(id: 'setup', label: 'CONVERT', shortcut: 'i'),
-        const ButtonSpec(id: 'actions', label: 'MORE'),
-      ],
+      buttons: actionButtons,
       width: width,
       theme: theme,
       showShortcuts: width >= 80,
@@ -633,9 +651,28 @@ ProjectDashboardFrame renderProjectDashboard({
     buttons[frame.length] = actions.spans;
     frame.add(actions.row);
     frame.add(
-      width < 80
-          ? 'Space mark a/x all/none e/z tree t log i convert'
-          : 'Space check a all x clear e/z tree t output Enter open m menu s scan i convert',
+      _wholeHints(
+        width < 80
+            ? const <String>[
+                'Space mark',
+                'a/x all/none',
+                'e/z tree',
+                't log',
+                'i convert',
+              ]
+            : const <String>[
+                'Space check',
+                'a all',
+                'x clear',
+                'e/z tree',
+                't output',
+                'Enter open',
+                'm menu',
+                's scan',
+                'i convert',
+              ],
+        width,
+      ),
     );
   }
   while (frame.length < height) {
@@ -653,6 +690,33 @@ ProjectDashboardFrame renderProjectDashboard({
     disclosures: disclosures,
     buttons: buttons,
   );
+}
+
+/// As many [hints] as fit [width], dropped whole from the end.
+String _wholeHints(List<String> hints, int width) {
+  List<String> shown = List<String>.of(hints);
+  while (shown.length > 1 && shown.join(' ').length > width) {
+    shown.removeLast();
+  }
+  return shown.join(' ');
+}
+
+/// [text] broken into lines of at most [width] columns at spaces.
+List<String> _wrapWords(String text, int width) {
+  List<String> lines = <String>[];
+  String line = '';
+  for (String word in text.split(' ')) {
+    if (line.isEmpty) {
+      line = word;
+    } else if (line.length + 1 + word.length <= width) {
+      line = '$line $word';
+    } else {
+      lines.add(line);
+      line = word;
+    }
+  }
+  if (line.isNotEmpty) lines.add(line);
+  return lines;
 }
 
 List<String> _projectOutputTail(List<String> logs, int width, int capacity) {

@@ -25,6 +25,16 @@ double niceStep(double rough) {
   return 10 * magnitude;
 }
 
+/// [peak] with a tenth of headroom, rounded up to a nice step about an
+/// eighth of its size, so a zero-based chart keeps most of its plot for the data instead
+/// of the doubled range coarse tick snapping can produce. Non-positive
+/// input returns `1.0`.
+double roomyCeiling(double peak) {
+  if (peak <= 0) return 1;
+  final double step = niceStep(peak / 8);
+  return (peak * 1.1 / step).ceil() * step;
+}
+
 /// A single labeled gridline on a chart's vertical axis: [value] is the
 /// data value it marks, [label] is its already-formatted display text, and
 /// [row] is the zero-based plot row (from the top) it lands on.
@@ -240,7 +250,8 @@ class TimeTick {
 /// [width]-column horizontal axis spanning `[start, end]`.
 ///
 /// Labels render `HH:mm` in the **local** time zone (24-hour, zero-padded);
-/// when the span exceeds 24 hours, each label is prefixed with `MM-dd `
+/// a span of ten minutes or less adds seconds (`HH:mm:ss`) so its labels do
+/// not repeat, and a span over 24 hours prefixes each label with `MM-dd `
 /// (e.g. `07-29 08:14`). Callers pass UTC bounds because sample timestamps
 /// are UTC, but an axis is read next to a local wall clock and a local log
 /// tail, so it is localized here rather than at every call site.
@@ -263,6 +274,7 @@ List<TimeTick> planTimeAxis({
   final int count = targetTicks < 2 ? 2 : targetTicks;
   final Duration span = end.difference(start);
   final bool withDate = span > const Duration(hours: 24);
+  final bool withSeconds = span <= const Duration(minutes: 10);
 
   final List<TimeTick> ticks = <TimeTick>[];
   int nextFree = 0;
@@ -270,7 +282,11 @@ List<TimeTick> planTimeAxis({
     final double fraction = count == 1 ? 0.0 : index / (count - 1);
     final int microseconds = (span.inMicroseconds * fraction).round();
     final DateTime moment = start.add(Duration(microseconds: microseconds));
-    final String label = _formatTimeLabel(moment, withDate: withDate);
+    final String label = _formatTimeLabel(
+      moment,
+      withDate: withDate,
+      withSeconds: withSeconds,
+    );
 
     if (label.length > width) {
       if (index == 0) {
@@ -304,16 +320,23 @@ List<TimeTick> planTimeAxis({
   return ticks;
 }
 
-/// Formats [moment] in local time as `HH:mm` (24-hour, zero-padded),
-/// prefixed with `MM-dd ` when [withDate] is true.
+/// Formats [moment] in local time as `HH:mm` (24-hour, zero-padded), with
+/// `:ss` when [withSeconds] is true and an `MM-dd ` prefix when [withDate]
+/// is true.
 ///
 /// The date prefix comes from the same localized instant as the clock, so a
 /// label never pairs one zone's calendar day with another zone's hour.
-String _formatTimeLabel(DateTime moment, {required bool withDate}) {
+String _formatTimeLabel(
+  DateTime moment, {
+  required bool withDate,
+  required bool withSeconds,
+}) {
   final DateTime local = moment.toLocal();
   final String hh = local.hour.toString().padLeft(2, '0');
   final String mm = local.minute.toString().padLeft(2, '0');
-  final String clock = '$hh:$mm';
+  final String clock = withSeconds
+      ? '$hh:$mm:${local.second.toString().padLeft(2, '0')}'
+      : '$hh:$mm';
   if (!withDate) {
     return clock;
   }

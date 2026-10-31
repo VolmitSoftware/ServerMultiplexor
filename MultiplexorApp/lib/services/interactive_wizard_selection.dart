@@ -47,21 +47,34 @@ extension _SelectionWizard on InteractiveWizard {
     // Freeze the scope before a picker or confirmation can yield to telemetry.
     final List<String> targets = List<String>.unmodifiable(instances.toSet());
     if (targets.isEmpty) return;
-    InstanceBulkAction? action = requested;
-    if (action == null) {
-      final int choice = await Ui.choose(
-        'Actions for ${targets.length} selected servers',
-        const <String>[
-          'Start selected',
-          'Stop selected',
-          'Restart selected',
-          'Delete selected',
-          'Back to dashboard',
-        ],
-      );
-      if (choice >= InstanceBulkAction.values.length) return;
-      action = InstanceBulkAction.values[choice];
-    }
+    final InstanceBulkAction action =
+        requested ??
+        await menuSelect<InstanceBulkAction>(
+          'Actions for ${targets.length} selected servers',
+          <MenuEntry<InstanceBulkAction>>[
+            const MenuEntry<InstanceBulkAction>(
+              'Start selected',
+              value: InstanceBulkAction.start,
+              shortcut: 's',
+            ),
+            const MenuEntry<InstanceBulkAction>(
+              'Stop selected',
+              value: InstanceBulkAction.stop,
+              shortcut: 't',
+            ),
+            const MenuEntry<InstanceBulkAction>(
+              'Restart selected',
+              value: InstanceBulkAction.restart,
+              shortcut: 'r',
+            ),
+            MenuEntry<InstanceBulkAction>(
+              'Delete selected',
+              value: InstanceBulkAction.delete,
+              shortcut: 'd',
+              labelColor: Ansi.red,
+            ),
+          ],
+        );
     if (snapshot.view == MonitorView.remote) {
       if (remoteProfile == null) {
         throw StateError('The selected remote profile is no longer available.');
@@ -99,27 +112,7 @@ extension _SelectionWizard on InteractiveWizard {
             profile: _commandsForConsumer(profile),
         };
     try {
-      for (final ConsumerProfile profile in grouped.keys) {
-        final Set<String> available = <String>{
-          for (final _InstanceRow row in await _loadInstanceRows(
-            source: sources[profile],
-          ))
-            row.name,
-        };
-        if (grouped[profile]!.any((String name) => !available.contains(name))) {
-          throw StateError(
-            'A selected ${profile.shortName} server is no longer available. Refresh and select again.',
-          );
-        }
-      }
-      for (final ConsumerProfile profile in grouped.keys) {
-        await _runLocalSelectionAction(
-          grouped[profile]!,
-          action,
-          profile,
-          sources[profile]!,
-        );
-      }
+      await _runLocalSelectionAction(grouped, action, sources);
     } finally {
       for (final PassthroughService source in sources.values) {
         source.disposeRcon();
@@ -127,68 +120,103 @@ extension _SelectionWizard on InteractiveWizard {
     }
   }
 
+  /// One plan across every platform the selection spans: a single
+  /// confirmation for deletes, then each platform's bulk command. Success
+  /// returns straight to the dashboard; a failure keeps its output up.
   Future<void> _runLocalSelectionAction(
-    List<String> targets,
+    Map<ConsumerProfile, List<String>> grouped,
     InstanceBulkAction action,
-    ConsumerProfile profile,
-    PassthroughService scoped,
+    Map<ConsumerProfile, PassthroughService> sources,
   ) async {
-    final Map<String, _InstanceRow> rows = <String, _InstanceRow>{
-      for (final _InstanceRow row in await Ui.spin(
-        'Checking selected servers',
-        () => _loadInstanceRows(source: scoped),
-      ))
-        row.name: row,
-    };
-    final List<String> missing = targets
-        .where((String name) => !rows.containsKey(name))
-        .toList();
-    if (missing.isNotEmpty) {
-      Ui.error(
-        'Could not find every selected server: ${missing.join(', ')}. Refresh and select again.',
-      );
-      await Ui.pause();
-      return;
-    }
-    Ui.appHeader('${action.name.toUpperCase()} SELECTED', <String>[
-      profile.shortName,
-      '${targets.length} servers',
-    ]);
-    final List<String> eligibleTargets = <String>[];
-    for (final String name in targets) {
-      final _InstanceRow row = rows[name]!;
-      final String? reason = instanceBulkSkipReason(
-        action,
-        row.state,
-        locked: row.locked,
-      );
-      if (reason == null) eligibleTargets.add(name);
-      Ui.keyValue(name, reason == null ? row.state.name : 'skip: $reason');
-    }
-    if (eligibleTargets.isEmpty) {
-      Ui.note('No selected servers can ${action.name} in their current state.');
-      await Ui.pause();
-      return;
-    }
-    if (action == InstanceBulkAction.delete &&
-        !await Ui.confirm(
-          'Permanently delete these ${eligibleTargets.length} selected servers and their data?',
-          defaultValue: false,
-        )) {
-      return;
-    }
-    await Ui.shielded(
-      () => scoped.run(<String>[
-        'instance',
-        'bulk',
-        action.name,
-        ...eligibleTargets,
-        if (action == InstanceBulkAction.delete) ...<String>[
-          '--confirm',
-          instanceBulkDeleteToken(eligibleTargets),
-        ],
-      ]),
+    final Map<ConsumerProfile, Map<String, _InstanceRow>> rows = await Ui.spin(
+      'Checking selected servers',
+      () async => <ConsumerProfile, Map<String, _InstanceRow>>{
+        for (final ConsumerProfile profile in grouped.keys)
+          profile: <String, _InstanceRow>{
+            for (final _InstanceRow row in await _loadInstanceRows(
+              source: sources[profile],
+            ))
+              row.name: row,
+          },
+      },
     );
-    await Ui.pause();
+    final Map<ConsumerProfile, List<String>> eligible =
+        <ConsumerProfile, List<String>>{};
+    final List<String> skipped = <String>[];
+    for (final ConsumerProfile profile in grouped.keys) {
+      for (final String name in grouped[profile]!) {
+        final _InstanceRow? row = rows[profile]![name];
+        if (row == null) {
+          throw StateError(
+            '${profile.shortName}/$name is no longer available. Refresh and select again.',
+          );
+        }
+        final String? reason = instanceBulkSkipReason(
+          action,
+          row.state,
+          locked: row.locked,
+        );
+        if (reason == null) {
+          eligible.putIfAbsent(profile, () => <String>[]).add(name);
+        } else {
+          skipped.add('${profile.shortName}/$name: $reason');
+        }
+      }
+    }
+    final int count = eligible.values.fold(
+      0,
+      (int total, List<String> names) => total + names.length,
+    );
+    if (count == 0) {
+      Ui.report(instanceBulkOutcome(action, 0, skipped: skipped.length));
+      return;
+    }
+    if (action == InstanceBulkAction.delete) {
+      Ui.appHeader('DELETE SELECTED', <String>[
+        for (final ConsumerProfile profile in eligible.keys)
+          '${profile.shortName} ${eligible[profile]!.length}',
+      ]);
+      for (final ConsumerProfile profile in eligible.keys) {
+        for (final String name in eligible[profile]!) {
+          Ui.keyValue(
+            name,
+            '${profile.shortName} · ${rows[profile]![name]!.state.name}',
+          );
+        }
+      }
+      for (final String line in skipped) {
+        Ui.note('skip $line');
+      }
+      if (!await Ui.confirm(
+        'Delete $count ${count == 1 ? 'server' : 'servers'} and their data?',
+        destructive: true,
+      )) {
+        return;
+      }
+    } else {
+      Ui.doing('Bulk ${action.name}: $count servers');
+    }
+    bool failed = false;
+    for (final ConsumerProfile profile in eligible.keys) {
+      final List<String> names = eligible[profile]!;
+      final int code = await Ui.shielded(
+        () => sources[profile]!.run(<String>[
+          'instance',
+          'bulk',
+          action.name,
+          ...names,
+          if (action == InstanceBulkAction.delete) ...<String>[
+            '--confirm',
+            instanceBulkDeleteToken(names),
+          ],
+        ]),
+      );
+      failed = failed || code != 0;
+    }
+    if (failed) {
+      await Ui.pause();
+      return;
+    }
+    Ui.report(instanceBulkOutcome(action, count, skipped: skipped.length));
   }
 }

@@ -40,7 +40,9 @@ extension _RemoteProfiling on InteractiveWizard {
         '--profile',
         profile.id,
       ], waitForTunnel: _waitForRemoteProfileTunnel);
-      if (selected != 5 || code != 0) await Ui.pause();
+      if (code != 0 || selected == 0 || selected == 2 || selected == 3) {
+        await Ui.pause();
+      }
     }
   }
 
@@ -118,7 +120,6 @@ extension _RemoteProfiling on InteractiveWizard {
     );
     if (attach && resources.currentState == 'offline') {
       Ui.warn('Attach requires an already-running JVM.');
-      await Ui.pause();
       return null;
     }
     final bool restart = !attach && resources.currentState != 'offline';
@@ -134,7 +135,6 @@ extension _RemoteProfiling on InteractiveWizard {
           : restart
           ? 'Gracefully restart this server and profile its startup?'
           : 'Start this server with profiling enabled?',
-      defaultValue: false,
     )) {
       return null;
     }

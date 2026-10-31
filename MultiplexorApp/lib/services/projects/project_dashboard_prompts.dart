@@ -89,10 +89,7 @@ class ProjectDashboardPrompts {
         stdout.writeln(
           Ui.theme.paint('Cancel build run $run', Ui.theme.danger),
         );
-        if (!await Ui.confirm(
-          'Stop its active and queued targets?',
-          defaultValue: false,
-        )) {
+        if (!await Ui.confirm('Stop its active and queued targets?')) {
           return null;
         }
         return <String>['cancel', run];
@@ -397,10 +394,7 @@ class ProjectDashboardPrompts {
         in decoded['warnings'] as List<Object?>? ?? <Object?>[]) {
       stdout.writeln(Ui.theme.paint(projectText(warning), Ui.theme.warn));
     }
-    if (!await Ui.confirm(
-      'Write this configuration and scan the project?',
-      defaultValue: false,
-    )) {
+    if (!await Ui.confirm('Write this configuration and scan the project?')) {
       return null;
     }
     output.clear();
@@ -528,8 +522,6 @@ class ProjectDashboardPrompts {
       await Ui.pause();
       return null;
     }
-    return await Ui.confirm('Deliver these artifacts?', defaultValue: false)
-        ? arguments
-        : null;
+    return await Ui.confirm('Deliver these artifacts?') ? arguments : null;
   }
 }

@@ -13,11 +13,8 @@ const List<List<int>> _brailleBits = <List<int>>[
   <int>[0x40, 0x80],
 ];
 
-/// Cell flag: the cell sits on a horizontal gridline.
-const int _flagGrid = 1;
-
 /// Cell flag: the cell sits in a column marked by an event.
-const int _flagEvent = 2;
+const int _flagEvent = 1;
 
 /// Owner-plane sentinel for a cell inked by more than one series.
 const int _ownerMixed = 255;
@@ -32,10 +29,10 @@ const int _maxOwnedSeries = _ownerMixed - 1;
 const int _maxBridgeSubColumns = 6;
 
 /// Rendered in place of the plot whenever there is nothing truthful to draw.
-const String _noData = 'n/a';
+const String chartNoDataText = 'n/a';
 
 /// Smallest plot area (in cells) that can carry a readable chart. Below either
-/// bound the renderer degrades to an [_noData] card instead of emitting a
+/// bound the renderer degrades to an [chartNoDataText] card instead of emitting a
 /// misleading sliver of a plot.
 const int _minPlotWidth = 4;
 const int _minHeight = 3;
@@ -50,9 +47,8 @@ class ChartPoint {
 }
 
 /// One plotted line: its [label], its [points], and a [toneIndex] selecting
-/// its color in a multi-series chart (`0` accent, `1` info, anything else the
-/// neutral strong text tone). A single-series chart ignores [toneIndex] and
-/// uses the vertical load gradient instead.
+/// its color (`0` accent, `1` info, anything else the neutral strong text
+/// tone).
 class ChartSeries {
   const ChartSeries({
     required this.label,
@@ -66,7 +62,7 @@ class ChartSeries {
 }
 
 /// A glyph that wins over everything else in its cell, with the tone it is
-/// painted in — used for the latest-sample marker and the [_noData] text.
+/// painted in — used for the latest-sample marker and the [chartNoDataText] text.
 class _CellOverride {
   const _CellOverride(this.glyph, this.tone);
 
@@ -100,17 +96,16 @@ class _CellOverride {
 /// [MonitorGlyphs.latest] painted [MonitorTheme.accent].
 ///
 /// Cell precedence is: override glyph, then braille ink, then event, then
-/// grid, then space. Ink is painted by the [ramp] gradient (single series;
-/// [MonitorRamp.load] by default, hot at the top — [MonitorRamp.tps] inverts
-/// that for readings where high is health) or by owning series (multi-series,
-/// mixed cells neutral); adjacent cells sharing a tone share one escape
-/// sequence.
+/// space. The plot carries no gridlines; the gutter's tick labels give the
+/// scale. Ink is painted in its owning series' tone, with cells
+/// shared by two series neutral; adjacent cells sharing a tone share one
+/// escape sequence.
 ///
 /// When there is no data to draw — no series, all samples null, all samples
 /// outside the window, or a non-positive window — the frame still renders with
-/// [_noData] centered in the plot area. When the plot area would be narrower
+/// [chartNoDataText] centered in the plot area. When the plot area would be narrower
 /// than [_minPlotWidth] cells, or [height] is below [_minHeight], the result
-/// degrades to a blank card with [_noData] on its middle row. A non-positive
+/// degrades to a blank card with [chartNoDataText] on its middle row. A non-positive
 /// [height] renders no rows.
 ///
 /// Pure: no clock reads, no IO. Identical inputs always render identical rows.
@@ -124,7 +119,6 @@ List<String> renderBrailleChart({
   double? forcedLow,
   double? forcedHigh,
   List<DateTime> events = const <DateTime>[],
-  MonitorRamp ramp = MonitorRamp.load,
 }) {
   final int outWidth = width < 0 ? 0 : width;
   final int outHeight = height < 0 ? 0 : height;
@@ -132,7 +126,7 @@ List<String> renderBrailleChart({
     return <String>[];
   }
   if (outHeight < _minHeight) {
-    return _noDataCard(outWidth, outHeight, theme);
+    return chartNoDataCard(outWidth, outHeight, theme);
   }
 
   final int plotRows = outHeight - 1;
@@ -179,7 +173,7 @@ List<String> renderBrailleChart({
   final int gutterWidth = labelWidth + 2;
   final int plotWidth = outWidth - gutterWidth;
   if (plotWidth < _minPlotWidth) {
-    return _noDataCard(outWidth, outHeight, theme);
+    return chartNoDataCard(outWidth, outHeight, theme);
   }
 
   final bool ascii = theme.glyphs.isAscii;
@@ -225,7 +219,7 @@ List<String> renderBrailleChart({
   bool anyInk = false;
   for (int seriesIndex = 0; seriesIndex < series.length; seriesIndex++) {
     final List<double?> buckets = hasWindow
-        ? _bucketSeries(
+        ? bucketChartPoints(
             points: series[seriesIndex].points,
             start: start,
             spanMicros: spanMicros,
@@ -285,28 +279,17 @@ List<String> renderBrailleChart({
     }
   }
 
-  for (final ChartTick tick in scale.ticks) {
-    if (tick.row < 0 || tick.row >= plotRows) {
-      continue;
-    }
-    final int offset = tick.row * plotWidth;
-    for (int cellX = 0; cellX < plotWidth; cellX += 2) {
-      flags[offset + cellX] |= _flagGrid;
-    }
-  }
-
   if (!anyInk) {
     final int row = plotRows ~/ 2;
-    final int left = (plotWidth - _noData.length) ~/ 2;
-    for (int index = 0; index < _noData.length; index++) {
+    final int left = (plotWidth - chartNoDataText.length) ~/ 2;
+    for (int index = 0; index < chartNoDataText.length; index++) {
       overrides[row * plotWidth + left + index] = _CellOverride(
-        _noData[index],
+        chartNoDataText[index],
         theme.faint,
       );
     }
   }
 
-  final bool single = series.length == 1;
   String seriesTone(int index) {
     if (index < 0 || index >= series.length) {
       return theme.textStrong;
@@ -357,9 +340,7 @@ List<String> renderBrailleChart({
         glyph = ascii
             ? theme.glyphs.meterFull
             : String.fromCharCode(0x2800 + mask[index]);
-        if (single) {
-          tone = theme.rampTone(ramp, 1 - cellY / (plotRows - 1));
-        } else if (owner[index] == _ownerMixed) {
+        if (owner[index] == _ownerMixed) {
           tone = theme.textStrong;
         } else {
           tone = seriesTone(owner[index] - 1);
@@ -367,14 +348,9 @@ List<String> renderBrailleChart({
       } else if ((flags[index] & _flagEvent) != 0) {
         glyph = theme.glyphs.event;
         tone = theme.faint;
-      } else if ((flags[index] & _flagGrid) != 0) {
-        glyph = theme.glyphs.grid;
-        tone = theme.faint;
       } else {
         // A space carries no visible color (the palette is foreground-only),
-        // so it joins the run in progress instead of splitting it. On a grid
-        // row of alternating dots and blanks that is one escape pair instead
-        // of one per cell.
+        // so it joins the run in progress instead of splitting it.
         segment += ' ';
         continue;
       }
@@ -411,7 +387,7 @@ List<String> renderBrailleChart({
 /// Averages [points] into [subColumns] buckets by timestamp position within
 /// `[start, start + spanMicros]`. Null, non-finite, and out-of-window samples
 /// are skipped; a bucket with no members stays `null` (a gap).
-List<double?> _bucketSeries({
+List<double?> bucketChartPoints({
   required List<ChartPoint> points,
   required DateTime start,
   required int spanMicros,
@@ -442,18 +418,18 @@ List<double?> _bucketSeries({
   );
 }
 
-/// [height] blank rows of [width] visible columns with [_noData] centered on
+/// [height] blank rows of [width] visible columns with [chartNoDataText] centered on
 /// the middle row — the honest rendering of a viewport too small to chart.
-List<String> _noDataCard(int width, int height, MonitorTheme theme) {
+List<String> chartNoDataCard(int width, int height, MonitorTheme theme) {
   final int middle = height ~/ 2;
   return List<String>.generate(height, (int row) {
-    if (row != middle || width < _noData.length) {
+    if (row != middle || width < chartNoDataText.length) {
       return ' ' * width;
     }
-    final int left = (width - _noData.length) ~/ 2;
+    final int left = (width - chartNoDataText.length) ~/ 2;
     return ' ' * left +
-        theme.paint(_noData, theme.faint) +
-        ' ' * (width - left - _noData.length);
+        theme.paint(chartNoDataText, theme.faint) +
+        ' ' * (width - left - chartNoDataText.length);
   });
 }
 

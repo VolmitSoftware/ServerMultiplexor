@@ -2,6 +2,14 @@ import 'package:multiplexor/utils/charts/chart_scale.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('roomyCeiling', () {
+    test('keeps a tenth of headroom on a fine step', () {
+      expect(roomyCeiling(10.4), closeTo(12.0, 1e-9));
+      expect(roomyCeiling(6.1), closeTo(7.0, 1e-9));
+      expect(roomyCeiling(0), 1.0);
+    });
+  });
+
   group('niceStep — 1/2/2.5/5 ladder', () {
     test('rounds each fraction up to its ladder candidate', () {
       expect(niceStep(0.7), closeTo(1.0, 1e-9));
@@ -238,6 +246,22 @@ void main() {
   });
 
   group('planTimeAxis — labels', () {
+    test('adds seconds on a window of ten minutes or less', () {
+      final DateTime start = DateTime(2026, 10, 30, 18, 50, 5);
+      final List<TimeTick> ticks = planTimeAxis(
+        start: start.toUtc(),
+        end: start.add(const Duration(minutes: 2)).toUtc(),
+        width: 80,
+      );
+      expect(ticks.first.label, '18:50:05');
+      expect(ticks.last.label, '18:52:05');
+      expect(
+        ticks.map((TimeTick tick) => tick.label).toSet(),
+        hasLength(ticks.length),
+        reason: 'no two labels repeat',
+      );
+    });
+
     test('renders zero-padded 24h HH:mm for spans under 24h', () {
       final DateTime start = DateTime(2026, 7, 29, 8, 14);
       final DateTime end = start.add(const Duration(hours: 2));

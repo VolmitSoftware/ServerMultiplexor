@@ -93,7 +93,7 @@ String _buildTopBorder({
 
 /// Renders a titled panel box: a top border with the title (and optional
 /// badge) inlaid, [content] rows wrapped between vertical rules, and a
-/// plain bottom border. Every row of the result is exactly [width] visible
+/// bottom border carrying [footer], painted faint, when one is given. Every row of the result is exactly [width] visible
 /// columns; the result always has `content.length + 2` rows.
 ///
 /// [title] is styled by the panel (bold + [MonitorTheme.textStrong]). Pass
@@ -110,6 +110,7 @@ List<String> renderPanel({
   String? styledTitle,
   String? badge,
   String? styledBadge,
+  String? footer,
   required List<String> content,
   required int width,
   required MonitorTheme theme,
@@ -146,11 +147,45 @@ List<String> renderPanel({
     rows.add(_forceWidth('$frameV $padded $frameV', safeWidth));
   }
 
-  final String bottom =
-      '${glyphs.frameBl}${glyphs.frameH * (safeWidth - 2)}${glyphs.frameBr}';
-  rows.add(_forceWidth(theme.paint(bottom, borderTone), safeWidth));
+  rows.add(
+    _buildBottomBorder(
+      footer: footer,
+      width: safeWidth,
+      theme: theme,
+      borderTone: borderTone,
+    ),
+  );
 
   return rows;
+}
+
+/// Builds the bottom border: `└─ FOOTER ───┘` with [footer] painted faint,
+/// or a solid rule when there is no footer or below width 8. A footer that
+/// overflows is clipped so the rule keeps a two-column tail.
+String _buildBottomBorder({
+  required String? footer,
+  required int width,
+  required MonitorTheme theme,
+  required String borderTone,
+}) {
+  final MonitorGlyphs glyphs = theme.glyphs;
+  if (footer == null || footer.isEmpty || width < 8) {
+    final String solid =
+        '${glyphs.frameBl}${glyphs.frameH * (width - 2)}${glyphs.frameBr}';
+    return _forceWidth(theme.paint(solid, borderTone), width);
+  }
+  final String text = _clip(footer, width - 7);
+  final int fill = width - 5 - Ansi.visibleLength(text);
+  final StringBuffer buffer = StringBuffer()
+    ..write(theme.paint('${glyphs.frameBl}${glyphs.frameH} ', borderTone))
+    ..write(theme.paint(text, theme.faint))
+    ..write(
+      theme.paint(
+        ' ${glyphs.frameH * (fill < 0 ? 0 : fill)}${glyphs.frameBr}',
+        borderTone,
+      ),
+    );
+  return _forceWidth(buffer.toString(), width);
 }
 
 /// Pads or clips every row of [block] to exactly [width] visible columns.

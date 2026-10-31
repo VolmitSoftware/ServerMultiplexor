@@ -172,11 +172,9 @@ void expectServerHits(
   int columns = 80,
 }) {
   final List<MonitorHitbox> servers = serverHits(hits);
-  expect(
-    servers.map((MonitorHitbox hit) => hit.id).toList(),
-    <String>[for (final String name in window) '$serverHitPrefix$name'],
-    reason: 'the visible window, in order',
-  );
+  expect(servers.map((MonitorHitbox hit) => hit.id).toList(), <String>[
+    for (final String name in window) '$serverHitPrefix$name',
+  ], reason: 'the visible window, in order');
 
   final Set<int> hitRows = <int>{};
   for (final MonitorHitbox hit in servers) {
@@ -338,11 +336,11 @@ void main() {
   group('buildResizeRequiredFrame', () {
     test('renders the card with the current and minimum sizes', () {
       final List<String> rows = stripAll(
-        buildResizeRequiredFrame(columns: 70, lines: 20, theme: plain),
+        buildResizeRequiredFrame(columns: 36, lines: 11, theme: plain),
       );
       expect(rows.join('\n'), contains('RESIZE REQUIRED'));
-      expect(rows.join('\n'), contains('CURRENT 70x20'));
-      expect(rows.join('\n'), contains('MINIMUM 80x24'));
+      expect(rows.join('\n'), contains('CURRENT 36x11'));
+      expect(rows.join('\n'), contains('MINIMUM 40x12'));
     });
 
     test('is exactly the requested size at every size down to 1x1', () {
@@ -379,6 +377,7 @@ void main() {
       Duration window = range,
       int spinner = 0,
       DateTime? clock,
+      String? notice,
     }) => buildMonitorFrame(
       snapshot: snapshot ?? twoServers(),
       selectedIndex: selectedIndex,
@@ -391,7 +390,16 @@ void main() {
       clockNow: clock ?? now,
       hoveredId: hoveredId,
       pressedId: pressedId,
+      notice: notice,
     );
+
+    test('shows a finished flow notice in place of the footer hints', () {
+      final MonitorFrame frame = frameOf(notice: 'Deleted 3 servers');
+      expectExactFrame(frame.rows, 80, 24);
+      final String footer = stripAll(frame.rows).last.trimRight();
+
+      expect(footer, '✔ Deleted 3 servers');
+    });
 
     test(
       'stacks header, kpi strip, body, both bars and the footer at 80x24',
@@ -607,6 +615,11 @@ void main() {
         isFalse,
         reason: 'a stopped instance fabricates no readings: "$gamma"',
       );
+      expect(
+        gamma,
+        isNot(contains('···')),
+        reason: 'a trend with nothing in the window stays blank',
+      );
     });
 
     test('expands a running selection into side-by-side charts and facts', () {
@@ -618,16 +631,22 @@ void main() {
       expectExactFrame(frame.rows, 132, 40);
       final List<String> rows = stripAll(frame.rows);
 
-      // 31 body rows: the card grows to its 15-row ceiling and the table
-      // keeps the other 16, so the card's top border sits on row 22.
-      expect(rows[22], startsWith('┌─ BETA '));
-      expect(rows[22], contains('running · 15m'));
+      // 31 body rows: the table keeps the rows its two servers need and the
+      // card takes the rest, up to its ceiling without a log tail.
+      final int top = rows.indexWhere(
+        (String row) => row.startsWith('┌─ BETA '),
+      );
+      expect(top, inInclusiveRange(11, 14));
+      expect(rows[top], contains('running · 15m'));
 
-      final String card = rows.sublist(22, 37).join('\n');
-      final String labels = rows[23];
-      expect(labels, contains('TPS'));
-      expect(labels, contains('CPU %'));
-      expect(labels, contains('MEM MiB'));
+      final String card = rows.sublist(top, 37).join('\n');
+      final String labels = rows[top + 1];
+      expect(labels, contains('TPS 15.2'));
+      expect(labels, contains('min 14.6'));
+      expect(labels, contains('CPU 13%'));
+      expect(labels, contains('peak 18%'));
+      expect(labels, contains('MEM 3.0G'));
+      expect(card, isNot(contains('·  ·')), reason: 'no dotted gridlines');
       expect(card, contains('20 ┤'), reason: 'forced 0..20 TPS gutter');
       expect(card, contains('NETWORK PPS'));
       expect(card, contains('RX'));
@@ -872,6 +891,7 @@ void main() {
         'Shift+R repaint',
         'S stop',
         'X kill',
+        '⌫ delete',
         'O console',
         'g consoles',
         'n new',
@@ -991,12 +1011,12 @@ void main() {
       }
     });
 
-    test('falls back to the resize card below the 80x24 floor', () {
-      final List<String> rows = frameOf(columns: 70, lines: 20).rows;
-      expectExactFrame(rows, 70, 20);
+    test('falls back to the resize card below the 40x12 floor', () {
+      final List<String> rows = frameOf(columns: 39, lines: 20).rows;
+      expectExactFrame(rows, 39, 20);
       final String joined = stripAll(rows).join('\n');
       expect(joined, contains('RESIZE REQUIRED'));
-      expect(joined, contains('CURRENT 70x20'));
+      expect(joined, contains('CURRENT 39x20'));
       expect(joined, isNot(contains('MULTIPLEXOR')));
     });
 
@@ -1337,12 +1357,19 @@ void main() {
         (MonitorHitbox hit) => hit.kind == MonitorHitKind.rangeChip,
       );
       expect(chip.id, rangeHitId);
-      expect(chip.row, 22, reason: 'the card top border, below the table');
       expect(
-        stripAll(frame.rows)[22].substring(chip.colStart, chip.colEnd),
+        stripAll(frame.rows)[chip.row],
+        startsWith('┌─ ALPHA '),
+        reason: 'the card top border, below the table',
+      );
+      expect(
+        stripAll(frame.rows)[chip.row].substring(chip.colStart, chip.colEnd),
         'running · 15m',
       );
-      expect(hitTest(frame.hitboxes, row: 22, col: chip.colStart), rangeHitId);
+      expect(
+        hitTest(frame.hitboxes, row: chip.row, col: chip.colStart),
+        rangeHitId,
+      );
     });
 
     test('gives the range chip accent feedback under the pointer', () {
@@ -1350,18 +1377,21 @@ void main() {
         env: <String, String>{'COLORTERM': 'truecolor'},
         isTty: true,
       );
-      String badgeRow({String? hoveredId}) => buildMonitorFrame(
-        snapshot: twoServers(),
-        selectedIndex: 0,
-        frame: 0,
-        columns: 132,
-        lines: 40,
-        theme: color,
-        range: range,
-        now: now,
-        clockNow: now,
-        hoveredId: hoveredId,
-      ).rows[22];
+      String badgeRow({String? hoveredId}) =>
+          buildMonitorFrame(
+            snapshot: twoServers(),
+            selectedIndex: 0,
+            frame: 0,
+            columns: 132,
+            lines: 40,
+            theme: color,
+            range: range,
+            now: now,
+            clockNow: now,
+            hoveredId: hoveredId,
+          ).rows.firstWhere(
+            (String row) => Ansi.strip(row).startsWith('┌─ ALPHA '),
+          );
 
       final String hovered = badgeRow(hoveredId: rangeHitId);
       // Same text either way; only the badge's tone moves, and it moves to
@@ -1377,13 +1407,13 @@ void main() {
     });
 
     test('follows a deep selection to the end of the fleet', () {
-      // 30 running servers at 80x24: the live card keeps its 9-row minimum,
-      // the table gets 6 rows — a header, a marker and a two-row window.
+      // 30 running servers at 80x24: the live card keeps its 8-row minimum,
+      // the table gets 7 rows — a header, a marker and a three-row window.
       final MonitorSnapshot snapshot = manyServers();
       final MonitorFrame frame = frameOf(snapshot: snapshot, selectedIndex: 29);
       final List<String> rows = stripAll(frame.rows);
-      expect(rows[8], contains('+28 more'));
-      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(28));
+      expect(rows[8], contains('+27 more'));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(27));
       expect(
         frame.hitboxes.any(
           (MonitorHitbox hit) =>
@@ -1398,12 +1428,12 @@ void main() {
       final MonitorSnapshot snapshot = manyServers();
       final MonitorFrame frame = frameOf(snapshot: snapshot, selectedIndex: 15);
       final List<String> rows = stripAll(frame.rows);
-      expect(rows[8], contains('+15 more'));
-      expect(rows[10], contains('+14 more'));
+      expect(rows[8], contains('+14 more'));
+      expect(rows[11], contains('+14 more'));
       expectServerHits(
         rows,
         frame.hitboxes,
-        snapshot.instances.sublist(15, 16),
+        snapshot.instances.sublist(14, 16),
       );
     });
 
@@ -1411,8 +1441,8 @@ void main() {
       final MonitorSnapshot snapshot = manyServers();
       final MonitorFrame frame = frameOf(snapshot: snapshot);
       final List<String> rows = stripAll(frame.rows);
-      expect(rows[10], contains('+28 more'));
-      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(0, 2));
+      expect(rows[11], contains('+27 more'));
+      expectServerHits(rows, frame.hitboxes, snapshot.instances.sublist(0, 3));
     });
 
     test('shows the whole fleet when the terminal is tall enough', () {
@@ -1430,7 +1460,7 @@ void main() {
     });
 
     test('emits no hitboxes at all below the size floor', () {
-      expect(frameOf(columns: 70, lines: 20).hitboxes, isEmpty);
+      expect(frameOf(columns: 39, lines: 11).hitboxes, isEmpty);
     });
 
     test('keeps the workspace bar clickable with no instances', () {
@@ -1638,10 +1668,10 @@ void main() {
       expectExactFrame(rows, 132, 40);
 
       final String joined = stripAll(rows).join('\n');
-      expect(joined, contains('┌─ TPS '));
-      expect(joined, contains('┌─ CPU % '));
-      expect(joined, contains('┌─ MEM MiB '));
-      expect(joined, contains('┌─ PLAYERS '));
+      expect(joined, matches(RegExp(r'┌─ TPS \d+\.\d ')));
+      expect(joined, matches(RegExp(r'┌─ CPU \d+% ')));
+      expect(joined, matches(RegExp(r'┌─ MEM \d+(\.\d)?G ')));
+      expect(joined, matches(RegExp(r'┌─ PLAYERS \d+ ')));
       expect(joined, contains('┌─ NETWORK PPS · RX/TX '));
       expect(joined, contains('┌─ LOG '));
       expect(joined, contains('latest.log'));
@@ -1708,8 +1738,8 @@ void main() {
     });
 
     test('falls back to the resize card below the floor', () {
-      final List<String> rows = detail(columns: 70, lines: 20);
-      expectExactFrame(rows, 70, 20);
+      final List<String> rows = detail(columns: 39, lines: 11);
+      expectExactFrame(rows, 39, 11);
       expect(stripAll(rows).join('\n'), contains('RESIZE REQUIRED'));
     });
 

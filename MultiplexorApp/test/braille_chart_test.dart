@@ -181,42 +181,37 @@ void main() {
       }
     });
 
-    test(
-      'plot cells only ever hold braille, grid, event, marker, or space',
-      () {
-        final MonitorTheme theme = MonitorTheme.plain();
-        final List<String> rows = renderBrailleChart(
-          series: <ChartSeries>[
-            ChartSeries(label: 'cpu', points: _ramp(count: 60)),
-          ],
-          width: 48,
-          height: 10,
-          start: _windowStart,
-          end: _windowEnd,
-          theme: theme,
-          events: <DateTime>[_windowStart.add(const Duration(minutes: 45))],
-        );
-        final int gutterWidth = _gutterWidth(rows, theme.glyphs);
-        for (final String plotRow in _plotRows(rows, gutterWidth)) {
-          for (int index = 0; index < plotRow.length; index++) {
-            final String glyph = plotRow[index];
-            final int code = glyph.codeUnitAt(0);
-            final bool legal =
-                (code >= 0x2800 && code <= 0x28FF) ||
-                glyph == '·' ||
-                glyph == '┊' ||
-                glyph == '◆' ||
-                glyph == ' ';
-            expect(
-              legal,
-              isTrue,
-              reason:
-                  'illegal plot glyph "$glyph" (U+${code.toRadixString(16)})',
-            );
-          }
+    test('plot cells only ever hold braille, event, marker, or space', () {
+      final MonitorTheme theme = MonitorTheme.plain();
+      final List<String> rows = renderBrailleChart(
+        series: <ChartSeries>[
+          ChartSeries(label: 'cpu', points: _ramp(count: 60)),
+        ],
+        width: 48,
+        height: 10,
+        start: _windowStart,
+        end: _windowEnd,
+        theme: theme,
+        events: <DateTime>[_windowStart.add(const Duration(minutes: 45))],
+      );
+      final int gutterWidth = _gutterWidth(rows, theme.glyphs);
+      for (final String plotRow in _plotRows(rows, gutterWidth)) {
+        for (int index = 0; index < plotRow.length; index++) {
+          final String glyph = plotRow[index];
+          final int code = glyph.codeUnitAt(0);
+          final bool legal =
+              (code >= 0x2800 && code <= 0x28FF) ||
+              glyph == '┊' ||
+              glyph == '◆' ||
+              glyph == ' ';
+          expect(
+            legal,
+            isTrue,
+            reason: 'illegal plot glyph "$glyph" (U+${code.toRadixString(16)})',
+          );
         }
-      },
-    );
+      }
+    });
 
     test('forced 0..20 bounds label the top row 20 and the bottom row 0', () {
       final MonitorTheme theme = MonitorTheme.plain();
@@ -398,7 +393,7 @@ void main() {
       }
     });
 
-    test('grid dots land on tick rows at every second column', () {
+    test('draws no gridlines across the plot', () {
       final MonitorTheme theme = MonitorTheme.plain();
       final List<String> rows = renderBrailleChart(
         series: <ChartSeries>[],
@@ -411,10 +406,9 @@ void main() {
         forcedHigh: 20,
       );
       final int gutterWidth = _gutterWidth(rows, theme.glyphs);
-      final String top = _plotOf(rows.first, gutterWidth);
-      expect(top[0], '·');
-      expect(top[1], ' ');
-      expect(top[2], '·');
+      for (final String row in _plotRows(rows, gutterWidth)) {
+        expect(row, isNot(contains('·')));
+      }
     });
 
     test('the final row is a faint time axis under the plot area', () {
@@ -609,14 +603,14 @@ void main() {
       expect(joined.contains(theme.info), isTrue);
     });
 
-    test('a single series is painted with the vertical load gradient', () {
+    test('a single series is painted in its own tone', () {
       final MonitorTheme theme = MonitorTheme.detect(
         env: <String, String>{'COLORTERM': 'truecolor'},
         isTty: true,
       );
       final List<String> rows = renderBrailleChart(
         series: <ChartSeries>[
-          ChartSeries(label: 'cpu', points: _ramp(count: 60)),
+          ChartSeries(label: 'rx', points: _ramp(count: 60), toneIndex: 1),
         ],
         width: 40,
         height: 8,
@@ -626,37 +620,9 @@ void main() {
         forcedLow: 0,
         forcedHigh: 59,
       );
-      final String hottest = theme.rampTone(MonitorRamp.load, 1);
-      final String coolest = theme.rampTone(MonitorRamp.load, 0);
-      expect(rows.first.contains(hottest), isTrue);
-      expect(rows[rows.length - 2].contains(coolest), isTrue);
-    });
-
-    test('a tps chart paints its ceiling calm and its floor hot', () {
-      // TPS is health, not heat: the 20-TPS line at the top of the plot is
-      // the green end of the ramp, and a sagging line heats up as it falls.
-      final MonitorTheme theme = MonitorTheme.detect(
-        env: <String, String>{'COLORTERM': 'truecolor'},
-        isTty: true,
-      );
-      final List<String> rows = renderBrailleChart(
-        series: <ChartSeries>[
-          ChartSeries(label: 'tps', points: _ramp(count: 60)),
-        ],
-        width: 40,
-        height: 8,
-        start: _windowStart,
-        end: _windowEnd,
-        theme: theme,
-        forcedLow: 0,
-        forcedHigh: 59,
-        ramp: MonitorRamp.tps,
-      );
-      expect(rows.first.contains(theme.rampTone(MonitorRamp.load, 0)), isTrue);
-      expect(
-        rows[rows.length - 2].contains(theme.rampTone(MonitorRamp.load, 1)),
-        isTrue,
-      );
+      final String joined = rows.join('\n');
+      expect(joined.contains(theme.info), isTrue);
+      expect(joined.contains(theme.rampTone(MonitorRamp.load, 1)), isFalse);
     });
 
     test('adjacent cells sharing a tone share one escape sequence', () {
@@ -674,9 +640,9 @@ void main() {
         forcedLow: 0,
         forcedHigh: 20,
       );
-      // The top row is one uninterrupted faint run of grid dots and spaces:
-      // gutter escape + reset, then a single plot escape + reset.
-      expect('\x1B['.allMatches(rows.first).length, 4);
+      // With no ink the top row is the faint gutter and a run of spaces:
+      // one escape and its reset.
+      expect('\x1B['.allMatches(rows.first).length, 2);
     });
 
     test('samples outside the window are ignored', () {

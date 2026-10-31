@@ -32,6 +32,7 @@ final class MonitorConsumerGroup {
     required this.visibleInstances,
     required this.offset,
     required this.contentRows,
+    this.collapsed = false,
   });
 
   final ConsumerProfile consumer;
@@ -40,7 +41,11 @@ final class MonitorConsumerGroup {
   final int offset;
   final int contentRows;
 
-  int get rows => instances.isEmpty ? 1 : contentRows + 2;
+  /// A populated group folded to its title row because the terminal is too
+  /// short to list it beside the selected server's group.
+  final bool collapsed;
+
+  int get rows => instances.isEmpty || collapsed ? 1 : contentRows + 2;
 }
 
 int localMonitorNaturalRows(MonitorSnapshot snapshot) {
@@ -50,6 +55,20 @@ int localMonitorNaturalRows(MonitorSnapshot snapshot) {
         .where((String instance) => snapshot.consumerFor(instance) == consumer)
         .length;
     rows += count == 0 ? 1 : count + 2;
+  }
+  return rows;
+}
+
+/// The fewest rows the grouped list can draw in: its column header, one
+/// title row per empty group, and one scrolling row with borders per
+/// populated group.
+int localMonitorMinimumRows(MonitorSnapshot snapshot) {
+  int rows = 1;
+  for (ConsumerProfile consumer in monitorConsumerGroups) {
+    bool populated = snapshot.instances.any(
+      (String instance) => snapshot.consumerFor(instance) == consumer,
+    );
+    rows += populated ? 3 : 1;
   }
   return rows;
 }
@@ -74,10 +93,22 @@ List<MonitorConsumerGroup> planMonitorConsumerGroups({
   for (List<String> group in instances) {
     used += group.isEmpty ? 1 : 3;
   }
+  // Too short for every populated group: fold the ones without the
+  // selection to their title rows, last group first.
+  List<bool> collapsed = List<bool>.filled(instances.length, false);
+  for (int index = instances.length - 1; index >= 0 && used > rows; index--) {
+    if (instances[index].isEmpty ||
+        instances[index].contains(selectedInstance)) {
+      continue;
+    }
+    collapsed[index] = true;
+    slots[index] = 0;
+    used -= 2;
+  }
   while (used < rows) {
     bool expanded = false;
     for (int index = 0; index < instances.length && used < rows; index++) {
-      if (slots[index] < instances[index].length) {
+      if (!collapsed[index] && slots[index] < instances[index].length) {
         slots[index]++;
         used++;
         expanded = true;
@@ -88,7 +119,7 @@ List<MonitorConsumerGroup> planMonitorConsumerGroups({
   List<int> contentRows = List<int>.of(slots);
   List<int> populated = <int>[
     for (int index = 0; index < instances.length; index++)
-      if (instances[index].isNotEmpty) index,
+      if (instances[index].isNotEmpty && !collapsed[index]) index,
   ];
   if (populated.isNotEmpty && used < rows) {
     int spare = rows - used;
@@ -106,6 +137,7 @@ List<MonitorConsumerGroup> planMonitorConsumerGroups({
         slots: slots[index],
         contentRows: contentRows[index],
         selectedInstance: selectedInstance,
+        collapsed: collapsed[index],
       ),
   ];
 }
@@ -116,6 +148,7 @@ MonitorConsumerGroup _planGroup({
   required int slots,
   required int contentRows,
   required String? selectedInstance,
+  bool collapsed = false,
 }) {
   int selected = selectedInstance == null
       ? -1
@@ -127,5 +160,6 @@ MonitorConsumerGroup _planGroup({
     visibleInstances: instances.sublist(offset, offset + slots),
     offset: offset,
     contentRows: contentRows,
+    collapsed: collapsed,
   );
 }

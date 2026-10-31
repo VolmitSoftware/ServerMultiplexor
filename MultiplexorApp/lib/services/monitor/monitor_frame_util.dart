@@ -23,8 +23,8 @@ import 'monitor_network_tree.dart';
 /// The smallest terminal the dashboard will render into. Below either bound
 /// the frame degrades to [buildResizeRequiredFrame] rather than emitting a
 /// squeezed, misleading layout.
-const int monitorMinColumns = 80;
-const int monitorMinLines = 24;
+const int monitorMinColumns = 40;
+const int monitorMinLines = 12;
 
 /// The flags of an instance nothing is known about: an instance whose row
 /// never made it into a capture is treated as neither locked nor isolated.
@@ -167,6 +167,51 @@ List<String> _endpointList(String? encoded) {
 
 /// The short label for a chart/window [range]: the cycled ranges get
 /// their canonical names, anything else falls back to a compact duration.
+/// The narrowest window a chart is ever fitted to.
+const Duration _minChartWindow = Duration(minutes: 1);
+
+/// A pause between readings longer than this ends a run: the server was
+/// stopped or nothing was watching it.
+const Duration _maxRunGap = Duration(minutes: 10);
+
+/// Where a server's charts start: `now - range`, unless its current run of
+/// readings began later, as for a server that just started or restarted.
+/// The charts then begin at the run's first reading, never less than a
+/// minute back, so the plot is not mostly empty space. A sample without
+/// readings, or a gap over [_maxRunGap], ends a run. [history] is in time
+/// order.
+DateTime chartWindowStart({
+  required List<MetricSample> history,
+  required DateTime now,
+  required Duration range,
+}) {
+  final DateTime windowStart = now.subtract(range);
+  DateTime? runStart;
+  DateTime? previous;
+  for (final MetricSample sample in history) {
+    if (sample.ts.isAfter(now)) break;
+    final bool reading =
+        sample.tps != null ||
+        sample.cpuPercent != null ||
+        sample.rssBytes != null;
+    if (!reading) {
+      runStart = null;
+      previous = null;
+      continue;
+    }
+    if (previous == null || sample.ts.difference(previous) > _maxRunGap) {
+      runStart = sample.ts;
+    }
+    previous = sample.ts;
+  }
+  if (runStart == null || !runStart.isAfter(windowStart)) return windowStart;
+  final DateTime latestStart = now.subtract(_minChartWindow);
+  final DateTime fitted = runStart.isBefore(latestStart)
+      ? runStart
+      : latestStart;
+  return fitted.isBefore(windowStart) ? windowStart : fitted;
+}
+
 String rangeLabel(Duration range) => switch (range.inMinutes) {
   15 => '15m',
   60 => '1h',

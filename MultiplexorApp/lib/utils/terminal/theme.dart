@@ -180,6 +180,14 @@ class _Palette {
     basic: 6,
   );
   static const ToneToken frameActive = accent;
+
+  /// [accent] at reduced lightness: the body of a filled chart area, so the
+  /// bright tone is left for the series' top edge.
+  static const ToneToken accentSoft = ToneToken(
+    rgb: <int>[34, 112, 128],
+    ansi256: 30,
+    basic: 6,
+  );
   static const ToneToken info = ToneToken(
     rgb: <int>[96, 145, 235],
     ansi256: 69,
@@ -247,7 +255,6 @@ class MonitorGlyphs {
     required this.frameV,
     required this.axisTick,
     required this.axisBase,
-    required this.grid,
     required this.event,
     required this.latest,
     required this.selector,
@@ -271,7 +278,6 @@ class MonitorGlyphs {
   final String frameV;
   final String axisTick;
   final String axisBase;
-  final String grid;
   final String event;
   final String latest;
   final String selector;
@@ -311,7 +317,6 @@ class MonitorGlyphs {
     frameV: '│',
     axisTick: '┤',
     axisBase: '└',
-    grid: '·',
     event: '┊',
     latest: '◆',
     selector: '▸',
@@ -338,7 +343,6 @@ class MonitorGlyphs {
     frameV: '|',
     axisTick: '+',
     axisBase: '+',
-    grid: '.',
     event: ':',
     latest: '*',
     selector: '>',
@@ -436,12 +440,26 @@ class MonitorTheme {
   String get warn => _encodeTone(_Palette.warn, depth);
   String get crit => _encodeTone(_Palette.crit, depth);
   String get accent => _encodeTone(_Palette.accent, depth);
+  String get accentSoft => _encodeTone(_Palette.accentSoft, depth);
   String get info => _encodeTone(_Palette.info, depth);
   String get danger => _encodeTone(_Palette.danger, depth);
 
   String get reset => depth == ColorDepth.none ? '' : Ansi.reset;
   String get bold => depth == ColorDepth.none ? '' : Ansi.bold;
   String get dim => depth == ColorDepth.none ? '' : Ansi.dim;
+
+  /// The background a menu cursor is painted with. Menus — the cooked-mode
+  /// prompt menu and the dashboard's action cards — are the one place a
+  /// background is used: the monitor's rows carry meaning in their
+  /// foreground tone alone, but a menu needs an unmissable cursor.
+  ///
+  /// A 3-bit terminal has no dim background to spend, so it inverts instead;
+  /// a colorless terminal gets no bar at all and relies on the marker glyph.
+  String get selectionBar => switch (depth) {
+    ColorDepth.truecolor || ColorDepth.ansi256 => Ansi.bgHighlight,
+    ColorDepth.basic => Ansi.inverse,
+    ColorDepth.none => '',
+  };
 
   /// The tone at [fraction] (clamped `0..1`) along [ramp].
   String rampTone(MonitorRamp ramp, double fraction) {

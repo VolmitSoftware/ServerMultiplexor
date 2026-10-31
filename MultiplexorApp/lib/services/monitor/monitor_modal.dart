@@ -11,8 +11,10 @@
 /// Everything here is pure: no clock reads, no IO, no mutation.
 library;
 
+import '../../utils/duration_format.dart';
 import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/button.dart';
+import '../../utils/terminal/key_grid.dart';
 import '../../utils/terminal/panel.dart';
 import '../../utils/terminal/theme.dart';
 import '../runtime_state.dart';
@@ -339,87 +341,142 @@ ButtonSpec _workspaceButton(
   danger: danger,
 );
 
-/// The card's preferred width.
-const int _cardMaxWidth = 46;
-
-/// Columns left showing on either side of the card at full width.
+/// The card's width bounds. The card is as wide as its grid and title ask
+/// for within these — the readings and note wrap, the hint shortens — and
+/// [_cardInset] columns narrower than the frame so the dashboard stays
+/// visible around it.
+const int _cardMinWidth = 46;
+const int _cardMaxWidth = 84;
 const int _cardInset = 8;
 
-/// Leading spaces before the first chip of a card row, and the spaces between
-/// the two chips of a row.
-const int _rowIndent = 2;
-const int _rowGap = 2;
+/// Most columns an action grid is laid out in.
+const int _maxGridColumns = 4;
 
-/// The columns a chip spends on its brackets and their padding — the `[ ` and
-/// ` ]` [renderButton] wraps every label in. Mirrors that renderer's own
-/// `label.length + 4` sizing, and is what lets this library predict a row's
-/// width before laying it out.
-const int _chipPadding = 4;
+/// Spaces between consecutive grid columns.
+const int _gridGap = 2;
+
+/// Most rows the readings line and the note may each wrap onto.
+const int _maxTextRows = 2;
 
 /// The columns a card spends on its own frame: the two border rules plus the
 /// one space of padding [renderPanel] adds on each side.
 const int _cardChrome = 4;
 
-/// The dismiss hint on the last content row of the card.
-const String _modalHint = 'arrows move · enter runs · esc closes';
+/// The columns a bottom border spends around its inlaid hint: `└─ `, the
+/// space after the hint, a two-column tail and the corner.
+const int _hintChrome = 7;
+
+/// The dismiss hint inlaid in the card's bottom border, longest first; the
+/// card shows the longest that fits.
+const List<String> _modalHints = <String>[
+  'arrows move · enter runs · letter shortcut · esc closes',
+  'enter runs · letter key · esc closes',
+  'esc closes',
+];
 
 /// The columns a card row's content is offset by within the card: the left
 /// border rule plus the one space of padding [renderPanel] adds.
 const int _contentOffset = 2;
 
-/// The visible columns one card row needs to render every one of [buttons]
-/// whole: the row indent, each chip, and a gap between consecutive chips.
-int _rowWidth(List<ButtonSpec> buttons, {bool showShortcuts = true}) {
-  int width = _rowIndent;
-  for (int index = 0; index < buttons.length; index++) {
-    if (index > 0) {
-      width += _rowGap;
-    }
-    width +=
-        buttons[index].labelFor(showShortcut: showShortcuts).length +
-        _chipPadding;
-  }
-  return width;
+/// One labeled group of card actions.
+class _ModalSection {
+  const _ModalSection(this.title, this.buttons);
+
+  final String title;
+  final List<ButtonSpec> buttons;
 }
 
-/// The narrowest card that still renders every chip of every row in [rows].
-///
-/// [layoutButtonRow] drops a chip that would not fit *whole*, and it drops it
-/// silently — so a card narrower than this loses buttons with no visual cue
-/// that anything is missing. Deriving the floor from the rows themselves means
-/// relabelling a chip can never quietly reintroduce that.
-int _contentFloor(List<List<ButtonSpec>> rows) {
-  int floor = 0;
-  for (final List<ButtonSpec> row in rows) {
-    final int needed = _rowWidth(row) + _cardChrome;
-    if (needed > floor) {
-      floor = needed;
+/// The tidiest grid, at most [_maxGridColumns] columns, whose rows fit
+/// [inner] columns, or null when not even a single column does. Tidiest is
+/// the lowest [_gridScore]; a tie goes to more columns.
+List<int>? _gridFor(List<List<ButtonSpec>> groups, int inner) {
+  List<int>? best;
+  int bestScore = 0;
+  for (int columns = _maxGridColumns; columns >= 1; columns--) {
+    final List<int> widths = keyGridColumnWidths(groups, columns);
+    if (keyGridWidth(widths, gap: _gridGap) > inner) continue;
+    final int score = _gridScore(groups, widths.length);
+    if (best == null || score < bestScore) {
+      best = widths;
+      bestScore = score;
     }
   }
-  return floor;
+  return best;
 }
 
-/// The card width for a [columns]-wide frame drawing [rows]: [_cardMaxWidth]
-/// at most, and [_cardInset] columns narrower than the frame so the dashboard
-/// stays visible around it — but never narrower than [_contentFloor], since a
-/// card that silently drops DELETE is worse than one that touches both edges.
-///
-/// When the frame cannot seat the floor even at full width, the card spends
-/// the whole frame and [layoutButtonRow] does the dropping; there is no width
-/// left to give it.
-int _cardWidth(int columns, List<List<ButtonSpec>> rows) {
-  final int inset = columns - _cardInset;
-  final int capped = inset > _cardMaxWidth ? _cardMaxWidth : inset;
-  if (capped >= _contentFloor(rows)) {
-    return capped;
+/// How ragged [groups] look laid out [columns] cells wide: each row counts
+/// twice and each empty cell once, so a narrower grid wins only when the
+/// extra rows buy back orphaned cells.
+int _gridScore(List<List<ButtonSpec>> groups, int columns) {
+  int score = 0;
+  for (final List<ButtonSpec> group in groups) {
+    final int rows = (group.length + columns - 1) ~/ columns;
+    score += 2 * rows + rows * columns - group.length;
   }
-  return columns < 2 ? 2 : columns;
+  return score;
 }
 
-/// The chip rows of the instance card, top to bottom, for an instance whose
-/// most recent reading is [latest].
+/// [widths] grown evenly so the grid spans [inner] columns; earlier columns
+/// take any remainder.
+List<int> _stretch(List<int> widths, int inner) {
+  final int extra = inner - keyGridWidth(widths, gap: _gridGap);
+  if (extra <= 0 || widths.isEmpty) return widths;
+  return <int>[
+    for (int index = 0; index < widths.length; index++)
+      widths[index] +
+          extra ~/ widths.length +
+          (index < extra % widths.length ? 1 : 0),
+  ];
+}
+
+/// [buttons] split into rows of at most [columns] cells, in order.
+List<List<ButtonSpec>> _gridRows(List<ButtonSpec> buttons, int columns) =>
+    <List<ButtonSpec>>[
+      for (int start = 0; start < buttons.length; start += columns)
+        buttons.sublist(
+          start,
+          start + columns > buttons.length ? buttons.length : start + columns,
+        ),
+    ];
+
+/// [parts] joined by [separator] and wrapped into at most [_maxTextRows]
+/// rows no wider than [width]; a part that still does not fit is clipped.
+List<String> _wrapParts(List<String> parts, String separator, int width) {
+  final List<String> rows = <String>[];
+  String current = '';
+  for (final String part in parts) {
+    final String joined = current.isEmpty ? part : '$current$separator$part';
+    if (current.isEmpty || joined.length <= width) {
+      current = joined;
+      continue;
+    }
+    rows.add(current);
+    current = part;
+  }
+  if (current.isNotEmpty) rows.add(current);
+  return <String>[
+    for (final String row in rows.take(_maxTextRows))
+      Ansi.clipVisible(row, width),
+  ];
+}
+
+/// A section heading as an inlaid rule, `── RUN ─────`, the way prompt
+/// menus separate their groups.
+String _sectionRule(String title, int inner, MonitorTheme theme) {
+  final String dash = theme.glyphs.frameH;
+  final int fill = inner - title.length - 4;
+  if (fill < 2) {
+    return theme.paint(Ansi.clipVisible(title, inner), theme.faint);
+  }
+  return '${theme.paint('$dash$dash ', theme.frame)}'
+      '${theme.paint(title, '${theme.bold}${theme.faint}')}'
+      '${theme.paint(' ${dash * fill}', theme.frame)}';
+}
+
+/// The sections of the Local instance card, for an instance whose most
+/// recent reading is [latest].
 ///
-/// Availability mirrors the deleted `_instanceMenu` exactly:
+/// Availability:
 /// - Not stopped (running, or mid-flight starting/stopping/restarting): STOP,
 ///   RESTART and CONSOLE are live; START is not offered at all.
 /// - Stopped: START and UPDATE are live; RESTART and CONSOLE render faint.
@@ -427,206 +484,223 @@ int _cardWidth(int columns, List<List<ButtonSpec>> rows) {
 /// - An instance with no reading yet is treated as stopped, the same way the
 ///   selection bar treats it — an unsampled instance is not a running one.
 /// - FACTORY RESET and DELETE need the instance stopped *and* unlocked; that
-///   pair is the entire reach of the lock, which is what the old menu's
-///   "block delete and factory reset" lock copy promised.
-/// - PUSH TO REMOTE needs a stopped Local source. Remote cards apply the same
-///   stopped-source rule to PULL TO LOCAL so neither flow advertises an
+///   pair is the entire reach of the lock.
+/// - PUSH TO REMOTE needs a stopped Local source, so it never advertises an
 ///   operation the transfer engine will refuse.
 /// - SET PORT, MAKE ACTIVE, MOTD, FOLDER, the lock pair and the isolation
 ///   pair are always live.
 /// - Isolated instances offer a one-time COPY DROP-INS action. Shared
 ///   instances continue to receive their consumer's drop-ins through sync.
-List<List<ButtonSpec>> _instanceRows({
+List<_ModalSection> _instanceSections({
   required MetricSample? latest,
   required bool locked,
   required bool isolated,
-  required int columns,
 }) {
   final RuntimeState? state = latest?.state;
   final bool stopped = state == null || state == RuntimeState.stopped;
   final bool destructive = stopped && !locked;
-  final List<ButtonSpec> transferAddons = <ButtonSpec>[
-    _instanceButton(
-      InstanceModalAction.pushToRemote,
-      'PUSH TO REMOTE',
-      enabled: stopped,
-    ),
-    _instanceButton(InstanceModalAction.addons, 'ADDONS', enabled: stopped),
-  ];
-  final bool splitTransferAddons =
-      _rowWidth(transferAddons, showShortcuts: false) + _cardChrome > columns;
-
-  return <List<ButtonSpec>>[
-    <ButtonSpec>[
+  return <_ModalSection>[
+    _ModalSection('RUN', <ButtonSpec>[
       stopped
-          ? _instanceButton(InstanceModalAction.start, 'START')
-          : _instanceButton(InstanceModalAction.stop, 'STOP'),
+          ? _instanceButton(InstanceModalAction.start, 'Start')
+          : _instanceButton(InstanceModalAction.stop, 'Stop'),
       _instanceButton(
         InstanceModalAction.restart,
-        'RESTART',
+        'Restart',
         enabled: !stopped,
       ),
-    ],
-    <ButtonSpec>[
       _instanceButton(
         InstanceModalAction.console,
-        'CONSOLE',
+        'Console',
         enabled: !stopped,
       ),
-      _instanceButton(InstanceModalAction.setPort, 'SET PORT'),
-    ],
-    if (splitTransferAddons)
-      for (final ButtonSpec button in transferAddons) <ButtonSpec>[button]
-    else
-      transferAddons,
-    <ButtonSpec>[
-      _instanceButton(InstanceModalAction.makeActive, 'MAKE ACTIVE'),
+      _instanceButton(InstanceModalAction.makeActive, 'Make active'),
+    ]),
+    _ModalSection('CONFIGURE', <ButtonSpec>[
+      _instanceButton(InstanceModalAction.addons, 'Addons', enabled: stopped),
+      _instanceButton(InstanceModalAction.settings, 'Runtime'),
+      _instanceButton(InstanceModalAction.setPort, 'Set port'),
       _instanceButton(InstanceModalAction.motd, 'MOTD'),
-    ],
-    <ButtonSpec>[
-      locked
-          ? _instanceButton(InstanceModalAction.unlock, 'UNLOCK')
-          : _instanceButton(InstanceModalAction.lock, 'LOCK'),
       isolated
-          ? _instanceButton(InstanceModalAction.shared, 'SHARE')
-          : _instanceButton(InstanceModalAction.isolated, 'ISOLATE'),
-    ],
-    if (isolated)
-      <ButtonSpec>[
-        _instanceButton(InstanceModalAction.copyDropins, 'COPY DROP-INS'),
-      ],
-    <ButtonSpec>[
-      _instanceButton(InstanceModalAction.folder, 'FOLDER'),
-      _instanceButton(InstanceModalAction.update, 'UPDATE', enabled: stopped),
-    ],
-    <ButtonSpec>[
-      _instanceButton(InstanceModalAction.backups, 'BACKUPS'),
-      _instanceButton(InstanceModalAction.settings, 'RUNTIME'),
-    ],
-    <ButtonSpec>[
+          ? _instanceButton(InstanceModalAction.shared, 'Share')
+          : _instanceButton(InstanceModalAction.isolated, 'Isolate'),
+      if (isolated)
+        _instanceButton(InstanceModalAction.copyDropins, 'Copy drop-ins'),
+      locked
+          ? _instanceButton(InstanceModalAction.unlock, 'Unlock')
+          : _instanceButton(InstanceModalAction.lock, 'Lock'),
+    ]),
+    _ModalSection('FILES', <ButtonSpec>[
+      _instanceButton(InstanceModalAction.backups, 'Backups'),
+      _instanceButton(InstanceModalAction.update, 'Update', enabled: stopped),
+      _instanceButton(InstanceModalAction.folder, 'Folder'),
+      _instanceButton(
+        InstanceModalAction.pushToRemote,
+        'Push to remote',
+        enabled: stopped,
+      ),
+    ]),
+    _ModalSection('DANGER', <ButtonSpec>[
       _instanceButton(
         InstanceModalAction.factoryReset,
-        'FACTORY RESET',
+        'Factory reset',
         danger: true,
         enabled: destructive,
       ),
       _instanceButton(
         InstanceModalAction.delete,
-        'DELETE',
+        'Delete',
         danger: true,
         enabled: destructive,
       ),
-    ],
+    ]),
   ];
 }
 
-/// The chip rows of the workspace card, top to bottom. Every workspace action
-/// is always available; only WIPE carries the danger tone.
-List<List<ButtonSpec>> _workspaceRows({
+/// Why some Local actions are dimmed, or null when none are.
+String? _instanceNote({required MetricSample? latest, required bool locked}) {
+  final RuntimeState? state = latest?.state;
+  final bool stopped = state == null || state == RuntimeState.stopped;
+  if (!stopped) {
+    return 'Stop the server to add addons, update, push, reset, or delete.';
+  }
+  return locked ? 'Unlock the server to factory reset or delete.' : null;
+}
+
+/// The sections of the workspace card. Every workspace action is always
+/// available; only WIPE carries the danger tone.
+List<_ModalSection> _workspaceSections({
   required bool networks,
-}) => <List<ButtonSpec>>[
-  <ButtonSpec>[_workspaceButton(WorkspaceModalAction.projects, 'PROJECTS')],
-  <ButtonSpec>[
-    _workspaceButton(WorkspaceModalAction.diagnostics, 'DIAGNOSTICS'),
-  ],
-  if (networks)
-    <ButtonSpec>[_workspaceButton(WorkspaceModalAction.networks, 'NETWORKS')],
-  <ButtonSpec>[
-    _workspaceButton(WorkspaceModalAction.buildTuning, 'BUILD & TUNING'),
-    _workspaceButton(WorkspaceModalAction.pullBuilds, 'PULL BUILDS'),
-  ],
-  <ButtonSpec>[
-    _workspaceButton(WorkspaceModalAction.createMany, 'CREATE MANY'),
-    _workspaceButton(WorkspaceModalAction.startAll, 'START ALL'),
-  ],
-  <ButtonSpec>[
-    _workspaceButton(WorkspaceModalAction.stopAll, 'STOP ALL'),
-    _workspaceButton(WorkspaceModalAction.wipe, 'WIPE', danger: true),
-  ],
+}) => <_ModalSection>[
+  _ModalSection('BUILD', <ButtonSpec>[
+    _workspaceButton(WorkspaceModalAction.projects, 'Projects'),
+    _workspaceButton(WorkspaceModalAction.buildTuning, 'Build & tuning'),
+    _workspaceButton(WorkspaceModalAction.pullBuilds, 'Pull builds'),
+  ]),
+  _ModalSection('SERVERS', <ButtonSpec>[
+    _workspaceButton(WorkspaceModalAction.createMany, 'Create many'),
+    _workspaceButton(WorkspaceModalAction.startAll, 'Start all'),
+    _workspaceButton(WorkspaceModalAction.stopAll, 'Stop all'),
+    if (networks) _workspaceButton(WorkspaceModalAction.networks, 'Networks'),
+    _workspaceButton(WorkspaceModalAction.diagnostics, 'Diagnostics'),
+  ]),
+  _ModalSection('DANGER', <ButtonSpec>[
+    _workspaceButton(WorkspaceModalAction.wipe, 'Wipe', danger: true),
+  ]),
 ];
 
-List<List<ButtonSpec>> _remoteInstanceRows({
+List<_ModalSection> _remoteInstanceSections({
   required MetricSample? latest,
   required bool operationsBlocked,
 }) {
   final RuntimeState? state = latest?.state;
   final bool stopped = state == null || state == RuntimeState.stopped;
-  return <List<ButtonSpec>>[
-    <ButtonSpec>[
+  return <_ModalSection>[
+    _ModalSection('RUN', <ButtonSpec>[
       stopped
           ? _instanceButton(
               InstanceModalAction.start,
-              'START',
+              'Start',
               enabled: !operationsBlocked,
             )
           : _instanceButton(
               InstanceModalAction.stop,
-              'STOP',
+              'Stop',
               enabled: !operationsBlocked,
             ),
       _instanceButton(
         InstanceModalAction.restart,
-        'RESTART',
+        'Restart',
         enabled: !stopped && !operationsBlocked,
       ),
-    ],
-    <ButtonSpec>[
       _instanceButton(
         InstanceModalAction.console,
-        'CONSOLE',
+        'Console',
         enabled: !stopped && !operationsBlocked,
       ),
-      _instanceButton(InstanceModalAction.history, 'HISTORY'),
-    ],
-    <ButtonSpec>[
+    ]),
+    _ModalSection('MANAGE', <ButtonSpec>[
+      _instanceButton(InstanceModalAction.settings, 'Settings'),
+      _instanceButton(InstanceModalAction.history, 'History'),
+      _instanceButton(InstanceModalAction.profile, 'Profile'),
+      _instanceButton(InstanceModalAction.folder, 'Open folder'),
       _instanceButton(
         InstanceModalAction.pullToLocal,
-        'PULL TO LOCAL',
+        'Pull to local',
         enabled: stopped && !operationsBlocked,
       ),
-      _instanceButton(InstanceModalAction.profile, 'PROFILE'),
-    ],
-    <ButtonSpec>[
-      _instanceButton(InstanceModalAction.settings, 'SETTINGS'),
-      _instanceButton(InstanceModalAction.folder, 'OPEN FOLDER'),
-    ],
-    <ButtonSpec>[
-      _instanceButton(InstanceModalAction.reinstall, 'REINSTALL', danger: true),
-      _instanceButton(InstanceModalAction.delete, 'DELETE', danger: true),
-    ],
+    ]),
+    _ModalSection('DANGER', <ButtonSpec>[
+      _instanceButton(InstanceModalAction.reinstall, 'Reinstall', danger: true),
+      _instanceButton(InstanceModalAction.delete, 'Delete', danger: true),
+    ]),
   ];
 }
 
-List<List<ButtonSpec>> _remoteWorkspaceRows() => <List<ButtonSpec>>[
-  <ButtonSpec>[
-    _workspaceButton(WorkspaceModalAction.connect, 'CONNECTION'),
-    _workspaceButton(WorkspaceModalAction.files, 'FILES'),
-  ],
-  <ButtonSpec>[
-    _workspaceButton(WorkspaceModalAction.createMany, 'CREATE MANY'),
-    _workspaceButton(WorkspaceModalAction.bulkActions, 'BULK ACTIONS'),
-  ],
+List<_ModalSection> _remoteWorkspaceSections() => <_ModalSection>[
+  _ModalSection('FLEET', <ButtonSpec>[
+    _workspaceButton(WorkspaceModalAction.connect, 'Connection'),
+    _workspaceButton(WorkspaceModalAction.files, 'Files'),
+    _workspaceButton(WorkspaceModalAction.createMany, 'Create many'),
+    _workspaceButton(WorkspaceModalAction.bulkActions, 'Bulk actions'),
+  ]),
 ];
 
-/// The dismiss-hint content row: [_modalHint] centered across [innerWidth],
-/// faint.
-String _hintRow(int innerWidth, MonitorTheme theme) {
-  final int slack = innerWidth - _modalHint.length;
-  final int pad = slack <= 0 ? 0 : slack ~/ 2;
-  return theme.paint('${' ' * pad}$_modalHint', theme.faint);
+/// The instance's latest readings and flags, each one a short phrase; empty
+/// when there is nothing to say.
+List<String> _instanceFacts({
+  required MetricSample? latest,
+  required bool locked,
+  required bool isolated,
+}) {
+  final int? players = latest?.players;
+  final int? maxPlayers = latest?.maxPlayers;
+  final int? uptime = latest?.uptimeSeconds;
+  return <String>[
+    if (latest?.port != null) 'port ${latest!.port}',
+    if (players != null)
+      'players $players${maxPlayers == null ? '' : '/$maxPlayers'}',
+    if (latest?.tps != null) 'TPS ${latest!.tps!.toStringAsFixed(1)}',
+    if (latest?.rssBytes != null) 'mem ${formatBytes(latest!.rssBytes)}',
+    if (uptime != null)
+      'up ${formatCompactDuration(Duration(seconds: uptime))}',
+    if (locked) 'locked',
+    if (isolated) 'isolated',
+  ];
+}
+
+/// The longest of [_modalHints] that fits a [width]-wide bottom border, or
+/// null when none does.
+String? _hintFor(int width) {
+  for (final String hint in _modalHints) {
+    if (hint.length + _hintChrome <= width) return hint;
+  }
+  return null;
+}
+
+/// The badge inlaid at the right of the card's top border: the state behind
+/// a status dot in its tone, or BLOCKED.
+String _badgeFor(
+  String text,
+  RuntimeState? state,
+  bool blocked,
+  MonitorTheme theme,
+) {
+  if (blocked) return theme.paint(text, '${theme.bold}${theme.danger}');
+  if (state == null) return theme.paint(text, theme.faint);
+  final String tone = theme.statusTone(state);
+  return theme.paint('${theme.glyphs.bulletOn} $text', tone);
 }
 
 /// Draws [modal]'s card centered over [base] and returns the composed frame:
 /// exactly [lines] rows of exactly [columns] visible columns.
 ///
 /// Composition rules:
-/// - Rows the card does not cover are passed through from [base] byte for
-///   byte.
-/// - On a row the card *does* cover, the base row is kept up to the card's
-///   left edge and everything to the right of the card is blanked to spaces.
-///   Splicing a styled run back in on the right would require reconstructing
-///   the escape state the clip cut through; blanking is the honest, cheap
-///   answer, and a modal row reads as a modal row either way.
+/// - The whole base frame is dimmed: every row is reduced to its text and
+///   painted faint, so the dashboard stays readable around the card without
+///   competing with it. A one-cell clear margin rings the card so the
+///   dimmed dashboard never touches its border; on rows the card covers, the
+///   base text continues on both sides past that margin.
 /// - [base]'s hitboxes are discarded outright — nothing behind a modal is
 ///   clickable. In their place come three layers, emitted in painter's order
 ///   so [hitTest]'s last-wins search resolves them top down: one full-width
@@ -636,19 +710,22 @@ String _hintRow(int innerWidth, MonitorTheme theme) {
 ///   (inside the card but not on a control — a no-op), else as
 ///   [modalScrimHitId] (outside the card — dismisses).
 ///
-/// - The card is never narrower than the widest chip row needs, so no button
-///   is ever silently dropped while there are columns left to give it.
+/// The card lays its actions out as a grid of `[k] Label` cells whose
+/// columns line up across every section, each section under an inlaid
+/// heading rule, with the dismiss hint inlaid in the bottom border. An
+/// instance card leads with the server's latest readings and ends with a
+/// note naming why any actions are dimmed. The card is as wide as its grid
+/// and title ask for, between [_cardMinWidth] and [_cardMaxWidth]; a frame
+/// too narrow for even one grid column at that size gives the card its full
+/// width. When [lines] cannot hold everything, the readings and note go
+/// first, then the headings, then grid rows from the bottom (the first is
+/// always kept), before the final clip to the frame rectangle.
 ///
 /// [latest] is the instance's most recent reading (it badges the card and
 /// gates the runtime actions), [locked] and [isolated] are its flags. Both
 /// are ignored by the workspace card. [selectedId] is keyboard focus;
 /// [hoveredId] temporarily takes visual precedence when the pointer is over a
 /// button, and [pressedId] remains the active mouse press.
-///
-/// The card never outgrows the frame: its width follows [_cardWidth], and
-/// when [lines] cannot hold every chip row the rows are dropped from the
-/// bottom (the first is always kept), then the dismiss hint, before the final
-/// clip to the frame rectangle.
 MonitorFrame overlayModal({
   required MonitorFrame base,
   required MonitorModalState modal,
@@ -675,47 +752,90 @@ MonitorFrame overlayModal({
     InstanceModal() => instanceBlocked ? 'BLOCKED' : monitorStateText(latest),
     WorkspaceModal() => null,
   };
-  final List<List<ButtonSpec>> allRows = switch (modal) {
+  final List<_ModalSection> sections = switch (modal) {
     InstanceModal() =>
       remote
-          ? _remoteInstanceRows(
+          ? _remoteInstanceSections(
               latest: latest,
               operationsBlocked: instanceBlocked,
             )
-          : _instanceRows(
+          : _instanceSections(
               latest: latest,
               locked: locked,
               isolated: isolated,
-              columns: columns,
             ),
     WorkspaceModal() =>
-      remote ? _remoteWorkspaceRows() : _workspaceRows(networks: networks),
+      remote
+          ? _remoteWorkspaceSections()
+          : _workspaceSections(networks: networks),
   };
+  final List<String> factParts = modal is InstanceModal
+      ? _instanceFacts(latest: latest, locked: locked, isolated: isolated)
+      : const <String>[];
+  final String? note = modal is InstanceModal && !remote
+      ? _instanceNote(latest: latest, locked: locked)
+      : null;
+  final String? reason = instanceBlocked
+      ? 'BLOCKED: $operationBlockReason'
+      : null;
 
-  // Width is derived from the full row set, not the height-truncated one, so
-  // a short frame narrows the card's contents but never its columns.
-  final int width = _cardWidth(columns, allRows);
+  final List<List<ButtonSpec>> groups = <List<ButtonSpec>>[
+    for (final _ModalSection section in sections) section.buttons,
+  ];
+  final int safeColumns = columns < 0 ? 0 : columns;
+  final int insetWidth = safeColumns - _cardInset;
+  final int roomy = insetWidth < _cardMaxWidth ? insetWidth : _cardMaxWidth;
+  final int limit = _gridFor(groups, roomy - _cardChrome) != null
+      ? roomy
+      : safeColumns;
+  final List<int> natural =
+      _gridFor(groups, limit - _cardChrome) ?? keyGridColumnWidths(groups, 1);
+  final int gridWanted = keyGridWidth(natural, gap: _gridGap) + _cardChrome;
+  final int titleWanted =
+      title.length + (badge == null ? 0 : badge.length + 2) + 8;
+  final int wanted = gridWanted > titleWanted ? gridWanted : titleWanted;
+  final int floor = limit < _cardMinWidth ? limit : _cardMinWidth;
+  final int width = wanted < floor ? floor : (wanted > limit ? limit : wanted);
   final int innerWidth = width - _cardChrome < 0 ? 0 : width - _cardChrome;
+  final List<int> grid = _stretch(natural, innerWidth);
+  final List<List<List<ButtonSpec>>> sectionRows = <List<List<ButtonSpec>>>[
+    for (final _ModalSection section in sections)
+      _gridRows(section.buttons, grid.length),
+  ];
+  final List<String> factRows = factParts.isEmpty
+      ? const <String>[]
+      : _wrapParts(factParts, ' · ', innerWidth);
+  final List<String> noteRows = note == null
+      ? const <String>[]
+      : _wrapParts(note.split(' '), ' ', innerWidth);
+  final int gridRows = sectionRows.fold(
+    0,
+    (int total, List<List<ButtonSpec>> rows) => total + rows.length,
+  );
+  final int reasonRows = reason == null ? 0 : 1;
+  final int ruled = 2 + sections.length + gridRows + reasonRows;
+  final int fullHeight =
+      ruled + factRows.length + (noteRows.isEmpty ? 0 : 1 + noteRows.length);
+  final bool full = fullHeight <= lines;
+  final bool withRules = full || ruled <= lines;
 
-  // Two borders and the hint row are the card's fixed overhead; whatever is
-  // left over is the chip-row budget, and at least one chip row is always
-  // drawn even when that overflows a very short frame.
-  final int reasonRows = instanceBlocked ? 1 : 0;
-  final int budget = lines - 3 - reasonRows;
-  final int maxRows = budget < 1 ? 1 : budget;
-  final List<List<ButtonSpec>> buttonRows = allRows.length > maxRows
-      ? allRows.sublist(0, maxRows)
-      : allRows;
-  final bool showReason =
-      instanceBlocked && lines >= buttonRows.length + reasonRows + 2;
-  final bool showHint =
-      lines >= buttonRows.length + (showReason ? reasonRows : 0) + 3;
-
-  final List<String> enabledIds = buttonRows
-      .expand((List<ButtonSpec> row) => row)
-      .where((ButtonSpec button) => button.enabled)
-      .map((ButtonSpec button) => button.id)
-      .toList(growable: false);
+  final List<List<ButtonSpec>> allRows = <List<ButtonSpec>>[
+    for (final List<List<ButtonSpec>> rows in sectionRows) ...rows,
+  ];
+  final int budget = lines - 2 - reasonRows;
+  final List<List<ButtonSpec>> shownRows = withRules
+      ? allRows
+      : allRows.sublist(
+          0,
+          allRows.length > (budget < 1 ? 1 : budget)
+              ? (budget < 1 ? 1 : budget)
+              : allRows.length,
+        );
+  final List<String> enabledIds = <String>[
+    for (final List<ButtonSpec> row in shownRows)
+      for (final ButtonSpec button in row)
+        if (button.enabled) button.id,
+  ];
   final String? keyboardFocusId = enabledIds.contains(selectedId)
       ? selectedId
       : enabledIds.isEmpty
@@ -724,54 +844,89 @@ MonitorFrame overlayModal({
   final String? effectiveHoveredId = hoveredId ?? keyboardFocusId;
 
   final List<String> content = <String>[];
-  final List<List<ButtonSpan>> rowSpans = <List<ButtonSpan>>[];
-  for (final List<ButtonSpec> buttons in buttonRows) {
-    final bool showShortcuts = _rowWidth(buttons) + _cardChrome <= width;
-    final ButtonRowRender render = layoutButtonRow(
+  final Map<int, List<ButtonSpan>> spansByRow = <int, List<ButtonSpan>>{};
+  void addGridRow(List<ButtonSpec> buttons) {
+    final ButtonRowRender render = layoutKeyGridRow(
       buttons: buttons,
+      columnWidths: grid,
       width: innerWidth,
       theme: theme,
       hoveredId: effectiveHoveredId,
       pressedId: pressedId,
-      showShortcuts: showShortcuts,
-      gap: _rowGap,
-      indent: _rowIndent,
+      gap: _gridGap,
     );
+    spansByRow[content.length] = render.spans;
     content.add(render.row);
-    rowSpans.add(render.spans);
   }
-  if (showReason) {
-    content.add(theme.paint('BLOCKED: $operationBlockReason', theme.danger));
+
+  if (full) {
+    for (final String row in factRows) {
+      content.add(theme.paint(row, theme.muted));
+    }
   }
-  if (showHint) {
-    content.add(_hintRow(innerWidth, theme));
+  if (withRules) {
+    for (int index = 0; index < sections.length; index++) {
+      content.add(_sectionRule(sections[index].title, innerWidth, theme));
+      sectionRows[index].forEach(addGridRow);
+    }
+  } else {
+    shownRows.forEach(addGridRow);
+  }
+  if (reason != null && lines >= content.length + 3) {
+    content.add(
+      theme.paint(Ansi.clipVisible(reason, innerWidth), theme.danger),
+    );
+  }
+  if (full && noteRows.isNotEmpty) {
+    content.add('');
+    for (final String row in noteRows) {
+      content.add(theme.paint(row, theme.faint));
+    }
   }
 
   final List<String> card = renderPanel(
     title: title,
     badge: badge,
+    styledBadge: badge == null
+        ? null
+        : _badgeFor(badge, latest?.state, instanceBlocked, theme),
+    footer: _hintFor(width),
     content: content,
     width: width,
     theme: theme,
+    emphasis: PanelEmphasis.active,
   );
 
-  final int centeredLeft = (columns - width) ~/ 2;
+  final int centeredLeft = (safeColumns - width) ~/ 2;
   final int left = centeredLeft < 0 ? 0 : centeredLeft;
   final int centeredTop = (lines - card.length) ~/ 2;
   final int top = centeredTop < 0 ? 0 : centeredTop;
-  final int rightWidth = columns - left - width;
-  final String rightBlank = ' ' * (rightWidth < 0 ? 0 : rightWidth);
+  final int clearLeft = left > 0 ? left - 1 : 0;
+  final int clearRight = left + width < safeColumns
+      ? left + width + 1
+      : safeColumns;
 
   final List<String> rows = <String>[];
   for (int index = 0; index < lines; index++) {
-    final String baseRow = index < base.rows.length ? base.rows[index] : '';
+    final String baseRow = Ansi.padVisible(
+      Ansi.strip(index < base.rows.length ? base.rows[index] : ''),
+      safeColumns,
+    );
     final int cardIndex = index - top;
-    if (cardIndex < 0 || cardIndex >= card.length) {
-      rows.add(baseRow);
+    final bool margin = cardIndex == -1 || cardIndex == card.length;
+    if (!margin && (cardIndex < 0 || cardIndex >= card.length)) {
+      rows.add(theme.paint(baseRow, theme.faint));
       continue;
     }
-    final String kept = Ansi.padVisible(Ansi.clipVisible(baseRow, left), left);
-    rows.add('$kept${card[cardIndex]}$rightBlank');
+    final String middle = margin
+        ? ' ' * (clearRight - clearLeft)
+        : '${' ' * (left - clearLeft)}${card[cardIndex]}'
+              '${' ' * (clearRight - left - width)}';
+    rows.add(
+      '${theme.paint(baseRow.substring(0, clearLeft), theme.faint)}'
+      '$middle'
+      '${theme.paint(baseRow.substring(clearRight), theme.faint)}',
+    );
   }
 
   final List<MonitorHitbox> hitboxes = <MonitorHitbox>[
@@ -780,7 +935,7 @@ MonitorFrame overlayModal({
         id: modalScrimHitId,
         row: index,
         colStart: 0,
-        colEnd: columns < 0 ? 0 : columns,
+        colEnd: safeColumns,
         kind: MonitorHitKind.modalScrim,
       ),
   ];
@@ -795,10 +950,10 @@ MonitorFrame overlayModal({
       ),
     );
   }
-  for (int index = 0; index < rowSpans.length; index++) {
-    final int row = top + 1 + index;
+  for (final MapEntry<int, List<ButtonSpan>> entry in spansByRow.entries) {
+    final int row = top + 1 + entry.key;
     final int offset = left + _contentOffset;
-    for (final ButtonSpan span in rowSpans[index]) {
+    for (final ButtonSpan span in entry.value) {
       hitboxes.add(
         MonitorHitbox(
           id: span.id,

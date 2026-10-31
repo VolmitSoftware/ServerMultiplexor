@@ -20,6 +20,7 @@ enum MonitorAction {
   restart,
   stop,
   kill,
+  delete,
   console,
   consolesGrid,
   newInstance,
@@ -111,13 +112,14 @@ MonitorAction monitorActionForEvent(
       }
       return _charAction(event.char);
     case TermEventKind.backspace:
+    case TermEventKind.delete:
+      return MonitorAction.delete;
     case TermEventKind.arrowLeft:
     case TermEventKind.arrowRight:
     case TermEventKind.home:
     case TermEventKind.end:
     case TermEventKind.pageUp:
     case TermEventKind.pageDown:
-    case TermEventKind.delete:
     case TermEventKind.mouseDown:
     case TermEventKind.mouseUp:
     case TermEventKind.mouseMove:

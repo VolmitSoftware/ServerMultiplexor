@@ -24,13 +24,13 @@ extension _LocalWizard on InteractiveWizard {
       if (choice == 'back') return;
       if (choice.isEmpty) {
         final String label = await Ui.input('Backup label (optional)');
-        await _shellRun(<String>[
+        final int code = await _shellRun(<String>[
           'backup',
           'create',
           name,
           if (label.isNotEmpty) ...<String>['--label', label],
         ]);
-        await Ui.pause();
+        if (code != 0) await Ui.pause();
         continue;
       }
       final String action =
@@ -47,12 +47,17 @@ extension _LocalWizard on InteractiveWizard {
       if (action == 'restore' &&
           !await Ui.confirm(
             'Restore $name from $choice? Current worlds and settings will be replaced.',
-            defaultValue: false,
+            destructive: true,
           )) {
         continue;
       }
-      await _shellRun(<String>['backup', action, name, choice]);
-      await Ui.pause();
+      final int code = await _shellRun(<String>[
+        'backup',
+        action,
+        name,
+        choice,
+      ]);
+      if (code != 0 || action == 'verify') await Ui.pause();
     }
   }
 
@@ -111,11 +116,11 @@ extension _LocalWizard on InteractiveWizard {
       if (action == 'reset' &&
           !await Ui.confirm(
             'Remove runtime overrides for $name?',
-            defaultValue: false,
+            destructive: true,
           )) {
         continue;
       }
-      await _shellRun(<String>[
+      final int code = await _shellRun(<String>[
         'runtime',
         'settings',
         action,
@@ -123,7 +128,9 @@ extension _LocalWizard on InteractiveWizard {
         '--instance',
         name,
       ]);
-      await Ui.pause();
+      if (code != 0 || action == 'show' || action == 'check') {
+        await Ui.pause();
+      }
     }
   }
 }

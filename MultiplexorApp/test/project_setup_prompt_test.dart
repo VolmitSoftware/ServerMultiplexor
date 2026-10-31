@@ -99,16 +99,16 @@ void main() {
     expect(result.data['result'], <String>['scan', '/example/Plugin']);
   });
 
-  test(
-    'setup confirmation defaults to leaving the project unchanged',
-    () async {
-      final ({String output, Map<String, Object?> data}) result = await prompt(
-        <String>['/example/Plugin', ''],
-      );
-      expect(result.data['calls'], hasLength(1));
-      expect(result.data['result'], isNull);
-    },
-  );
+  test('setup confirmation defaults to applying and scanning', () async {
+    final ({String output, Map<String, Object?> data}) result = await prompt(
+      <String>['/example/Plugin', ''],
+    );
+    expect(result.data['calls'], <List<String>>[
+      <String>['init', '/example/Plugin', '--json'],
+      <String>['init', '/example/Plugin', '--json', '--apply'],
+    ]);
+    expect(result.data['result'], <String>['scan', '/example/Plugin']);
+  });
 
   test('preview failure does not apply or scan', () async {
     final ({String output, Map<String, Object?> data}) result = await prompt(

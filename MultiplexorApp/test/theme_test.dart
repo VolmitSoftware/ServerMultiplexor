@@ -14,7 +14,6 @@ Map<String, String> _singleWidthFields(MonitorGlyphs glyphs) =>
       'frameV': glyphs.frameV,
       'axisTick': glyphs.axisTick,
       'axisBase': glyphs.axisBase,
-      'grid': glyphs.grid,
       'event': glyphs.event,
       'latest': glyphs.latest,
       'selector': glyphs.selector,

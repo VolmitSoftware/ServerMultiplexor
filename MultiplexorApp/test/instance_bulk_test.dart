@@ -11,6 +11,34 @@ import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
 void main() {
+  group('instanceBulkOutcome', () {
+    test('names the finished action and the servers it reached', () {
+      expect(
+        instanceBulkOutcome(InstanceBulkAction.delete, 7, skipped: 0),
+        'Deleted 7 servers',
+      );
+      expect(
+        instanceBulkOutcome(InstanceBulkAction.start, 1, skipped: 0),
+        'Started 1 server',
+      );
+      expect(
+        instanceBulkOutcome(InstanceBulkAction.stop, 2, skipped: 3),
+        'Stopped 2 servers · 3 skipped',
+      );
+      expect(
+        instanceBulkOutcome(InstanceBulkAction.restart, 4, skipped: 0),
+        'Restarted 4 servers',
+      );
+    });
+
+    test('says when nothing selected can take the action', () {
+      expect(
+        instanceBulkOutcome(InstanceBulkAction.stop, 0, skipped: 2),
+        'Nothing to stop: 2 selected servers skipped',
+      );
+    });
+  });
+
   group('instance bulk eligibility', () {
     for (final RuntimeState state in RuntimeState.values) {
       test('uses live ${state.name} state for power actions', () {

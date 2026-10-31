@@ -116,25 +116,6 @@ const int _menuInlayTailWidth = 2;
 /// the border is drawn solid instead.
 const int _menuMinInlayWidth = 8;
 
-/// The background the selected row is painted with. The cooked-mode menu is
-/// the one place a background bar is used: the monitor's rows carry meaning in
-/// their foreground tone alone, but a menu needs an unmissable cursor.
-///
-/// A 3-bit terminal has no dim background to spend, so it inverts the row
-/// instead; a colorless terminal gets no bar at all and relies on the marker
-/// glyph.
-String _selectionBar(MonitorTheme theme) {
-  switch (theme.depth) {
-    case ColorDepth.truecolor:
-    case ColorDepth.ansi256:
-      return Ansi.bgHighlight;
-    case ColorDepth.basic:
-      return Ansi.inverse;
-    case ColorDepth.none:
-      return '';
-  }
-}
-
 /// Whether [theme] forbids escape bytes entirely (`NO_COLOR`, a dumb terminal,
 /// captured output). Caller-supplied colors — an entry's [MenuEntry.labelColor]
 /// or [MenuEntry.badgeColor], a pre-styled detail — are dropped there rather
@@ -192,7 +173,7 @@ String _menuFramedRow(
   final int inner = width - _menuChromeWidth < 0 ? 0 : width - _menuChromeWidth;
   final String body = Ansi.padVisible(Ansi.clipVisible(content, inner), inner);
   final String rule = theme.paint(theme.glyphs.frameV, theme.frame);
-  final String bar = isSelected ? _selectionBar(theme) : '';
+  final String bar = isSelected ? theme.selectionBar : '';
   if (bar.isEmpty) {
     return _menuForceWidth('$rule $body $rule', width);
   }

@@ -1,4 +1,6 @@
+import '../../utils/charts/area_chart.dart';
 import '../../utils/charts/braille_chart.dart';
+import '../../utils/charts/chart_scale.dart';
 import '../../utils/duration_format.dart';
 import '../../utils/terminal/ansi.dart';
 import '../../utils/terminal/panel.dart';
@@ -24,13 +26,17 @@ const int _minLogRows = 4;
 /// growing on its behalf.
 const int _maxLogRows = 12;
 
+/// The tallest a chart panel grows; rows past it go to the log, where a
+/// tall terminal shows more of what the server is doing.
+const int _maxChartPanelRows = 22;
+
 /// Terminal width at or above which the charts lay out as a 2x2 grid rather
 /// than stacking full width.
 const int _gridMinColumns = 100;
 
-/// Bytes in a mebibyte — the MEM chart plots MiB so its gutter stays a
+/// Bytes in a gibibyte — the MEM chart plots GiB so its gutter stays a
 /// readable number instead of a byte count.
-const double _bytesPerMib = 1048576;
+const double _bytesPerGib = 1073741824;
 
 const String _detailFooterHint =
     '[esc] back · r range · Shift+R repaint · S stop · X kill · O console';
@@ -39,24 +45,22 @@ const String _detailFooterHint =
 /// yields its filename on a POSIX host.
 final RegExp _pathSeparator = RegExp(r'[\\/]');
 
-/// One chart in the detail grid: its panel title, the series it plots, the
-/// bounds pinned on its vertical axis (null means auto-scaled), and the
-/// gradient its ink reads in — [MonitorRamp.tps] for TPS, where high is
-/// health rather than heat.
+/// One chart in the detail grid: its panel title (with the current reading
+/// when there is one), the series it plots, and the bounds pinned on its
+/// vertical axis (null means auto-scaled). A single series renders as a
+/// filled area; several render as lines.
 class _DetailChart {
   const _DetailChart({
     required this.title,
     required this.series,
     this.forcedLow,
     this.forcedHigh,
-    this.ramp = MonitorRamp.load,
   });
 
   final String title;
   final List<ChartSeries> series;
   final double? forcedLow;
   final double? forcedHigh;
-  final MonitorRamp ramp;
 }
 
 /// Builds the single-instance detail frame: exactly [lines] rows of exactly
@@ -123,6 +127,7 @@ MonitorFrame buildDetailFrame({
       heights: chartHeights,
       charts: _resolveCharts(
         history: history,
+        latest: latest,
         count: grid
             ? (chartHeights.length >= 3 ? 5 : chartHeights.length * 2)
             : chartHeights.length,
@@ -130,7 +135,8 @@ MonitorFrame buildDetailFrame({
       grid: grid,
       columns: columns,
       theme: theme,
-      range: range,
+      start: chartWindowStart(history: history, now: now, range: range),
+      badge: rangeLabel(range),
       now: now,
     ),
     ..._logPanel(
@@ -140,7 +146,7 @@ MonitorFrame buildDetailFrame({
       columns: columns,
       theme: theme,
     ),
-    theme.paint(_detailFooterHint, theme.faint),
+    theme.paint(_wholeHints(_detailFooterHint, columns), theme.faint),
   ];
 
   return padFrame(
@@ -148,6 +154,16 @@ MonitorFrame buildDetailFrame({
     columns: columns,
     lines: lines,
   );
+}
+
+/// As many of [hints]' ` · `-separated hints as fit [columns], dropped whole
+/// from the end so the row never ends mid-hint.
+String _wholeHints(String hints, int columns) {
+  final List<String> shown = hints.split(' · ');
+  while (shown.length > 1 && shown.join(' · ').length > columns) {
+    shown.removeLast();
+  }
+  return shown.join(' · ');
 }
 
 /// Splits the rows between charts and the log, then between the charts.
@@ -182,17 +198,33 @@ List<int> _planChartHeights({required int available, required bool grid}) {
   final int extra = area - base * used;
   return List<int>.generate(
     used,
-    (int index) => base + (index < extra ? 1 : 0),
+    (int index) => _minInt(base + (index < extra ? 1 : 0), _maxChartPanelRows),
   );
 }
+
+int _minInt(int a, int b) => a < b ? a : b;
 
 /// The [count] highest-priority charts, rendered back in canonical order.
 /// TPS, memory, and network outrank CPU and players when the frame cannot
 /// show all five.
 List<_DetailChart> _resolveCharts({
   required List<MetricSample> history,
+  required MetricSample? latest,
   required int count,
 }) {
+  double? cpuPeak;
+  double? memoryPeak;
+  for (final MetricSample sample in history) {
+    final double? cpu = sample.cpuPercent;
+    final int? memory = sample.rssBytes;
+    if (cpu != null && (cpuPeak == null || cpu > cpuPeak)) cpuPeak = cpu;
+    if (memory != null && (memoryPeak == null || memory > memoryPeak)) {
+      memoryPeak = memory.toDouble();
+    }
+  }
+  final int? memoryLimit = latest?.memoryLimitBytes;
+  String titled(String title, String? reading) =>
+      reading == null ? title : '$title $reading';
   double? peakMaxPlayers;
   for (final MetricSample sample in history) {
     final int? max = sample.maxPlayers;
@@ -218,7 +250,7 @@ List<_DetailChart> _resolveCharts({
 
   final List<_DetailChart> canonical = <_DetailChart>[
     _DetailChart(
-      title: 'TPS',
+      title: titled('TPS', latest?.tps?.toStringAsFixed(1)),
       series: <ChartSeries>[
         ChartSeries(
           label: 'TPS',
@@ -227,34 +259,49 @@ List<_DetailChart> _resolveCharts({
       ],
       forcedLow: 0,
       forcedHigh: 20,
-      ramp: MonitorRamp.tps,
     ),
     _DetailChart(
-      title: 'CPU %',
+      title: titled(
+        'CPU',
+        latest?.cpuPercent == null ? null : '${latest!.cpuPercent!.round()}%',
+      ),
       series: <ChartSeries>[
         ChartSeries(
-          label: 'CPU %',
+          label: 'CPU',
           points: _series(history, (MetricSample s) => s.cpuPercent),
         ),
       ],
       forcedLow: 0,
-      forcedHigh: 100,
+      forcedHigh: cpuPeak == null || cpuPeak <= 100
+          ? 100
+          : (cpuPeak / 50).ceil() * 50.0,
     ),
     _DetailChart(
-      title: 'MEM MiB',
+      title: titled(
+        'MEM',
+        latest?.rssBytes == null ? null : formatBytes(latest!.rssBytes),
+      ),
       series: <ChartSeries>[
         ChartSeries(
-          label: 'MEM MiB',
+          label: 'MEM',
           points: _series(
             history,
             (MetricSample s) =>
-                s.rssBytes == null ? null : s.rssBytes! / _bytesPerMib,
+                s.rssBytes == null ? null : s.rssBytes! / _bytesPerGib,
           ),
         ),
       ],
+      forcedLow: 0,
+      forcedHigh:
+          memoryLimit != null &&
+              (memoryPeak == null || memoryLimit >= memoryPeak)
+          ? memoryLimit / _bytesPerGib
+          : memoryPeak == null
+          ? null
+          : roomyCeiling(memoryPeak / _bytesPerGib),
     ),
     _DetailChart(
-      title: 'PLAYERS',
+      title: titled('PLAYERS', latest?.players?.toString()),
       series: <ChartSeries>[
         ChartSeries(
           label: 'PLAYERS',
@@ -334,7 +381,7 @@ List<String> _headerPanel({
     'TPS ${theme.paint(monitorTpsText(tps, theme), theme.tpsTone(tps))}',
     'CPU ${formatCpuPercent(latest?.cpuPercent)}',
     'MEM ${formatBytes(latest?.rssBytes)}',
-    'DISK ${formatBytes(latest?.diskBytes)}',
+    if (latest?.diskBytes != null) 'DISK ${formatBytes(latest?.diskBytes)}',
     'NET RX ${_networkRateText(networkRx, networkUnit)} TX ${_networkRateText(networkTx, networkUnit)}',
     'UP ${uptime == null ? 'n/a' : formatCompactDuration(Duration(seconds: uptime))}',
   ];
@@ -363,14 +410,13 @@ List<String> _charts({
   required bool grid,
   required int columns,
   required MonitorTheme theme,
-  required Duration range,
+  required DateTime start,
+  required String badge,
   required DateTime now,
 }) {
   if (heights.isEmpty || charts.isEmpty) {
     return const <String>[];
   }
-  final DateTime start = now.subtract(range);
-  final String badge = rangeLabel(range);
   final List<String> rows = <String>[];
 
   for (int index = 0; index < heights.length; index++) {
@@ -450,17 +496,27 @@ List<String> _chartPanel({
   return renderPanel(
     title: chart.title,
     badge: badge,
-    content: renderBrailleChart(
-      series: chart.series,
-      width: width - 4,
-      height: height - 2,
-      start: start,
-      end: end,
-      theme: theme,
-      forcedLow: chart.forcedLow,
-      forcedHigh: chart.forcedHigh,
-      ramp: chart.ramp,
-    ),
+    content: chart.series.length == 1
+        ? renderAreaChart(
+            points: chart.series.single.points,
+            width: width - 4,
+            height: height - 2,
+            start: start,
+            end: end,
+            theme: theme,
+            forcedLow: chart.forcedLow,
+            forcedHigh: chart.forcedHigh,
+          )
+        : renderBrailleChart(
+            series: chart.series,
+            width: width - 4,
+            height: height - 2,
+            start: start,
+            end: end,
+            theme: theme,
+            forcedLow: chart.forcedLow,
+            forcedHigh: chart.forcedHigh,
+          ),
     width: width,
     theme: theme,
   );

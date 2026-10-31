@@ -167,8 +167,7 @@ extension _AddonWizard on InteractiveWizard {
       Ui.note(note);
     }
     if (checklist.options.isEmpty) {
-      Ui.note('No compatible addons are available for this server.');
-      if (!duringSetup) await Ui.pause();
+      if (!duringSetup) Ui.report('No compatible addons for $name');
       return true;
     }
 
@@ -181,10 +180,7 @@ extension _AddonWizard on InteractiveWizard {
     );
     final List<String>? command = checklist.commandFor(name, selection);
     if (command == null) {
-      if (!duringSetup) {
-        Ui.note('Addon selection unchanged.');
-        await Ui.pause();
-      }
+      if (!duringSetup) Ui.report('Addons unchanged for $name');
       return true;
     }
 
@@ -195,7 +191,7 @@ extension _AddonWizard on InteractiveWizard {
       await Ui.pause();
       return false;
     }
-    if (!duringSetup) await Ui.pause();
+    if (!duringSetup) Ui.report('Updated addons for $name');
     return true;
   }
 }

@@ -5,6 +5,7 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import 'prompt/flow_notice.dart';
 import 'prompt/line_input.dart';
 import 'prompt/menu.dart';
 import 'terminal/ansi.dart';
@@ -12,6 +13,7 @@ import 'terminal/term_events.dart';
 import 'terminal/term_io.dart';
 import 'terminal/theme.dart';
 
+export 'prompt/flow_notice.dart';
 export 'prompt/menu.dart';
 export 'terminal/ansi.dart';
 export 'terminal/term_io.dart';
@@ -94,6 +96,10 @@ class Ui {
   static void note(String message) {
     stdout.writeln('   ${Ansi.style(message, Ansi.gray)}');
   }
+
+  /// Ends a flow without a key press: [message] is shown on the dashboard
+  /// the flow returns to.
+  static void report(String message) => FlowNotice.post(message);
 
   /// Announces a long-running step before streamed command output.
   static void doing(String message) {
@@ -428,8 +434,14 @@ class Ui {
   }
 
   /// Single-key confirmation: y/n, Enter accepts the configured default,
-  /// Esc backs out.
-  static Future<bool> confirm(String prompt, {bool defaultValue = true}) async {
+  /// Esc backs out. Confirming an action defaults to yes; [defaultValue] is
+  /// for optional extras the user opts into. A [destructive] prompt paints
+  /// its default in the crit tone.
+  static Future<bool> confirm(
+    String prompt, {
+    bool defaultValue = true,
+    bool destructive = false,
+  }) async {
     final String hint = defaultValue ? 'Y/n' : 'y/N';
     if (!hasTerminal) {
       stdout.write('$prompt [$hint]: ');
@@ -449,16 +461,15 @@ class Ui {
     final TermIo io = TermIo.instance;
     io.drainInput();
     // Button-style chips: the default answer is a filled key, the other
-    // faint. The fill carries the accent tone, except on a prompt that
-    // defaults to no — every one of those is destructive, so the chip stays
-    // in the crit tone rather than reading like an ordinary default. A
-    // colorless terminal gets neither the fill nor the tone, so the chips
-    // fall back to their bare `Y`/`n` text.
+    // faint. A destructive prompt fills its default in the crit tone so it
+    // never reads like an ordinary default. A colorless terminal gets neither
+    // the fill nor the tone, so the chips fall back to their bare `Y`/`n`
+    // text.
     final MonitorTheme theme = Ui.theme;
     final String fill = theme.depth == ColorDepth.none ? '' : Ansi.inverse;
     final String chosen = theme.paint(
       defaultValue ? ' Y ' : ' N ',
-      '$fill${defaultValue ? theme.accent : theme.crit}',
+      '$fill${destructive ? theme.crit : theme.accent}',
     );
     final String other = theme.paint(defaultValue ? ' n ' : ' y ', theme.faint);
     final String chips = defaultValue ? '$chosen $other' : '$other $chosen';

@@ -106,7 +106,11 @@ class ButtonRowRender {
 /// and pressed ids. A disabled button is always disabled, regardless of
 /// [hoveredId]/[pressedId]; otherwise a press wins over a hover on the same
 /// id.
-ButtonState _stateFor(ButtonSpec button, String? hoveredId, String? pressedId) {
+ButtonState buttonStateFor(
+  ButtonSpec button,
+  String? hoveredId,
+  String? pressedId,
+) {
   if (!button.enabled) {
     return ButtonState.disabled;
   }
@@ -162,7 +166,7 @@ ButtonRowRender layoutButtonRow({
     if (gapBefore > 0) {
       buffer.write(' ' * gapBefore);
     }
-    final ButtonState state = _stateFor(button, hoveredId, pressedId);
+    final ButtonState state = buttonStateFor(button, hoveredId, pressedId);
     buffer.write(
       renderButton(
         label: label,

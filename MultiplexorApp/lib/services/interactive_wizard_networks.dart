@@ -256,8 +256,7 @@ class WizardNetworkCandidate {
 extension _NetworkWizard on InteractiveWizard {
   Future<void> _networkMenu() async {
     if (!_isPluginConsumer()) {
-      Ui.note('Networks are available in the Local plugin consumer.');
-      await Ui.pause();
+      Ui.report('Networks are available in the Local plugin consumer');
       return;
     }
     while (true) {
@@ -281,8 +280,8 @@ extension _NetworkWizard on InteractiveWizard {
         );
         if (action == 'back') return;
         if (action == 'recover') {
-          await _shellRun(<String>['network', 'recover']);
-          await Ui.pause();
+          final int code = await _shellRun(<String>['network', 'recover']);
+          if (code != 0) await Ui.pause();
         }
         continue;
       }
@@ -374,7 +373,6 @@ extension _NetworkWizard on InteractiveWizard {
         'Create and stop a Paper-compatible server first. Networks need '
         'Minecraft 1.19 or newer and servers outside existing networks.',
       );
-      await Ui.pause();
       return;
     }
     final String name = await Ui.input(
@@ -421,7 +419,7 @@ extension _NetworkWizard on InteractiveWizard {
     Ui.note(
       'Players authenticate through Velocity. Backend ports become local-only.',
     );
-    if (!await Ui.confirm('Create this network?', defaultValue: false)) return;
+    if (!await Ui.confirm('Create this network?')) return;
     final int code = await _shellRun(<String>[
       'network',
       'create',
@@ -440,8 +438,11 @@ extension _NetworkWizard on InteractiveWizard {
         version,
       ],
     ]);
-    await Ui.pause();
-    if (code == 0) await _networkActions(name);
+    if (code != 0) {
+      await Ui.pause();
+      return;
+    }
+    await _networkActions(name);
   }
 
   Future<void> _networkActions(String name) async {
@@ -526,11 +527,15 @@ extension _NetworkWizard on InteractiveWizard {
             '--confirm',
             confirmation,
           ]);
-          await Ui.pause();
           if (code == 0) return;
+          await Ui.pause();
         default:
-          await _shellRun(<String>['network', action, name]);
-          if (action != 'console') await Ui.pause();
+          final int code = await _shellRun(<String>['network', action, name]);
+          if (action == 'status' ||
+              action == 'check' ||
+              (code != 0 && action != 'console')) {
+            await Ui.pause();
+          }
       }
     }
   }
@@ -541,7 +546,6 @@ extension _NetworkWizard on InteractiveWizard {
       Ui.note(
         'No stopped, compatible servers outside a network are available.',
       );
-      await Ui.pause();
       return;
     }
     final WizardNetworkCandidate candidate =
@@ -563,7 +567,7 @@ extension _NetworkWizard on InteractiveWizard {
       validationMessage:
           'Use letters, numbers, _, or -. The name try is reserved.',
     );
-    await _shellRun(<String>[
+    final int code = await _shellRun(<String>[
       'network',
       'add',
       name,
@@ -571,7 +575,7 @@ extension _NetworkWizard on InteractiveWizard {
       '--alias',
       alias,
     ]);
-    await Ui.pause();
+    if (code != 0) await Ui.pause();
   }
 
   Future<bool> _networkRemove(WizardNetwork network) async {
@@ -586,10 +590,7 @@ extension _NetworkWizard on InteractiveWizard {
           ),
       ],
     );
-    if (!await Ui.confirm(
-      'Restore $alias to standalone settings?',
-      defaultValue: false,
-    )) {
+    if (!await Ui.confirm('Restore $alias to standalone settings?')) {
       return false;
     }
     final int code = await _shellRun(<String>[
@@ -598,7 +599,7 @@ extension _NetworkWizard on InteractiveWizard {
       network.name,
       alias,
     ]);
-    await Ui.pause();
+    if (code != 0) await Ui.pause();
     return code == 0 && network.members.length == 1;
   }
 
@@ -638,7 +639,7 @@ extension _NetworkWizard on InteractiveWizard {
     final String bind = network.onlineMode
         ? await _networkBind(current: network.bind)
         : '127.0.0.1';
-    await _shellRun(<String>[
+    final int code = await _shellRun(<String>[
       'network',
       'configure',
       network.name,
@@ -651,6 +652,6 @@ extension _NetworkWizard on InteractiveWizard {
       '--bind',
       bind,
     ]);
-    await Ui.pause();
+    if (code != 0) await Ui.pause();
   }
 }
