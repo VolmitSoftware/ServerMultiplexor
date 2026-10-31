@@ -454,7 +454,8 @@ List<String> _tree(String root) {
     for (FileSystemEntity entry in Directory(
       root,
     ).listSync(recursive: true, followLinks: false))
-      if (entry is! Directory) p.relative(entry.path, from: root),
+      if (entry is! Directory)
+        p.posix.joinAll(p.split(p.relative(entry.path, from: root))),
   ]..sort();
   return files;
 }
