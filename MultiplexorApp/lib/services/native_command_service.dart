@@ -18,6 +18,7 @@ import '../models/upstream_release_branches.dart';
 import '../utils/async_work_pool.dart';
 import '../utils/delete_path.dart';
 import '../utils/duration_format.dart';
+import '../utils/long_path.dart';
 import '../utils/process_runner.dart';
 import '../utils/table.dart';
 import '../utils/terminal/ansi.dart';
@@ -69,6 +70,7 @@ class NativeCommandService {
     Future<ProcessResult> Function(String, List<String>)? processExecutor,
     Future<int> Function(String)? javaInspector,
     Future<bool> Function(int)? portInUse,
+    Future<void> Function(String)? resetBackupDeleter,
     this.contentResolverFactory,
     this.gameplayHarnessFactory,
     this.sessionHostLauncher,
@@ -76,6 +78,7 @@ class NativeCommandService {
        _processRunner = processRunner,
        _processExecutor = processExecutor,
        _portInUse = portInUse,
+       _resetBackupDeleter = resetBackupDeleter ?? deletePath,
        _javaInspector = javaInspector ?? inspectJavaRuntime;
 
   final RecoveryRuntime? _recoveryRuntimeOverride;
@@ -87,6 +90,7 @@ class NativeCommandService {
   final ProcessRunner _processRunner;
   final Future<int> Function(String) _javaInspector;
   final Future<bool> Function(int)? _portInUse;
+  final Future<void> Function(String) _resetBackupDeleter;
   final Future<ProcessResult> Function(String, List<String>)? _processExecutor;
   static final AsyncGate _runtimePortGate = AsyncGate();
   static final Set<int> _reservedRuntimePorts = <int>{};
@@ -4837,23 +4841,23 @@ class NativeCommandService {
       switch (type) {
         case 'paper':
         case 'folia':
-          return _resolveLatestPaperLikeMcVersion(type);
+          return await _resolveLatestPaperLikeMcVersion(type);
         case 'purpur':
-          return _resolveLatestPurpurMcVersion();
+          return await _resolveLatestPurpurMcVersion();
         case 'leaf':
-          return _resolveLatestLeafMcVersion();
+          return await _resolveLatestLeafMcVersion();
         case 'canvas':
-          return _resolveLatestCanvasMcVersion();
+          return await _resolveLatestCanvasMcVersion();
         case 'fabric':
-          return _resolveLatestFabricMcVersion();
+          return await _resolveLatestFabricMcVersion();
         case 'forge':
-          return _resolveLatestForgeMcVersion();
+          return await _resolveLatestForgeMcVersion();
         case 'mohist':
-          return _resolveLatestMohistMcVersion();
+          return await _resolveLatestMohistMcVersion();
         case 'neoforge':
-          return _resolveLatestNeoForgeMcVersion();
+          return await _resolveLatestNeoForgeMcVersion();
         case 'spigot':
-          return _resolveLatestSpigotMcVersion();
+          return await _resolveLatestSpigotMcVersion();
       }
     } catch (_) {}
 
@@ -7634,7 +7638,7 @@ class NativeCommandService {
               const Duration(seconds: 5)) {
         return false;
       }
-      return _pidRunning(pid);
+      return await _pidRunning(pid);
     } on FileSystemException {
       return false;
     }
@@ -9810,12 +9814,17 @@ class NativeCommandService {
     final backupPath =
         '$instancePath.reset-backup.${DateTime.now().millisecondsSinceEpoch}';
 
-    final instanceDir = Directory(instancePath);
+    // A sibling rename only fails on an open handle or a permission problem.
+    // Copy-then-delete would hit the same problem partway through and lose
+    // files, so stop here with the instance untouched.
     try {
-      instanceDir.renameSync(backupPath);
-    } catch (_) {
-      _copyDirectory(instanceDir, Directory(backupPath));
-      _deletePathEntity(instancePath, recursive: true);
+      await _renameDirectory(instancePath, backupPath);
+    } on FileSystemException catch (error) {
+      throw _NativeCommandException(
+        'Failed to reset $name: could not move its folder, so nothing changed. '
+        'Close anything using its files and try again. ($error)',
+        1,
+      );
     }
 
     try {
@@ -9831,23 +9840,46 @@ class NativeCommandService {
       if (!wasIsolated) {
         _instanceEnsureSharedPluginOps(profile, name, io: io);
       }
-      _deletePathEntity(backupPath, recursive: true);
     } catch (e) {
       try {
-        _deletePathEntity(instancePath, recursive: true);
-      } catch (_) {}
-      try {
-        Directory(backupPath).renameSync(instancePath);
-      } catch (_) {
-        if (Directory(backupPath).existsSync()) {
-          _copyDirectory(Directory(backupPath), Directory(instancePath));
-          _deletePathEntity(backupPath, recursive: true);
-        }
+        await deletePath(instancePath);
+        await _renameDirectory(backupPath, instancePath);
+      } on FileSystemException catch (restoreError) {
+        throw _NativeCommandException(
+          'Failed to reset $name: $e\n'
+          'Could not restore it: $restoreError\n'
+          'Its original files are in $backupPath',
+          1,
+        );
       }
       if (e is _NativeCommandException) {
         rethrow;
       }
       throw _NativeCommandException('Failed to reset $name: $e', 1);
+    }
+
+    // The reset is finished here. A failed delete may have removed part of the
+    // backup, including .server-source, so restoring from it would damage the
+    // instance. Keep the new instance and report the leftover instead.
+    try {
+      await _resetBackupDeleter(backupPath);
+    } on FileSystemException catch (error) {
+      io.error(
+        '[WARN] Reset $name, but could not delete its old files at $backupPath: '
+        '$error',
+      );
+    }
+  }
+
+  Future<void> _renameDirectory(String from, String to) async {
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      try {
+        Directory(from).renameSync(to);
+        return;
+      } on FileSystemException {
+        if (attempt == 3) rethrow;
+        await Future<void>.delayed(Duration(milliseconds: 75 * attempt));
+      }
     }
   }
 
@@ -10640,7 +10672,9 @@ class NativeCommandService {
     }
     dst.createSync(recursive: true);
 
-    for (final entity in src.listSync(recursive: false, followLinks: false)) {
+    for (final entity in Directory(
+      extendedLengthPath(src.path),
+    ).listSync(recursive: false, followLinks: false)) {
       final base = p.basename(entity.path);
       final nextPath = p.join(dst.path, base);
 
@@ -10775,7 +10809,7 @@ class NativeCommandService {
   }
 
   void _deleteDirectoryTree(String path) {
-    final directory = Directory(path);
+    final directory = Directory(extendedLengthPath(path));
     if (!directory.existsSync()) {
       return;
     }

@@ -1216,6 +1216,7 @@ final class PterodactylTransferService {
     final int attempts = _pollAttempts(_remoteReadyTimeout);
     Object? lastError;
     for (int attempt = 0; attempt < attempts; attempt++) {
+      PterodactylTransferRemoteTarget? offlineTarget;
       try {
         final PterodactylTransferRemoteTarget target = await _remoteGateway
             .resolveTarget(
@@ -1244,7 +1245,7 @@ final class PterodactylTransferService {
             );
           }
           if (current == PterodactylTransferRemoteState.offline) {
-            return _recheckStableTarget(target, operation: 'Create & Push');
+            offlineTarget = target;
           }
         }
       } catch (error) {
@@ -1255,6 +1256,10 @@ final class PterodactylTransferService {
           rethrow;
         }
         lastError = error;
+      }
+      // Outside the try: a failed recheck is final, not another poll attempt.
+      if (offlineTarget != null) {
+        return _recheckStableTarget(offlineTarget, operation: 'Create & Push');
       }
       if (attempt + 1 < attempts) {
         await _delay(const Duration(milliseconds: 500));

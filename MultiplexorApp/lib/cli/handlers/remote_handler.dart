@@ -25,12 +25,12 @@ Future<int> handleRemote(List<String> args) async {
   try {
     switch (subcommand) {
       case 'connect':
-        return _connect(parsed);
+        return await _connect(parsed);
       case 'account':
       case 'accounts':
-        return _account(parsed);
+        return await _account(parsed);
       case 'profiles':
-        return _listAccounts();
+        return await _listAccounts();
       case 'verify':
       case 'doctor':
         final PterodactylVerification result = await pterodactylService.verify(
@@ -66,10 +66,10 @@ Future<int> handleRemote(List<String> args) async {
         }
         return 0;
       case 'catalog':
-        return _printCreationCatalog(_profileId(parsed));
+        return await _printCreationCatalog(_profileId(parsed));
       case 'stats':
         if (parsed.flag('all')) {
-          return _printFleetStats(_profileId(parsed));
+          return await _printFleetStats(_profileId(parsed));
         }
         final String server = _server(parsed);
         final PterodactylResourceUsage usage = await pterodactylService
@@ -115,17 +115,17 @@ Future<int> handleRemote(List<String> args) async {
         );
         return 0;
       case 'history':
-        return _printHistory(parsed);
+        return await _printHistory(parsed);
       case 'drive':
       case 'files':
       case 'smb':
-        return _drive(parsed, legacyNamespace: subcommand != 'drive');
+        return await _drive(parsed, legacyNamespace: subcommand != 'drive');
       case 'pull':
-        return _pullRemote(parsed);
+        return await _pullRemote(parsed);
       case 'push':
-        return _pushRemote(parsed);
+        return await _pushRemote(parsed);
       case 'settings':
-        return _printSettings(_profileId(parsed), _server(parsed));
+        return await _printSettings(_profileId(parsed), _server(parsed));
       case 'rename':
         final String? name =
             parsed.option('name') ??
@@ -175,15 +175,15 @@ Future<int> handleRemote(List<String> args) async {
         stdout.writeln('[OK] Server deleted');
         return 0;
       case 'bulk':
-        return _bulk(parsed);
+        return await _bulk(parsed);
       case 'variable':
-        return _updateVariable(parsed);
+        return await _updateVariable(parsed);
       case 'image':
-        return _updateImage(parsed);
+        return await _updateImage(parsed);
       case 'limits':
-        return _updateLimits(parsed);
+        return await _updateLimits(parsed);
       case 'startup':
-        return _updateStartup(parsed);
+        return await _updateStartup(parsed);
       case 'start':
       case 'stop':
       case 'restart':
@@ -263,13 +263,18 @@ Future<int> handleRemote(List<String> args) async {
         );
         return 0;
       case 'create-many':
-        return _createMany(parsed);
+        return await _createMany(parsed);
       default:
         stderr.writeln(
           'Usage: remote <account|connect|profiles|verify|list|nodes|catalog|stats|history|drive|pull|push|permissions|activity|settings|start|stop|restart|kill|bulk|console|command|create|create-many|rename|reinstall|delete|variable|image|limits|startup>',
         );
         return 2;
     }
+  } on FormatException {
+    // runCli reports these with their own exit codes and a clean message.
+    rethrow;
+  } on ProcessException {
+    rethrow;
   } catch (error) {
     stderr.writeln('[ERROR] $error');
     return 1;

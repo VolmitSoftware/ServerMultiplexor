@@ -1,4 +1,5 @@
 import 'package:multiplexor/cli/command_help.dart';
+import 'package:multiplexor/cli/local_command.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -62,6 +63,30 @@ void main() {
         contains(
           'copy <isolated-instance> --artifact <dropin.jar> '
           '[--artifact <dropin.jar> ...]',
+        ),
+      );
+    });
+
+    test('documents that instance reset has no options', () {
+      final List<String> lines = <String>[];
+      final int code = printCliHelpForArgs(
+        <String>['instance', '--help'],
+        write: lines.add,
+        error: lines.add,
+      );
+
+      expect(code, 0);
+      final String help = lines.join('\n');
+      expect(help, contains('instance reset <name>'));
+      expect(help, contains('there is no --yes option'));
+      expect(
+        () => LocalCommand.parse(<String>['instance', 'reset', 'qa', '--yes']),
+        throwsA(
+          isA<FormatException>().having(
+            (FormatException error) => error.message,
+            'message',
+            'Unknown option for instance reset: --yes',
+          ),
         ),
       );
     });

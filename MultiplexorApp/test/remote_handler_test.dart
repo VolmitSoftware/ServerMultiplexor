@@ -8,6 +8,20 @@ import 'package:multiplexor/services/pterodactyl/pterodactyl_transfer_models.dar
 import 'package:test/test.dart';
 
 void main() {
+  test('bad input reaches runCli so it can exit with code 2', () {
+    expect(
+      handleRemote(<String>[
+        'history',
+        'server',
+        '--profile',
+        'qa',
+        '--since',
+        '5x',
+      ]),
+      throwsFormatException,
+    );
+  });
+
   group('remote creation catalog output', () {
     test('exposes exact image and environment choices for headless create', () {
       final List<String> lines = pterodactylCreationCatalogLines(

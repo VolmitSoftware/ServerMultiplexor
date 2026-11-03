@@ -96,6 +96,57 @@ function Test-BuildRequired {
     return $false
 }
 
+# Antivirus scans and other installers hold these files briefly.
+function Invoke-FileOperation([scriptblock] $Operation) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            & $Operation
+            return
+        } catch {
+            if ($timer.Elapsed.TotalSeconds -ge 60) {
+                throw
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
+function Install-Multiplexor([string] $Candidate) {
+    $stateDirectory = Join-Path $PSScriptRoot '.multiplexor'
+    # Same lock as self_update_installer.dart, so only one installer swaps the binary at a time.
+    $lockPath = Join-Path $PSScriptRoot '.multiplexor.exe.update.lock'
+    $lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
+    try {
+        Invoke-FileOperation { $lock.Lock(0, [long]::MaxValue) }
+        # Windows can rename a running executable but cannot replace it.
+        $previous = $null
+        if (Test-Path -LiteralPath $executable) {
+            New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+            $previous = Join-Path $stateDirectory ('multiplexor.exe.replaced.' + [guid]::NewGuid().ToString('N'))
+            Invoke-FileOperation { Move-Item -LiteralPath $executable -Destination $previous }
+        }
+        try {
+            Invoke-FileOperation { Move-Item -LiteralPath $Candidate -Destination $executable }
+        } catch {
+            $installError = $_
+            if ($null -ne $previous) {
+                try {
+                    Invoke-FileOperation { Move-Item -LiteralPath $previous -Destination $executable }
+                } catch {
+                    throw "Install failed: $installError. Restore failed: $_. The previous executable is at $previous."
+                }
+            }
+            throw $installError
+        }
+        # A copy that is still running cannot be deleted, so a later build removes it.
+        Get-ChildItem -LiteralPath $stateDirectory -Filter 'multiplexor.exe.replaced.*' -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } finally {
+        $lock.Dispose()
+    }
+}
+
 function Build-Multiplexor {
     $dartCommand = Get-Command dart -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $dartCommand) {
@@ -114,12 +165,12 @@ function Build-Multiplexor {
         Invoke-SetupCommand $dartExecutable @('pub', 'get')
         Write-LauncherMessage 'Sources changed; compiling multiplexor'
         Invoke-SetupCommand $dartExecutable @('run', 'tool/build_exe.dart', '--output', $staging)
-        Move-Item -LiteralPath $staging -Destination $executable -Force
+        Install-Multiplexor $staging
         Write-LauncherMessage 'Build complete'
     } finally {
         Pop-Location
         if (Test-Path -LiteralPath $staging) {
-            Remove-Item -LiteralPath $staging -Force
+            Remove-Item -LiteralPath $staging -Force -ErrorAction SilentlyContinue
         }
     }
 }

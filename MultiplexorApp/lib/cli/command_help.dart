@@ -389,6 +389,15 @@ void writeCommandHelp(
     );
     write('');
   }
+  if (group.command == 'instance') {
+    write(
+      'instance reset takes only the instance name and does not ask for confirmation, so there is no --yes option. It refuses locked instances.',
+    );
+    write(
+      'It stops the instance and clears its worlds, plugins, mods, logs and config. It keeps the server jar, isolated status and lock.',
+    );
+    write('');
+  }
   if (group.command == 'storage') {
     write(
       'Keep downloads cached is off by default: project builds keep only logs, server builds keep the latest build of each platform plus the jars instances use, and a successful Remote Push removes its pre-Push backup.',
