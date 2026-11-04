@@ -74,13 +74,12 @@ void main() {
   }
 
   test('runtime preserves an available configured port', () async {
-    final ServerSocket socket = await ServerSocket.bind(
-      InternetAddress.anyIPv4,
-      0,
+    const int configured = 30000;
+    final int assigned = await IOOverrides.runWithIOOverrides(
+      () => preparePort(configured),
+      _PortBindOverrides(freePort: configured),
     );
-    final int configured = socket.port;
-    await socket.close();
-    expect(await preparePort(configured), configured);
+    expect(assigned, configured);
   });
 
   for (final InternetAddress address in <InternetAddress>[
@@ -126,15 +125,10 @@ void main() {
 
   for (final int errorCode in <int>[47, 49, 10047, 10049]) {
     test('runtime keeps IPv4 usable after IPv6 error $errorCode', () async {
-      final ServerSocket socket = await ServerSocket.bind(
-        InternetAddress.anyIPv4,
-        0,
-      );
-      final int configured = socket.port;
-      await socket.close();
+      const int configured = 30000;
       final int assigned = await IOOverrides.runWithIOOverrides(
         () => preparePort(configured),
-        _PortBindOverrides(ipv6ErrorCode: errorCode),
+        _PortBindOverrides(freePort: configured, ipv6ErrorCode: errorCode),
       );
       expect(assigned, configured);
     });
@@ -146,11 +140,13 @@ final class _PortBindOverrides extends IOOverrides {
     this.blockedPort,
     this.blockedErrorCode,
     this.ipv6ErrorCode,
+    this.freePort,
   });
 
   final int? blockedPort;
   final int? blockedErrorCode;
   final int? ipv6ErrorCode;
+  final int? freePort;
 
   @override
   Future<ServerSocket> serverSocketBind(
@@ -176,7 +172,7 @@ final class _PortBindOverrides extends IOOverrides {
     }
     return super.serverSocketBind(
       address,
-      port,
+      port == freePort ? 0 : port,
       backlog: backlog,
       v6Only: v6Only,
       shared: shared,

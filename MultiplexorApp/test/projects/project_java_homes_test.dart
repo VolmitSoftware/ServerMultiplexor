@@ -275,6 +275,28 @@ void main() {
     );
   });
 
+  test(
+    'replaces an unusable JAVA_HOME when the PATH has a usable Java',
+    () async {
+      String eight = home('eight', '1.8.0_442');
+      String twentyFive = home('twenty-five', '25.0.2');
+      for (String configured in <String>[
+        eight,
+        p.join(fixture.path, 'missing'),
+      ]) {
+        expect(
+          (await ProjectJavaHomes.capture(
+            discoveredHomes: <String>[twentyFive],
+            environment: <String, String>{'JAVA_HOME': configured},
+            pathJava: true,
+            windows: false,
+          )).gradleEnvironment['JAVA_HOME'],
+          twentyFive,
+        );
+      }
+    },
+  );
+
   test('reads the major version from java -version output', () {
     expect(
       projectJavaVersionMajor('openjdk version "1.8.0_512"\nOpenJDK Runtime'),

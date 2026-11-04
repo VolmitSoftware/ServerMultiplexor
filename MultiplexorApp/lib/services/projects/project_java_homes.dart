@@ -16,7 +16,8 @@ class ProjectJavaHomes {
   final String? _launcher;
 
   /// Variables for starting a Gradle wrapper. JAVA_HOME is only supplied when
-  /// neither JAVA_HOME nor the PATH provides a Java able to run Gradle.
+  /// the Java the wrapper would pick cannot run Gradle. The wrapper prefers
+  /// JAVA_HOME and only falls back to the PATH when JAVA_HOME is unset.
   Map<String, String> get gradleEnvironment => <String, String>{
     ...environment,
     if (_launcher != null) 'JAVA_HOME': _launcher,
@@ -112,6 +113,9 @@ class ProjectJavaHomes {
       if (home?.major == major) selected[major] = home!;
     }
     List<int> majors = selected.keys.toList()..sort();
+    bool launcherUsable = currentPath == null || currentPath.isEmpty
+        ? pathJava
+        : current != null && current.major >= _gradleMinimumJava;
     return ProjectJavaHomes._(
       Map<String, String>.unmodifiable(<String, String>{
         for (int major in majors) 'JAVA_HOME_$major': selected[major]!.path,
@@ -129,10 +133,7 @@ class ProjectJavaHomes {
           for (String key in overrideKeys) key: environment[key]!,
         },
       }),
-      (current != null && current.major >= _gradleMinimumJava) ||
-              pathJava ||
-              majors.isEmpty ||
-              majors.last < _gradleMinimumJava
+      launcherUsable || majors.isEmpty || majors.last < _gradleMinimumJava
           ? null
           : selected[majors.last]!.path,
     );
