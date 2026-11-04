@@ -350,6 +350,16 @@ Future<void> _extractZip(File archive, File candidate, String name) async {
         'Update zip must contain one regular executable.',
       );
     }
+    final List<int> expectedName = utf8.encode(name);
+    await file.setPosition(0);
+    final Uint8List local = await file.read(30 + expectedName.length);
+    final ByteData localData = ByteData.sublistView(local);
+    if (local.length != 30 + expectedName.length ||
+        localData.getUint32(0, Endian.little) != 0x04034b50 ||
+        localData.getUint16(26, Endian.little) != expectedName.length ||
+        utf8.decode(local.sublist(30), allowMalformed: true) != name) {
+      throw const FormatException('Invalid executable in update zip.');
+    }
   } finally {
     await file.close();
   }
@@ -373,8 +383,7 @@ Future<void> _extractZip(File archive, File candidate, String name) async {
     }
     input.setPosition(header.localHeaderOffset);
     final ZipFile entry = ZipFile(header)..read(input);
-    if (entry.filename != name ||
-        (entry.flags & 1) != 0 ||
+    if ((entry.flags & 1) != 0 ||
         header.uncompressedSize != entry.uncompressedSize ||
         header.compressedSize != entry.compressedSize ||
         header.crc32 != entry.crc32 ||
