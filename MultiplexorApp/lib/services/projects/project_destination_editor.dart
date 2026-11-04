@@ -238,6 +238,17 @@ class ProjectDestinationEditor {
     }
   }
 
+  void _startNew() {
+    if (_selected >= 0) {
+      _switchTo(-1);
+    } else if (_dirty) {
+      _pending = _DestinationPending.select;
+      _pendingSelection = -1;
+    } else {
+      _beginEdit(_DestinationField.name);
+    }
+  }
+
   void _back() {
     if (_dirty) {
       _pending = _DestinationPending.back;
@@ -375,7 +386,7 @@ class ProjectDestinationEditor {
       case 'back':
         _back();
       case 'new':
-        _switchTo(-1);
+        _startNew();
       case 'save':
         _save();
       case 'browse':

@@ -63,6 +63,7 @@ class ProjectWorker {
       _save();
       heartbeat = Timer.periodic(const Duration(seconds: 2), (_) => _save());
       await _cleanStorage(store.emptyTrash);
+      _javaHomes = await ProjectJavaHomes.discover();
       await _capture();
       await _inspectTools();
       cache = ProjectGradleCache(
@@ -289,6 +290,7 @@ class ProjectWorker {
           ).resolveSymbolicLinksSync(): _sourceHashes[id]!,
       },
       cancelled: () => cancelled,
+      javaEnvironment: _javaHomes.gradleEnvironment,
     );
     if (declared.id != source.id) {
       throw StateError(
@@ -374,24 +376,6 @@ class ProjectWorker {
       }
     }
     _toolchain['platform'] = '${Platform.operatingSystem}/${Platform.version}';
-    List<String> javaPaths = <String>[];
-    if (Platform.isMacOS) {
-      ProcessResult result = await Process.run(
-        '/usr/libexec/java_home',
-        <String>['-V'],
-      );
-      javaPaths.addAll(projectMacJavaHomes('${result.stdout}${result.stderr}'));
-    } else if (Platform.isLinux && Directory('/usr/lib/jvm').existsSync()) {
-      for (FileSystemEntity entry in Directory('/usr/lib/jvm').listSync()) {
-        if (Directory(entry.path).existsSync()) {
-          javaPaths.add(entry.path);
-        }
-      }
-    }
-    _javaHomes = await ProjectJavaHomes.capture(
-      discoveredHomes: javaPaths,
-      environment: Platform.environment,
-    );
     _toolchain['javaInstallations'] = _javaHomes.fingerprint;
     List<String> environmentKeys =
         Platform.environment.keys
@@ -638,6 +622,7 @@ class ProjectWorker {
         '--init-script',
         budgetInit.path,
         ...localSourceArguments(sandbox.path),
+        ..._javaHomes.gradleArguments,
         '-PmultiplexorSandbox=true',
       ];
       for (MapEntry<String, String> property
@@ -671,7 +656,7 @@ class ProjectWorker {
         log: log,
         cancelled: () => cancelled,
         environment: <String, String>{
-          ..._javaHomes.environment,
+          ..._javaHomes.gradleEnvironment,
           'MULTIPLEXOR_TEST_FORKS': '$workers',
           'MULTIPLEXOR_TASK_CACHE': cache.taskCache.path,
           'MULTIPLEXOR_SOURCE_HASHES': jsonEncode(<String, String>{

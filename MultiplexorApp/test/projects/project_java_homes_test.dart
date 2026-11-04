@@ -252,6 +252,100 @@ void main() {
     skip: !Platform.isMacOS,
   );
 
+  test('launches Gradle on the newest JDK when no Java is usable', () async {
+    home('seventeen', '17.0.15+6');
+    String twentyFive = home('twenty-five', '25.0.2');
+    ProjectJavaHomes selected = await capture(<String>[
+      p.join(fixture.path, 'seventeen'),
+      twentyFive,
+    ]);
+    expect(selected.gradleEnvironment['JAVA_HOME'], twentyFive);
+    expect(selected.gradleEnvironment['JAVA_HOME_25'], twentyFive);
+  });
+
+  test('replaces a configured launcher too old to run Gradle', () async {
+    String eight = home('eight', '1.8.0_442');
+    String twentyFive = home('twenty-five', '25.0.2');
+    expect(
+      (await capture(
+        <String>[twentyFive],
+        environment: <String, String>{'JAVA_HOME': eight},
+      )).gradleEnvironment['JAVA_HOME'],
+      twentyFive,
+    );
+  });
+
+  test('reads the major version from java -version output', () {
+    expect(
+      projectJavaVersionMajor('openjdk version "1.8.0_512"\nOpenJDK Runtime'),
+      8,
+    );
+    expect(projectJavaVersionMajor('openjdk version "25.0.5" 2026-10-21'), 25);
+    expect(projectJavaVersionMajor('java version "26-ea"'), 26);
+    expect(projectJavaVersionMajor('Unable to locate a Java Runtime.'), isNull);
+  });
+
+  test('tells Gradle which variables hold toolchains', () async {
+    home('seventeen', '17.0.15+6');
+    home('twenty-five', '25.0.2');
+    ProjectJavaHomes selected = await capture(<String>[
+      p.join(fixture.path, 'seventeen'),
+      p.join(fixture.path, 'twenty-five'),
+    ]);
+    expect(selected.gradleArguments, <String>[
+      '-Porg.gradle.java.installations.fromEnv=JAVA_HOME_17,JAVA_HOME_25',
+    ]);
+    expect((await capture(<String>[])).gradleArguments, isEmpty);
+  });
+
+  test('keeps the configured launcher Java', () async {
+    String twentyFive = home('twenty-five', '25.0.2');
+    String seventeen = home('seventeen', '17.0.15+6');
+    expect(
+      (await capture(
+        <String>[twentyFive],
+        environment: <String, String>{'JAVA_HOME': seventeen},
+      )).gradleEnvironment.containsKey('JAVA_HOME'),
+      isFalse,
+    );
+    expect(
+      (await ProjectJavaHomes.capture(
+        discoveredHomes: <String>[twentyFive],
+        environment: const <String, String>{},
+        pathJava: true,
+        windows: false,
+      )).gradleEnvironment.containsKey('JAVA_HOME'),
+      isFalse,
+    );
+  });
+
+  test('finds keg-only Homebrew JDKs', () {
+    String jdk(String prefix, String name) {
+      String path = p.join(
+        fixture.path,
+        prefix,
+        name,
+        'libexec',
+        'openjdk.jdk',
+        'Contents',
+        'Home',
+      );
+      Directory(path).createSync(recursive: true);
+      return path;
+    }
+
+    String versioned = jdk('opt', 'openjdk@25');
+    String latest = jdk('opt', 'openjdk');
+    jdk('opt', 'unrelated');
+    expect(
+      projectHomebrewJavaHomes(<String>[
+        p.join(fixture.path, 'opt'),
+        p.join(fixture.path, 'missing'),
+      ]),
+      unorderedEquals(<String>[versioned, latest]),
+    );
+  });
+
   test('reads macOS inventory paths without losing spaces', () {
     expect(
       projectMacJavaHomes('''Matching Java Virtual Machines (2):
