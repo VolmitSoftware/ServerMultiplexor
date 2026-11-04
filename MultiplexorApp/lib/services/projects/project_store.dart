@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'project_files.dart';
+import 'project_java_homes.dart';
 import 'project_model.dart';
 import 'project_process.dart';
 import '../../utils/async_work_pool.dart';
@@ -254,6 +255,8 @@ class ProjectStore {
           Directory(p.join(sourceRoot, source)).resolveSymbolicLinksSync():
               sourceHashes[source]!,
       };
+      Map<String, String> javaEnvironment =
+          (await ProjectJavaHomes.discover()).gradleEnvironment;
       for (String candidate in candidates) {
         report('Reading $candidate targets');
         discovered.add(
@@ -269,6 +272,7 @@ class ProjectStore {
               ),
             ),
             sourceHashes: copiedHashes,
+            javaEnvironment: javaEnvironment,
           ),
         );
       }
@@ -347,6 +351,7 @@ Future<BuildProject> readProjectDeclaration({
   required File init,
   required File log,
   required Map<String, String> sourceHashes,
+  required Map<String, String> javaEnvironment,
   bool Function()? cancelled,
 }) async {
   String directory = p.join(sources, relativePath);
@@ -370,6 +375,7 @@ Future<BuildProject> readProjectDeclaration({
     log: log,
     cancelled: cancelled,
     environment: <String, String>{
+      ...javaEnvironment,
       'MULTIPLEXOR_SOURCE_HASHES': jsonEncode(sourceHashes),
     },
     timeout: const Duration(minutes: 15),

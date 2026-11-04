@@ -6,15 +6,75 @@ import 'package:path/path.dart' as p;
 
 import 'project_files.dart';
 
+const int _gradleMinimumJava = 17;
+
 class ProjectJavaHomes {
-  ProjectJavaHomes._(this.environment, this.fingerprint);
+  ProjectJavaHomes._(this.environment, this.fingerprint, this._launcher);
 
   final Map<String, String> environment;
   final String fingerprint;
+  final String? _launcher;
+
+  /// Variables for starting a Gradle wrapper. JAVA_HOME is only supplied when
+  /// neither JAVA_HOME nor the PATH provides a Java able to run Gradle.
+  Map<String, String> get gradleEnvironment => <String, String>{
+    ...environment,
+    if (_launcher != null) 'JAVA_HOME': _launcher,
+  };
+
+  /// Gradle ignores JAVA_HOME_* variables unless they are named explicitly.
+  List<String> get gradleArguments => environment.isEmpty
+      ? const <String>[]
+      : <String>[
+          '-Porg.gradle.java.installations.fromEnv=${environment.keys.join(',')}',
+        ];
+
+  static Future<ProjectJavaHomes> discover() async {
+    List<String> paths = <String>[];
+    if (Platform.isMacOS) {
+      ProcessResult result = await Process.run(
+        '/usr/libexec/java_home',
+        <String>['-V'],
+      );
+      paths.addAll(projectMacJavaHomes('${result.stdout}${result.stderr}'));
+      paths.addAll(
+        projectHomebrewJavaHomes(const <String>[
+          '/opt/homebrew/opt',
+          '/usr/local/opt',
+        ]),
+      );
+    } else if (Platform.isLinux && Directory('/usr/lib/jvm').existsSync()) {
+      for (FileSystemEntity entry in Directory('/usr/lib/jvm').listSync()) {
+        if (Directory(entry.path).existsSync()) paths.add(entry.path);
+      }
+    }
+    return capture(
+      discoveredHomes: paths,
+      environment: Platform.environment,
+      pathJava: await _pathJavaWorks(),
+    );
+  }
+
+  static Future<bool> _pathJavaWorks() async {
+    try {
+      ProcessResult result = await Process.run('java', <String>[
+        '-version',
+      ]).timeout(const Duration(seconds: 15));
+      int? major = projectJavaVersionMajor('${result.stderr}${result.stdout}');
+      return result.exitCode == 0 &&
+          major != null &&
+          major >= _gradleMinimumJava;
+    } on ProcessException {
+      return false;
+    } on TimeoutException {
+      return false;
+    }
+  }
 
   static Future<ProjectJavaHomes> capture({
     required Iterable<String> discoveredHomes,
     required Map<String, String> environment,
+    bool pathJava = false,
     bool? windows,
   }) async {
     bool useWindows = windows ?? Platform.isWindows;
@@ -30,13 +90,10 @@ class ProjectJavaHomes {
       selected.putIfAbsent(home.major, () => home);
     }
     String? currentPath = environment['JAVA_HOME'];
-    if (currentPath != null) {
-      _JavaHome? current = await _JavaHome.read(
-        currentPath,
-        windows: useWindows,
-      );
-      if (current != null) selected[current.major] = current;
-    }
+    _JavaHome? current = currentPath == null
+        ? null
+        : await _JavaHome.read(currentPath, windows: useWindows);
+    if (current != null) selected[current.major] = current;
     List<String> overrideKeys =
         environment.keys
             .where((String key) => key.startsWith('JAVA_HOME_'))
@@ -72,6 +129,12 @@ class ProjectJavaHomes {
           for (String key in overrideKeys) key: environment[key]!,
         },
       }),
+      (current != null && current.major >= _gradleMinimumJava) ||
+              pathJava ||
+              majors.isEmpty ||
+              majors.last < _gradleMinimumJava
+          ? null
+          : selected[majors.last]!.path,
     );
   }
 }
@@ -83,6 +146,23 @@ List<String> projectMacJavaHomes(String listing) => <String>[
         ).firstMatch(line)
         case RegExpMatch match)
       match.group(1)!,
+];
+
+int? projectJavaVersionMajor(String output) {
+  RegExpMatch? match = RegExp(
+    r'version "(?:1\.([0-9]+)|([0-9]+))',
+  ).firstMatch(output);
+  return match == null ? null : int.parse(match.group(1) ?? match.group(2)!);
+}
+
+List<String> projectHomebrewJavaHomes(Iterable<String> roots) => <String>[
+  for (String root in roots)
+    if (Directory(root).existsSync())
+      for (Directory entry in Directory(root).listSync().whereType<Directory>())
+        if (RegExp(r'^openjdk(@\d+)?$').hasMatch(p.basename(entry.path)))
+          if (p.join(entry.path, 'libexec', 'openjdk.jdk', 'Contents', 'Home')
+              case String home when Directory(home).existsSync())
+            home,
 ];
 
 class _JavaHome {

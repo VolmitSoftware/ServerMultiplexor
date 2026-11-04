@@ -24,6 +24,33 @@ void main() {
     expect(outcome.terminal.restores, 2);
   });
 
+  test('New on a blank form starts editing the name', () async {
+    _Outcome outcome = await _run(
+      <TermEvent>[
+        _char('a'),
+        ..._text('release'),
+        _enter,
+        const TermEvent(TermEventKind.ctrlC),
+      ],
+      destinations: const <Map<String, Object?>>[],
+    );
+    expect(outcome.terminal.output, contains('release'));
+  });
+
+  test('New on an unsaved new form offers to discard it', () async {
+    _Outcome outcome = await _run(
+      <TermEvent>[
+        ..._edit('draft'),
+        _char('a'),
+        _char('y'),
+        const TermEvent(TermEventKind.ctrlC),
+      ],
+      destinations: const <Map<String, Object?>>[],
+    );
+    expect(outcome.terminal.output, contains('Discard unsaved changes'));
+    expect(outcome.terminal.frames.last, isNot(contains('draft')));
+  });
+
   test('cancelling the native folder picker retains the path', () async {
     _Outcome outcome = await _run(<TermEvent>[
       _char('f'),
