@@ -10,7 +10,6 @@ function layers() {
     data: () => ({ version: { minecraftVersion: '26.1', version: 775 }, protocol: states, blocks: [], items: [], entities: [] }),
     mineflayer: { testedVersions: ['26.1'] },
     protocol: { createSerializer: () => ({ destroy() {} }), createDeserializer: () => ({ destroy() {} }) },
-    packets: () => undefined,
     packages: { mineflayer: 'fixture', 'minecraft-data': 'fixture', 'minecraft-protocol': 'fixture' }
   }
 }
@@ -72,12 +71,9 @@ test('dependency and lookup failures retain structured target evidence', async (
   delete missing.protocol
   const brokenData = layers()
   brokenData.data = () => { throw new Error('Corrupt data mapping') }
-  const brokenPackets = layers()
-  brokenPackets.packets = () => { throw new Error('Cannot load protocol override') }
   for (const [dependencies, expected] of [
     [missing, /dependency loading: .*dependency API is unavailable/],
-    [brokenData, /minecraft-data lookup: Corrupt data mapping/],
-    [brokenPackets, /protocol override loading: Cannot load protocol override/]
+    [brokenData, /minecraft-data lookup: Corrupt data mapping/]
   ]) {
     const result = await protocolCapability('26.1', dependencies)
     assert.equal(result.status, 'unsupported')

@@ -15,7 +15,7 @@
   "dependencies": {
     "compression": "1.8.1",
     "express": "4.22.2",
-    "mineflayer": "https://github.com/PrismarineJS/mineflayer/archive/f603758e4228a7e61d1337526e6066e79308b976.tar.gz",
+    "mineflayer": "https://github.com/PrismarineJS/mineflayer/archive/5a252e6d258882b042e60e21c37d552cdf3b3380.tar.gz",
     "mineflayer-pathfinder": "2.4.5",
     "prismarine-viewer": "1.33.0",
     "socket.io": "4.8.3",

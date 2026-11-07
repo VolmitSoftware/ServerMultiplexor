@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const supportedVersion = '4.38.0'
+const supportedVersion = '4.39.0'
 const anchor = "  bot._client.on('set_player_inventory', (packet) => {"
 const handler = `  bot._client.on('set_cursor_item', (packet) => {
     const item = Item.fromNotch(packet.contents)

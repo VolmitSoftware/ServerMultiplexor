@@ -6,7 +6,6 @@ import { loadScenario } from './scenario_loader.mjs'
 import { startWebFeed, stopWebFeed } from './web_feed.mjs'
 import { createActorManager } from './scenario_actors.mjs'
 import { hashFile, installedPlugins } from './scenario_builds.mjs'
-import { particleProtocol } from './particle_protocol.mjs'
 
 export async function runScenario(configuration) {
   const mineflayerModule = await import('mineflayer')
@@ -51,7 +50,7 @@ export async function runScenario(configuration) {
   const actors = createActorManager({
     configuration, report, signal: abort.signal, fail: (error) => abort.abort(error),
     runtime: {
-      createBot: (options) => mineflayer.createBot({ ...options, customPackets: particleProtocol(options.version) }),
+      createBot: (options) => mineflayer.createBot(options),
       install: (actor) => actor.loadPlugin(pathfinder),
       configure: (actor) => {
         const movements = new Movements(actor)

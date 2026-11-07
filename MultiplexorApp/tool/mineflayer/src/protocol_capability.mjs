@@ -25,11 +25,10 @@ export async function protocolCapability(version, dependencies) {
       data: require('minecraft-data'),
       mineflayer: require('mineflayer'),
       protocol: require('minecraft-protocol'),
-      packets: (await import('./particle_protocol.mjs')).particleProtocol,
       packages: Object.fromEntries(['mineflayer', 'minecraft-data', 'minecraft-protocol'].map(name => [name, require(`${name}/package.json`).version]))
     }
     result.packages = layers.packages ?? {}
-    if (typeof layers.data !== 'function' || typeof layers.packets !== 'function'
+    if (typeof layers.data !== 'function'
       || !Array.isArray(layers.mineflayer?.testedVersions)
       || typeof layers.protocol?.createSerializer !== 'function' || typeof layers.protocol?.createDeserializer !== 'function') {
       throw new Error('Minecraft data, Mineflayer or protocol dependency API is unavailable')
@@ -40,10 +39,8 @@ export async function protocolCapability(version, dependencies) {
       result.errors.push(`minecraft-data has no usable data for ${version}`)
       return result
     }
-    phase = 'protocol override loading'
-    const customPackets = layers.packets(version)
     phase = 'protocol capability inspection'
-    return inspectCapability(result, data, layers, customPackets)
+    return inspectCapability(result, data, layers)
   } catch (error) {
     result.dependencyFailure = true
     result.errors.push(`${phase}: ${error.message}`)
@@ -51,7 +48,7 @@ export async function protocolCapability(version, dependencies) {
   }
 }
 
-function inspectCapability(result, data, layers, customPackets) {
+function inspectCapability(result, data, layers) {
   result.dataAvailable = Boolean(data.protocol && data.blocks && data.items && data.entities)
   result.resolvedVersion = data.version.minecraftVersion
   result.protocolVersion = data.version.version
@@ -64,7 +61,7 @@ function inspectCapability(result, data, layers, customPackets) {
     for (const direction of ['toServer', 'toClient']) {
       try {
         if (!data.protocol?.[state]?.[direction]) throw new Error('Protocol state or direction is missing')
-        const options = { state, version: result.requestedVersion, isServer: false, customPackets }
+        const options = { state, version: result.requestedVersion, isServer: false }
         const codec = direction === 'toServer' ? layers.protocol.createSerializer(options) : layers.protocol.createDeserializer(options)
         codec.destroy()
         result.codecs.push({ state, direction, status: 'passed' })

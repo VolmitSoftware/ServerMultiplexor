@@ -113,3 +113,6 @@ multiplexor.exe.building.*
 
 # Local Mineflayer probe scripts
 /MultiplexorApp/tool/mineflayer/*.cjs
+
+# Local server backups
+backups/

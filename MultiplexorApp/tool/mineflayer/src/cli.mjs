@@ -146,7 +146,7 @@ async function doctor(json, version) {
     const supportsRequiredVersion = mineflayer.testedVersions.includes('26.1')
     checks.push({
       name: 'mineflayer',
-      status: packageMetadata.version === '4.38.0' && supportsRequiredVersion ? 'PASS' : 'FAIL',
+      status: packageMetadata.version === '4.39.0' && supportsRequiredVersion ? 'PASS' : 'FAIL',
       detail: `${packageMetadata.version}; ${mineflayer.testedVersions.length} tested versions; latest ${mineflayer.latestSupportedVersion}`
     })
   } catch (error) {
